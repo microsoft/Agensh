@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 # test_role_fragments.sh — the 1team prompt contract.
 #
-# Two things are asserted here: that every role defines all six fragments itself,
-# and that the prompts stay task-agnostic (EdgeBench prompts: how the benchmark
-# works, what each role does, how to use the tools — never what the task is).
+# Two things are asserted here: that every fragment the prompt splices is defined
+# per role (and that nothing dead sits alongside them), and that the prompts still
+# spell out the CI contract, which is the only place in the whole system that
+# contract is stated.
 #
 # WHY (fragments)
-# entrypoint.sh:150-155 reads six fragments per role unconditionally:
-#   name, one_liner, dos, donts, workflow, failure_modes
+# entrypoint.sh reads the fragments the base template splices, per role:
+#   base.md references ${ROLE_NAME} and ${ROLE_ONE_LINER}
 # Dockerfile.pertask:107-108 copies templates-claude/ and THEN overlays
 # templates-claude-1team/ onto the same path, so any fragment the 1team dir
 # does not define silently inherits the base copy.
@@ -112,8 +113,11 @@ tr -s "[:space:]" " " < "$TMPL/director_lead/one_liner.md" | grep -qiE "assign|h
     && ok "lead role is built around keeping workers assigned" \
     || fail "lead role no longer describes assigning work"
 # whitespace-normalised: these phrases wrap across a line break, and a plain grep
-# cannot match across newlines.
-SELFMERGE="merges? it (him|her|them)self|merges? (your|their|its) own branch|merge it into .main. yourself|self-merge"
+# cannot match across newlines. The worker is told to self-merge in base.md's role
+# list ("merge it yourself when CI is green") and again in its own fragment, which
+# phrases it as the end of the CI wait ("merge as soon as it is green") -- so the
+# pattern has to cover both the imperative and the CI-conditioned form.
+SELFMERGE="merges? it (him|her|them|your)self|merges? (your|their|its) own branch|merge it into .main. yourself|self-merge|merge as soon as it is green|merge it yourself when CI is green"
 tr -s "[:space:]" " " < "$TMPL/base.md" | grep -qiE "$SELFMERGE" \
     && ok "base.md says a worker merges its own PR" \
     || fail "base.md no longer says a worker merges its own PR"
@@ -142,20 +146,37 @@ if grep -rqi "review" "$TMPL"/*.md "$TMPL"/*/*.md 2>/dev/null; then
 else
     ok "no 1team fragment mentions review at all"
 fi
-# The prompts must stay TASK-AGNOSTIC. They describe how the benchmark works, what each
-# role does and how to use the tools -- never what the task is. The task arrives through
-# ${PBENCH_BRIEF} (pbench-brief.md) and issue #1, so a role fragment that names a language,
-# a build step or a fixed layout quietly narrows every task to the one it was written for.
-# The 6.11 fragments hard-coded the ProgramBench shape (`/opt/pbench/executable`, a root
-# `compile.sh`, `tests/cases/`, `src/ci-list.txt`); those are gone and must not come back.
-# NOTE the scope: this checks base.md and the role fragments ONLY. pbench-brief.md is the
-# task statement and is SUPPOSED to be ProgramBench-specific -- see the brief-gate block
-# further down, which asserts it actually reaches the prompt.
-CODING_SPECIFIC='/opt/pbench/executable|compile\.sh|tests/cases|src/ci-list\.txt|\./executable|reference (binary|program)|decompile'
-hits=$(grep -rlEi "$CODING_SPECIFIC" "$TMPL"/*.md "$TMPL"/*/*.md 2>/dev/null | tr '\n' ' ')
-[ -z "$hits" ] \
-    && ok "no 1team role fragment hard-codes a coding-specific task shape" \
-    || fail "coding-specific task detail leaked back into the role prompts: $hits"
+# The prompts are deliberately TASK-SPECIFIC, and this is the assertion that was
+# briefly inverted. A pass that cut the fragments down to "how the benchmark works /
+# what each role does / how to use the tools" stripped out the CI contract, and
+# nothing else in the system states it: bootstrap seeds src/ci-list.txt and the
+# workflow reads the suite from origin/tests, but the gate FAILS OPEN --
+#   "no tests branch yet -- the lead has not published a suite; passing"
+#   "tests branch carries no tests/run.sh yet; passing"
+# so a lead never told to publish a suite leaves every PR passing unconditionally
+# and the delta gate inert. The run still scores; it just measures nothing.
+#
+# So assert the mechanism is SPELLED OUT. Each of these appears in exactly one
+# place -- the role prompts -- and each is load-bearing on the grading path.
+LEAD="$TMPL/director_lead/one_liner.md"
+CODER="$TMPL/coder/one_liner.md"
+for spec in \
+    "$LEAD:tests branch:tests. branch" \
+    "$LEAD:tests/run.sh:tests/run\.sh" \
+    "$LEAD:the cases dir:tests/cases" \
+    "$CODER:the CI check:CI" \
+    "$CODER:src/ci-list.txt:ci-list\.txt" \
+    ; do
+    f="${spec%%:*}"; rest="${spec#*:}"; what="${rest%%:*}"; pat="${rest#*:}"
+    tr -s "[:space:]" " " < "$f" | grep -qiE "$pat" \
+        && ok "$(basename "$(dirname "$f")") prompt states $what" \
+        || fail "$(basename "$(dirname "$f")") prompt no longer states $what — the CI gate fails open and grades nothing"
+done
+# The reference binary is the only information source; if the prompt stops naming
+# it, agents have to discover the mount by accident.
+grep -rqF '/opt/pbench/executable' "$TMPL"/*.md "$TMPL"/*/*.md \
+    && ok "prompts point at the reference binary" \
+    || fail "no prompt names /opt/pbench/executable"
 
 # base.board.md is GENERATED from base.md by scripts/gen_board_base.sh and mounted by the
 # -1team-board profile. If it drifts, the board arm silently runs the old topology.
