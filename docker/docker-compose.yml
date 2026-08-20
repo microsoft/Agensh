@@ -1,0 +1,2031 @@
+# omcgitea — Hermes ↔ Gitea two-way bridge.
+#
+# Single-command bring-up:
+#     make up                      # PROFILE=dev (default)
+#     make up PROFILE=prod         # production profile
+#
+# profile isolation (DESIGN §5.A): the Makefile passes
+# `--project-name omcgitea-$(PROFILE)` and `--env-file .env.$(PROFILE)`,
+# so containers/networks/volumes are namespaced by profile and never
+# collide. Data is bind-mounted under ../.claude-team-data/${PROFILE}/.
+#
+# Adding a new agent:
+#     ./scripts/add-agent.sh agent3
+#     make up
+# (the script appends a service block below the marker at the bottom)
+
+# `name:` here is overridden by `--project-name` from the Makefile; we keep
+# a sane default so plain `docker compose ...` invocations still work.
+name: omcgitea
+
+# ---------------------------------------------------------------------------
+# Anchors: shared fields for every hermes-agent service. Agent-specific
+# fields (AGENT_NAME, token file paths, volume subdir, network alias) are
+# overridden per-service.
+# ---------------------------------------------------------------------------
+x-hermes-agent: &hermes-agent-base
+  image: "${HERMES_AGENT_IMAGE:-omcgitea-hermes-agent:local}"
+  restart: unless-stopped
+  extra_hosts:
+    - "host.docker.internal:host-gateway"
+
+x-hermes-env: &hermes-env-base
+  GITEA_HOST: "http://gitea:3000"
+  ANTHROPIC_BASE_URL: "${ANTHROPIC_BASE_URL:-http://host.docker.internal:4141}"
+  ANTHROPIC_MODEL: "${ANTHROPIC_MODEL:-claude-opus-4.7}"
+  ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-local-proxy-no-auth}"
+  HERMES_UID: "10000"
+  # R-cache-bug: AGENT_KIND selects the agent implementation at boot.
+  #   "claude" (default) — @agentclientprotocol/claude-agent-acp
+  #   "copilot" (opt-in) — official Copilot CLI native ACP server
+  #   "hermes" (dormant) — original Nous Research Hermes Agent
+  # See entrypoint.sh and CLAUDE.md "Agent selection" for the decision context.
+  AGENT_KIND: "${AGENT_KIND:-claude}"
+  COPILOT_PROVIDER_TYPE: "${COPILOT_PROVIDER_TYPE:-openai}"
+  # R-cache-bug: progressive MCP tool disclosure (Anthropic ToolSearch).
+  # Defers MCP tool schemas until the agent calls ToolSearch — saves ~38k
+  # token startup context on a fresh session, with negligible per-turn cost.
+  # Requires backend to forward `tool_reference` blocks (the Anthropic proxy
+  # must support them). Set to "false" to disable if proxy stops forwarding.
+  ENABLE_TOOL_SEARCH: "${ENABLE_TOOL_SEARCH:-true}"
+  # R-cache-bug: disable claude SDK billing-header (cch=<random hash> in
+  # system block[0]). The header changes every request → system prefix
+  # bytes drift → defeats Anthropic prompt-cache prefix matching for the
+  # leading block. Setting this to "false" removes the block entirely.
+  CLAUDE_CODE_ATTRIBUTION_HEADER: "${CLAUDE_CODE_ATTRIBUTION_HEADER:-0}"
+  # R-cache-ttl: opt into Anthropic's 1h prompt-cache TTL (vs 5m default).
+  # Implemented inside the Claude Agent SDK bun binary (see UKH() gate in
+  # claude-agent-sdk-linux-x64/claude). When set, the SDK:
+  #   1. stamps cache_control as {type:"ephemeral", ttl:"1h"} on all 4
+  #      breakpoints (verified via local probe 2026-05-16 on agent-2 in dev)
+  #   2. appends `anthropic-beta: extended-cache-ttl-2025-04-11`
+  # The SDK owns cache-key computation, so cache placement remains
+  # consistent — we do NOT rewrite the request in the proxy.
+  # AGENT_KIND=hermes path: this var is ignored (hermes doesn't read it).
+  # Caveat: SDK also gates on Rq() (subscription/route check) and on
+  # CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS — keep the latter unset.
+  ENABLE_PROMPT_CACHING_1H: "${ENABLE_PROMPT_CACHING_1H:-1}"
+  # R5 / TEAMCONFIG: AGENTS.md is static; agents query role/teammates via
+  # /api/v1/orgs/omcgitea/teams/* at runtime. No roles.env needed.
+  GITEA_ORG: "${GITEA_ORG:-omcgitea}"
+  # R8: mattermost env so entrypoint can render MATTERMOST_URL/TOKEN into
+  # the rendered MCP config (config.yaml for hermes / .mcp.json for claude).
+  # Token itself comes from /run/omcgitea/tokens/agent-<name>-mm.token
+  # (bind-mounted), not env.
+  MATTERMOST_HOST: "${MATTERMOST_HOST:-}"
+
+# R7 SIDECAR: per-agent mini-router base. Each instance overrides
+# AGENT_NAME and the ACP socket bind-mount path.
+x-mini-router: &mini-router-base
+  image: "${MINI_ROUTER_IMAGE:-omcgitea-mini-router:local}"
+  restart: unless-stopped
+  extra_hosts:
+    - "host.docker.internal:host-gateway"
+
+x-mini-router-env: &mini-router-env-base
+  GITEA_HOST: "http://gitea:3000"
+  MYSQL_DSN: "mysql://omcgitea:${MYSQL_PASSWORD}@mysql:3306/omcgitea"
+  SECRET_SERVICE_URL: "http://secret-service:8650"
+  SECRET_SERVICE_INTERNAL_AUTH: "${SECRET_SERVICE_INTERNAL_AUTH}"
+  ACP_SOCKET_PATH: "/var/run/acp/agent.sock"
+  # Keep ACP sessions isolated when the same agent switches runtime kind.
+  ACP_SESSION_NAMESPACE: "${AGENT_KIND:-claude}"
+  METRICS_PORT: "8645"
+  # R8: mattermost listener — leave empty to disable.
+  MATTERMOST_HOST: "${MATTERMOST_HOST:-}"
+  # R-stuck: ACP silence force-close threshold (ms). 0 = disabled.
+  MINI_ROUTER_STUCK_MS: "${MINI_ROUTER_STUCK_MS:-0}"
+  # DeLM shared context. Empty by default → BoardClient.enabled is false in
+  # the router and dispatch is byte-for-byte the pre-board behavior. The
+  # board-running profiles set these in .env.<profile>, which is what turns
+  # forced read (board spliced into every prompt) + forced write (nudge on a
+  # turn that published nothing) on. Per-agent BOARD_IDS overrides for the
+  # hierarchical topology are applied in the compose overlays.
+  BOARD_SERVICE_URL: "${BOARD_SERVICE_URL:-}"
+  BOARD_IDS: "${BOARD_IDS:-}"
+  BOARD_WINDOW_TOKENS: "${BOARD_WINDOW_TOKENS:-}"
+  BOARD_MODE: "${BOARD_MODE:-batch}"
+  BOARD_RENDER_MODE: "${BOARD_RENDER_MODE:-}"
+  BOARD_ROLE: "${BOARD_ROLE:-}"
+  STEP_LOOP_NO_PROGRESS_LIMIT: "${STEP_LOOP_NO_PROGRESS_LIMIT:-}"
+  STEP_LOOP_STRATEGY_PRIOR: "${STEP_LOOP_STRATEGY_PRIOR:-}"
+  STEP_LOOP_MAX_STEPS: "${STEP_LOOP_MAX_STEPS:-}"
+  STEP_LOOP_HOURS: "${STEP_LOOP_HOURS:-}"
+  STEP_LOOP_TASK: "${STEP_LOOP_TASK:-}"
+
+services:
+  gitea:
+    image: docker.gitea.com/gitea:1.22.6
+    restart: unless-stopped
+    environment:
+      USER_UID: "1000"
+      USER_GID: "1000"
+      # B10 fix: ROOT_URL/DOMAIN must be the public-facing URL so issue/PR
+      # html_urls returned by the API don't leak internal docker hostnames
+      # to agents/users. Container-internal callers (router, MCP) keep
+      # using http://gitea:3000 directly — only generated links care.
+      GITEA__server__ROOT_URL: "http://gitea.${EDGE_DOMAIN:-localhost}:${EDGE_HTTP_PORT:-28080}/"
+      GITEA__server__DOMAIN: "gitea.${EDGE_DOMAIN:-localhost}"
+      GITEA__server__HTTP_PORT: "3000"
+      GITEA__security__INSTALL_LOCK: "true"
+      GITEA__service__DISABLE_REGISTRATION: "true"
+      GITEA__service__REQUIRE_SIGNIN_VIEW: "false"
+      # M2-E.2 (REQUIREMENTS §5.4): kill auto-watch so agents only get
+      # targeted notifications (assign / request_review / @mention) +
+      # broadcasts on issues they actually participated in.
+      GITEA__service__AUTO_WATCH_ON_CHANGES: "false"
+      GITEA__service__AUTO_WATCH_NEW_REPOS: "false"
+      # R6: enable Gitea Actions so the closes-issue-check workflow can
+      # actually run (pending → green) instead of relying on synthetic
+      # status posts. act_runner registers itself via bootstrap.
+      GITEA__actions__ENABLED: "true"
+      GITEA__actions__DEFAULT_ACTIONS_URL: "github"
+      GITEA__database__DB_TYPE: sqlite3
+      GITEA__log__LEVEL: Info
+      # First-run admin (idempotent — gitea will skip if user exists)
+      GITEA_ADMIN_USER: "${GITEA_ADMIN_USER:-chairman}"
+      GITEA_ADMIN_PASSWORD: "${GITEA_ADMIN_PASSWORD:?GITEA_ADMIN_PASSWORD required}"
+      GITEA_ADMIN_EMAIL: "chairman@omcgitea.local"
+    volumes:
+      - ../.claude-team-data/${PROFILE:-dev}/gitea:/data
+    # No public host port: Gitea is only reachable through nginx-edge
+    # (gitea.${EDGE_DOMAIN}). For local dev access without /etc/hosts
+    # tweaks, uncomment the loopback-only line below.
+    # ports:
+    #   - "127.0.0.1:${GITEA_HTTP_PORT:-3000}:3000"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:3000/api/v1/version || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+
+  nginx-edge:
+    # Single public entrypoint. M2-A scope: only proxies Gitea.
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    depends_on:
+      gitea:
+        condition: service_healthy
+    ports:
+      - "${EDGE_HTTP_PORT:-28080}:80"
+      - "${EDGE_MM_PORT:-28082}:81"
+    volumes:
+      - ./nginx-edge/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx-edge/conf.d:/etc/nginx/conf.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- --header='Host: gitea.localhost' http://127.0.0.1/api/v1/version >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  gitea-admin-init:
+    # One-shot: create the admin user inside the gitea data dir if not present.
+    # Uses the same gitea image so we have the gitea CLI + matching app.ini.
+    image: docker.gitea.com/gitea:1.22.6
+    restart: "no"
+    depends_on:
+      gitea:
+        condition: service_healthy
+    environment:
+      GITEA_ADMIN_USER: "${GITEA_ADMIN_USER:-chairman}"
+      GITEA_ADMIN_PASSWORD: "${GITEA_ADMIN_PASSWORD}"
+      GITEA_ADMIN_EMAIL: "chairman@omcgitea.local"
+    user: "1000:1000"
+    volumes:
+      - ../.claude-team-data/${PROFILE:-dev}/gitea:/data
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        set -e
+        cfg=/data/gitea/conf/app.ini
+        export GITEA_WORK_DIR=/data/gitea
+        export GITEA_CUSTOM=/data/gitea
+        if gitea --config "$$cfg" admin user list 2>/dev/null | awk 'NR>1 {print $$2}' | grep -qx "$$GITEA_ADMIN_USER"; then
+          echo "[admin-init] admin user $$GITEA_ADMIN_USER already exists";
+          exit 0;
+        fi
+        echo "[admin-init] creating admin user $$GITEA_ADMIN_USER";
+        gitea --config "$$cfg" admin user create \
+          --username "$$GITEA_ADMIN_USER" \
+          --password "$$GITEA_ADMIN_PASSWORD" \
+          --email "$$GITEA_ADMIN_EMAIL" \
+          --admin --must-change-password=false
+
+  bootstrap:
+    build:
+      context: ./bootstrap
+    image: omcgitea-bootstrap:local
+    restart: "no"
+    depends_on:
+      gitea:
+        condition: service_healthy
+      gitea-admin-init:
+        condition: service_completed_successfully
+      mattermost:
+        condition: service_healthy
+    environment:
+      GITEA_HOST: "http://gitea:3000"
+      GITEA_ADMIN_USER: "${GITEA_ADMIN_USER:-chairman}"
+      GITEA_ADMIN_PASSWORD: "${GITEA_ADMIN_PASSWORD}"
+      GITEA_ADMIN_EMAIL: "chairman@omcgitea.local"
+      AGENTS: "${AGENTS:-agent1,agent2}"
+      REPOS: "${REPOS:-test-sandbox}"
+      BOOTSTRAP_DATA_DIR: "/data"
+      REQUIRED_APPROVALS: "${REQUIRED_APPROVALS:-1}"
+      # R4 / TEAMCONFIG: role assignment for branch-protection whitelist,
+      # closes-check workflow, and per-agent AGENTS.md rendering.
+      ROLES: "${ROLES:-}"
+      # R8 mattermost provisioning (optional — empty MATTERMOST_HOST skips).
+      MATTERMOST_HOST: "${MATTERMOST_HOST:-}"
+      MATTERMOST_ADMIN_USER: "${MATTERMOST_ADMIN_USER:-mmadmin}"
+      MATTERMOST_ADMIN_PASSWORD: "${MATTERMOST_ADMIN_PASSWORD:-}"
+      MATTERMOST_ADMIN_EMAIL: "${MATTERMOST_ADMIN_EMAIL:-mmadmin@omcgitea.local}"
+      MATTERMOST_TEAM_NAME: "${MATTERMOST_TEAM_NAME:-omcgitea}"
+      MATTERMOST_TEAM_DISPLAY: "${MATTERMOST_TEAM_DISPLAY:-omcgitea}"
+    volumes:
+      - ../.claude-team-data/${PROFILE:-dev}:/data
+
+  # ---------------------------------------------------------------------------
+  # secret-service (R7-a / DESIGN_R7_SIDECAR §4.2): tiny stdlib HTTP server
+  # that hands out per-agent Gitea tokens to mini-router sidecars. Reads the
+  # same tokens/ directory that bootstrap writes, so M1 is fully back-compatible
+  # — sidecars just stop reading from disk and start GET'ing /tokens/<a>.
+  # Reachable only on the docker network; auth = shared header secret from
+  # SECRET_SERVICE_INTERNAL_AUTH (.env.<profile>).
+  # ---------------------------------------------------------------------------
+  secret-service:
+    build:
+      context: ../secret-service
+    image: omcgitea-secret-service:local
+    restart: unless-stopped
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+    environment:
+      SECRET_SERVICE_INTERNAL_AUTH: "${SECRET_SERVICE_INTERNAL_AUTH:?SECRET_SERVICE_INTERNAL_AUTH required}"
+      SECRET_SERVICE_TOKENS_DIR: /data/tokens
+      SECRET_SERVICE_PORT: "8650"
+    volumes:
+      - ../.claude-team-data/${PROFILE:-dev}/tokens:/data/tokens:ro
+    expose:
+      - "8650"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8650/healthz', timeout=2).read()==b'ok\\n' else 1)\""]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  # ---------------------------------------------------------------------------
+  # act_runner — runs Gitea Actions workflows (R6 / closes-issue-check).
+  # Registers itself via the token bootstrap writes to tokens/runner.token.
+  # Uses docker-in-docker via the host docker.sock so workflow steps can
+  # run on `ubuntu-latest` (which act_runner emulates with a docker image).
+  # ---------------------------------------------------------------------------
+  act-runner:
+    image: gitea/act_runner:0.2.11
+    restart: unless-stopped
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+    environment:
+      GITEA_INSTANCE_URL: "http://gitea:3000"
+      GITEA_RUNNER_NAME: "omcgitea-${PROFILE:-dev}-runner"
+      GITEA_RUNNER_LABELS: "ubuntu-latest:docker://node:20-bookworm"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ../.claude-team-data/${PROFILE:-dev}/tokens:/run/omcgitea/tokens:ro
+      - ../.claude-team-data/${PROFILE:-dev}/act-runner:/data
+    working_dir: /data
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        set -e
+        if [ ! -f /data/.runner ]; then
+          tok=$$(cat /run/omcgitea/tokens/runner.token)
+          /usr/local/bin/act_runner register --no-interactive \
+            --instance "$$GITEA_INSTANCE_URL" \
+            --token "$$tok" \
+            --name "$$GITEA_RUNNER_NAME" \
+            --labels "$$GITEA_RUNNER_LABELS"
+        fi
+        exec /usr/local/bin/act_runner daemon
+
+  # ---------------------------------------------------------------------------
+  # mysql (R7-a): central events store for mini-router sidecars.
+  # dev profile only — prod uses external RDS via MYSQL_DSN.
+  # ---------------------------------------------------------------------------
+  mysql:
+    image: mysql:8.4
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: "${MYSQL_ROOT_PASSWORD:?MYSQL_ROOT_PASSWORD required}"
+      MYSQL_DATABASE: omcgitea
+      MYSQL_USER: omcgitea
+      MYSQL_PASSWORD: "${MYSQL_PASSWORD:?MYSQL_PASSWORD required}"
+    volumes:
+      - ../.claude-team-data/${PROFILE:-dev}/mysql:/var/lib/mysql
+      - ../mini-router/sql:/docker-entrypoint-initdb.d:ro
+    expose:
+      - "3306"
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -uroot -p$$MYSQL_ROOT_PASSWORD"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  # R8: Mattermost — second environment (alongside Gitea). Each agent
+  # has a Mattermost user + PAT; mini-router opens a per-agent WebSocket
+  # to /api/v4/websocket and ingests post events into the same MySQL
+  # events table as gitea (source="mattermost").
+  mattermost:
+    image: mattermost/mattermost-team-edition:10.6
+    restart: unless-stopped
+    environment:
+      MM_SQLSETTINGS_DRIVERNAME: mysql
+      # Mattermost needs its own MySQL user/db (separate from omcgitea events).
+      # We reuse the mysql container with a second db `mattermost`.
+      MM_SQLSETTINGS_DATASOURCE: "omcgitea:${MYSQL_PASSWORD}@tcp(mysql:3306)/mattermost?charset=utf8mb4,utf8&readTimeout=30s&writeTimeout=30s"
+      MM_SERVICESETTINGS_SITEURL: "${MATTERMOST_SITE_URL:-http://mattermost:8065}"
+      MM_SERVICESETTINGS_ENABLELOCALMODE: "true"
+      MM_SERVICESETTINGS_ENABLEUSERACCESSTOKENS: "true"
+      MM_TEAMSETTINGS_ENABLEOPENSERVER: "true"
+      MM_TEAMSETTINGS_MAXUSERSPERTEAM: "200"
+    depends_on:
+      mysql:
+        condition: service_healthy
+    volumes:
+      - ../.claude-team-data/${PROFILE:-dev}/mattermost/data:/mattermost/data
+      - ../.claude-team-data/${PROFILE:-dev}/mattermost/logs:/mattermost/logs
+      - ../.claude-team-data/${PROFILE:-dev}/mattermost/config:/mattermost/config
+      - ../.claude-team-data/${PROFILE:-dev}/mattermost/plugins:/mattermost/plugins
+    expose:
+      - "8065"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8065/api/v4/system/ping || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
+  # ---------------------------------------------------------------------------
+  # omcgitea-router (M2-E.1): the event router. Pulls Gitea notifications
+  # via cursor poll + SSE trigger, dispatches to each hermes-agent over
+  # ACP stdio (`docker exec -i <agent> python -m acp_adapter.entry`).
+  #
+  # docker.sock mount: required because the router needs to spawn ACP
+  # adapter processes inside hermes-agent containers. This makes the
+  # router root-equivalent on the host — see DESIGN §6.C Risks and mitigations.
+  # ---------------------------------------------------------------------------
+  # ---------------------------------------------------------------------------
+  # R7 SIDECAR: per-agent mini-router replaces the centralized router.
+  # The old `router` service is removed (see v2docs/DESIGN_R7_SIDECAR.md).
+  # mini-router-<agent> services appear at the bottom of this file.
+  # ---------------------------------------------------------------------------
+
+  hermes-agent-1:
+    <<: *hermes-agent-base
+    profiles: ["dev"]
+    build:
+      context: ./hermes-agent
+      args:
+        HERMES_IMAGE: "${HERMES_IMAGE:-hermes-agent:local}"
+        GITEA_MCP_IMAGE: "${GITEA_MCP_IMAGE:-docker.gitea.com/gitea-mcp-server:latest}"
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+    environment:
+      <<: *hermes-env-base
+      AGENT_NAME: "agent1"
+      GITEA_TOKEN_FILE: "/run/omcgitea/tokens/agent-agent1.token"
+    volumes:
+      - ../.claude-team-data/${PROFILE:-dev}/hermes/agent1:/opt/data
+      - ../.claude-team-data/${PROFILE:-dev}/acp/agent1:/var/run/acp
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-agent1.token:/run/omcgitea/tokens/agent-agent1.token:ro
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-agent1-mm.token:/run/omcgitea/tokens/agent-agent1-mm.token:ro
+
+  hermes-agent-2:
+    <<: *hermes-agent-base
+    profiles: ["dev"]
+    depends_on:
+      hermes-agent-1:
+        condition: service_started
+      bootstrap:
+        condition: service_completed_successfully
+    environment:
+      <<: *hermes-env-base
+      AGENT_NAME: "agent2"
+      GITEA_TOKEN_FILE: "/run/omcgitea/tokens/agent-agent2.token"
+    volumes:
+      - ../.claude-team-data/${PROFILE:-dev}/hermes/agent2:/opt/data
+      - ../.claude-team-data/${PROFILE:-dev}/acp/agent2:/var/run/acp
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-agent2.token:/run/omcgitea/tokens/agent-agent2.token:ro
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-agent2-mm.token:/run/omcgitea/tokens/agent-agent2-mm.token:ro
+
+  # ---------------------------------------------------------------------------
+  # prod profile agents (dev1..dev5). Activated only when --profile prod
+  # is passed (the Makefile does this automatically for PROFILE=prod).
+  # Build args / image are inherited from hermes-agent-1 via the build cache.
+  # ---------------------------------------------------------------------------
+  hermes-agent-dev1:
+    <<: *hermes-agent-base
+    profiles: ["prod"]
+    build:
+      context: ./hermes-agent
+      args:
+        HERMES_IMAGE: "${HERMES_IMAGE:-hermes-agent:local}"
+        GITEA_MCP_IMAGE: "${GITEA_MCP_IMAGE:-docker.gitea.com/gitea-mcp-server:latest}"
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+    environment:
+      <<: *hermes-env-base
+      AGENT_NAME: "dev1"
+      GITEA_TOKEN_FILE: "/run/omcgitea/tokens/agent-dev1.token"
+    volumes:
+      - ../.claude-team-data/${PROFILE:-dev}/hermes/dev1:/opt/data
+      - ../.claude-team-data/${PROFILE:-dev}/acp/dev1:/var/run/acp
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-dev1.token:/run/omcgitea/tokens/agent-dev1.token:ro
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-dev1-mm.token:/run/omcgitea/tokens/agent-dev1-mm.token:ro
+
+  hermes-agent-dev2:
+    <<: *hermes-agent-base
+    profiles: ["prod"]
+    depends_on:
+      hermes-agent-dev1:
+        condition: service_started
+      bootstrap:
+        condition: service_completed_successfully
+    environment:
+      <<: *hermes-env-base
+      AGENT_NAME: "dev2"
+      GITEA_TOKEN_FILE: "/run/omcgitea/tokens/agent-dev2.token"
+    volumes:
+      - ../.claude-team-data/${PROFILE:-dev}/hermes/dev2:/opt/data
+      - ../.claude-team-data/${PROFILE:-dev}/acp/dev2:/var/run/acp
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-dev2.token:/run/omcgitea/tokens/agent-dev2.token:ro
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-dev2-mm.token:/run/omcgitea/tokens/agent-dev2-mm.token:ro
+
+  hermes-agent-dev3:
+    <<: *hermes-agent-base
+    profiles: ["prod"]
+    depends_on:
+      hermes-agent-dev1:
+        condition: service_started
+      bootstrap:
+        condition: service_completed_successfully
+    environment:
+      <<: *hermes-env-base
+      AGENT_NAME: "dev3"
+      GITEA_TOKEN_FILE: "/run/omcgitea/tokens/agent-dev3.token"
+    volumes:
+      - ../.claude-team-data/${PROFILE:-dev}/hermes/dev3:/opt/data
+      - ../.claude-team-data/${PROFILE:-dev}/acp/dev3:/var/run/acp
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-dev3.token:/run/omcgitea/tokens/agent-dev3.token:ro
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-dev3-mm.token:/run/omcgitea/tokens/agent-dev3-mm.token:ro
+
+  hermes-agent-dev4:
+    <<: *hermes-agent-base
+    profiles: ["prod"]
+    depends_on:
+      hermes-agent-dev1:
+        condition: service_started
+      bootstrap:
+        condition: service_completed_successfully
+    environment:
+      <<: *hermes-env-base
+      AGENT_NAME: "dev4"
+      GITEA_TOKEN_FILE: "/run/omcgitea/tokens/agent-dev4.token"
+    volumes:
+      - ../.claude-team-data/${PROFILE:-dev}/hermes/dev4:/opt/data
+      - ../.claude-team-data/${PROFILE:-dev}/acp/dev4:/var/run/acp
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-dev4.token:/run/omcgitea/tokens/agent-dev4.token:ro
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-dev4-mm.token:/run/omcgitea/tokens/agent-dev4-mm.token:ro
+
+  hermes-agent-dev5:
+    <<: *hermes-agent-base
+    profiles: ["prod"]
+    depends_on:
+      hermes-agent-dev1:
+        condition: service_started
+      bootstrap:
+        condition: service_completed_successfully
+    environment:
+      <<: *hermes-env-base
+      AGENT_NAME: "dev5"
+      GITEA_TOKEN_FILE: "/run/omcgitea/tokens/agent-dev5.token"
+    volumes:
+      - ../.claude-team-data/${PROFILE:-dev}/hermes/dev5:/opt/data
+      - ../.claude-team-data/${PROFILE:-dev}/acp/dev5:/var/run/acp
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-dev5.token:/run/omcgitea/tokens/agent-dev5.token:ro
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-dev5-mm.token:/run/omcgitea/tokens/agent-dev5-mm.token:ro
+
+  # === agents added by scripts/add-agent.sh below ===
+  # (do not delete the marker line above; add-agent.sh appends after it)
+
+  hermes-agent-agent3:
+    <<: *hermes-agent-base
+    profiles: ["dev", "test"]
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+    environment:
+      <<: *hermes-env-base
+      AGENT_NAME: "agent3"
+      GITEA_TOKEN_FILE: "/run/omcgitea/tokens/agent-agent3.token"
+    volumes:
+      - ../.claude-team-data/${PROFILE:-dev}/hermes/agent3:/opt/data
+      - ../.claude-team-data/${PROFILE:-dev}/acp/agent3:/var/run/acp
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-agent3.token:/run/omcgitea/tokens/agent-agent3.token:ro
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-agent3-mm.token:/run/omcgitea/tokens/agent-agent3-mm.token:ro
+
+  hermes-agent-agent4:
+    <<: *hermes-agent-base
+    profiles: ["dev", "test"]
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+    environment:
+      <<: *hermes-env-base
+      AGENT_NAME: "agent4"
+      GITEA_TOKEN_FILE: "/run/omcgitea/tokens/agent-agent4.token"
+    volumes:
+      - ../.claude-team-data/${PROFILE:-dev}/hermes/agent4:/opt/data
+      - ../.claude-team-data/${PROFILE:-dev}/acp/agent4:/var/run/acp
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-agent4.token:/run/omcgitea/tokens/agent-agent4.token:ro
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-agent4-mm.token:/run/omcgitea/tokens/agent-agent4-mm.token:ro
+
+  hermes-agent-agent5:
+    <<: *hermes-agent-base
+    profiles: ["dev", "test"]
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+    environment:
+      <<: *hermes-env-base
+      AGENT_NAME: "agent5"
+      GITEA_TOKEN_FILE: "/run/omcgitea/tokens/agent-agent5.token"
+    volumes:
+      - ../.claude-team-data/${PROFILE:-dev}/hermes/agent5:/opt/data
+      - ../.claude-team-data/${PROFILE:-dev}/acp/agent5:/var/run/acp
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-agent5.token:/run/omcgitea/tokens/agent-agent5.token:ro
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-agent5-mm.token:/run/omcgitea/tokens/agent-agent5-mm.token:ro
+
+  hermes-agent-agent6:
+    <<: *hermes-agent-base
+    profiles: ["dev", "test"]
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+    environment:
+      <<: *hermes-env-base
+      AGENT_NAME: "agent6"
+      GITEA_TOKEN_FILE: "/run/omcgitea/tokens/agent-agent6.token"
+    volumes:
+      - ../.claude-team-data/${PROFILE:-dev}/hermes/agent6:/opt/data
+      - ../.claude-team-data/${PROFILE:-dev}/acp/agent6:/var/run/acp
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-agent6.token:/run/omcgitea/tokens/agent-agent6.token:ro
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-agent6-mm.token:/run/omcgitea/tokens/agent-agent6-mm.token:ro
+
+  hermes-agent-agent7:
+    <<: *hermes-agent-base
+    profiles: ["dev", "test"]
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+    environment:
+      <<: *hermes-env-base
+      AGENT_NAME: "agent7"
+      GITEA_TOKEN_FILE: "/run/omcgitea/tokens/agent-agent7.token"
+    volumes:
+      - ../.claude-team-data/${PROFILE:-dev}/hermes/agent7:/opt/data
+      - ../.claude-team-data/${PROFILE:-dev}/acp/agent7:/var/run/acp
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-agent7.token:/run/omcgitea/tokens/agent-agent7.token:ro
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-agent7-mm.token:/run/omcgitea/tokens/agent-agent7-mm.token:ro
+
+  hermes-agent-agent8:
+    <<: *hermes-agent-base
+    profiles: ["dev", "test"]
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+    environment:
+      <<: *hermes-env-base
+      AGENT_NAME: "agent8"
+      GITEA_TOKEN_FILE: "/run/omcgitea/tokens/agent-agent8.token"
+    volumes:
+      - ../.claude-team-data/${PROFILE:-dev}/hermes/agent8:/opt/data
+      - ../.claude-team-data/${PROFILE:-dev}/acp/agent8:/var/run/acp
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-agent8.token:/run/omcgitea/tokens/agent-agent8.token:ro
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-agent8-mm.token:/run/omcgitea/tokens/agent-agent8-mm.token:ro
+
+  hermes-agent-agent9:
+    <<: *hermes-agent-base
+    profiles: ["dev", "test"]
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+    environment:
+      <<: *hermes-env-base
+      AGENT_NAME: "agent9"
+      GITEA_TOKEN_FILE: "/run/omcgitea/tokens/agent-agent9.token"
+    volumes:
+      - ../.claude-team-data/${PROFILE:-dev}/hermes/agent9:/opt/data
+      - ../.claude-team-data/${PROFILE:-dev}/acp/agent9:/var/run/acp
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-agent9.token:/run/omcgitea/tokens/agent-agent9.token:ro
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-agent9-mm.token:/run/omcgitea/tokens/agent-agent9-mm.token:ro
+
+  hermes-agent-agent10:
+    <<: *hermes-agent-base
+    profiles: ["dev", "test"]
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+    environment:
+      <<: *hermes-env-base
+      AGENT_NAME: "agent10"
+      GITEA_TOKEN_FILE: "/run/omcgitea/tokens/agent-agent10.token"
+    volumes:
+      - ../.claude-team-data/${PROFILE:-dev}/hermes/agent10:/opt/data
+      - ../.claude-team-data/${PROFILE:-dev}/acp/agent10:/var/run/acp
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-agent10.token:/run/omcgitea/tokens/agent-agent10.token:ro
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-agent10-mm.token:/run/omcgitea/tokens/agent-agent10-mm.token:ro
+
+  # =========================================================================
+  # R7 SIDECAR: mini-router-<agent>. One per hermes-agent service.
+  # Each shares the agent's ACP unix socket (read-only mount), reads its
+  # own token via secret-service, persists events to the shared MySQL.
+  # =========================================================================
+
+  mini-router-1:
+    <<: *mini-router-base
+    profiles: ["dev"]
+    build:
+      context: ../mini-router
+    depends_on:
+      mysql: { condition: service_healthy }
+      secret-service: { condition: service_healthy }
+      hermes-agent-1: { condition: service_started }
+    environment:
+      <<: *mini-router-env-base
+      AGENT_NAME: "agent1"
+      GITEA_PASSWORD_FILE: "/run/omcgitea/tokens/agent-agent1.password"
+    volumes:
+      - ../.claude-team-data/${PROFILE:-dev}/acp/agent1:/var/run/acp:ro
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-agent1.password:/run/omcgitea/tokens/agent-agent1.password:ro
+    expose: ["8645"]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8645/healthz >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+
+  mini-router-2:
+    <<: *mini-router-base
+    profiles: ["dev"]
+    depends_on:
+      mysql: { condition: service_healthy }
+      secret-service: { condition: service_healthy }
+      hermes-agent-2: { condition: service_started }
+    environment:
+      <<: *mini-router-env-base
+      AGENT_NAME: "agent2"
+      GITEA_PASSWORD_FILE: "/run/omcgitea/tokens/agent-agent2.password"
+    volumes:
+      - ../.claude-team-data/${PROFILE:-dev}/acp/agent2:/var/run/acp:ro
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-agent2.password:/run/omcgitea/tokens/agent-agent2.password:ro
+    expose: ["8645"]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8645/healthz >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+
+  mini-router-agent3:
+    <<: *mini-router-base
+    profiles: ["dev", "test"]
+    depends_on:
+      mysql: { condition: service_healthy }
+      secret-service: { condition: service_healthy }
+      hermes-agent-agent3: { condition: service_started }
+    environment:
+      <<: *mini-router-env-base
+      AGENT_NAME: "agent3"
+      GITEA_PASSWORD_FILE: "/run/omcgitea/tokens/agent-agent3.password"
+    volumes:
+      - ../.claude-team-data/${PROFILE:-dev}/acp/agent3:/var/run/acp:ro
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-agent3.password:/run/omcgitea/tokens/agent-agent3.password:ro
+    expose: ["8645"]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8645/healthz >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+
+  mini-router-agent4:
+    <<: *mini-router-base
+    profiles: ["dev", "test"]
+    depends_on:
+      mysql: { condition: service_healthy }
+      secret-service: { condition: service_healthy }
+      hermes-agent-agent4: { condition: service_started }
+    environment:
+      <<: *mini-router-env-base
+      AGENT_NAME: "agent4"
+      GITEA_PASSWORD_FILE: "/run/omcgitea/tokens/agent-agent4.password"
+    volumes:
+      - ../.claude-team-data/${PROFILE:-dev}/acp/agent4:/var/run/acp:ro
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-agent4.password:/run/omcgitea/tokens/agent-agent4.password:ro
+    expose: ["8645"]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8645/healthz >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+
+  mini-router-agent5:
+    <<: *mini-router-base
+    profiles: ["dev", "test"]
+    depends_on:
+      mysql: { condition: service_healthy }
+      secret-service: { condition: service_healthy }
+      hermes-agent-agent5: { condition: service_started }
+    environment:
+      <<: *mini-router-env-base
+      AGENT_NAME: "agent5"
+      GITEA_PASSWORD_FILE: "/run/omcgitea/tokens/agent-agent5.password"
+    volumes:
+      - ../.claude-team-data/${PROFILE:-dev}/acp/agent5:/var/run/acp:ro
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-agent5.password:/run/omcgitea/tokens/agent-agent5.password:ro
+    expose: ["8645"]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8645/healthz >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+
+  mini-router-agent6:
+    <<: *mini-router-base
+    profiles: ["dev", "test"]
+    depends_on:
+      mysql: { condition: service_healthy }
+      secret-service: { condition: service_healthy }
+      hermes-agent-agent6: { condition: service_started }
+    environment:
+      <<: *mini-router-env-base
+      AGENT_NAME: "agent6"
+      GITEA_PASSWORD_FILE: "/run/omcgitea/tokens/agent-agent6.password"
+    volumes:
+      - ../.claude-team-data/${PROFILE:-dev}/acp/agent6:/var/run/acp:ro
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-agent6.password:/run/omcgitea/tokens/agent-agent6.password:ro
+    expose: ["8645"]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8645/healthz >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+
+  mini-router-agent7:
+    <<: *mini-router-base
+    profiles: ["dev", "test"]
+    depends_on:
+      mysql: { condition: service_healthy }
+      secret-service: { condition: service_healthy }
+      hermes-agent-agent7: { condition: service_started }
+    environment:
+      <<: *mini-router-env-base
+      AGENT_NAME: "agent7"
+      GITEA_PASSWORD_FILE: "/run/omcgitea/tokens/agent-agent7.password"
+    volumes:
+      - ../.claude-team-data/${PROFILE:-dev}/acp/agent7:/var/run/acp:ro
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-agent7.password:/run/omcgitea/tokens/agent-agent7.password:ro
+    expose: ["8645"]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8645/healthz >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+
+  mini-router-agent8:
+    <<: *mini-router-base
+    profiles: ["dev", "test"]
+    depends_on:
+      mysql: { condition: service_healthy }
+      secret-service: { condition: service_healthy }
+      hermes-agent-agent8: { condition: service_started }
+    environment:
+      <<: *mini-router-env-base
+      AGENT_NAME: "agent8"
+      GITEA_PASSWORD_FILE: "/run/omcgitea/tokens/agent-agent8.password"
+    volumes:
+      - ../.claude-team-data/${PROFILE:-dev}/acp/agent8:/var/run/acp:ro
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-agent8.password:/run/omcgitea/tokens/agent-agent8.password:ro
+    expose: ["8645"]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8645/healthz >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+
+  mini-router-agent9:
+    <<: *mini-router-base
+    profiles: ["dev", "test"]
+    depends_on:
+      mysql: { condition: service_healthy }
+      secret-service: { condition: service_healthy }
+      hermes-agent-agent9: { condition: service_started }
+    environment:
+      <<: *mini-router-env-base
+      AGENT_NAME: "agent9"
+      GITEA_PASSWORD_FILE: "/run/omcgitea/tokens/agent-agent9.password"
+    volumes:
+      - ../.claude-team-data/${PROFILE:-dev}/acp/agent9:/var/run/acp:ro
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-agent9.password:/run/omcgitea/tokens/agent-agent9.password:ro
+    expose: ["8645"]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8645/healthz >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+
+  mini-router-agent10:
+    <<: *mini-router-base
+    profiles: ["dev", "test"]
+    depends_on:
+      mysql: { condition: service_healthy }
+      secret-service: { condition: service_healthy }
+      hermes-agent-agent10: { condition: service_started }
+    environment:
+      <<: *mini-router-env-base
+      AGENT_NAME: "agent10"
+      GITEA_PASSWORD_FILE: "/run/omcgitea/tokens/agent-agent10.password"
+    volumes:
+      - ../.claude-team-data/${PROFILE:-dev}/acp/agent10:/var/run/acp:ro
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-agent10.password:/run/omcgitea/tokens/agent-agent10.password:ro
+    expose: ["8645"]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8645/healthz >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+
+  mini-router-dev1:
+    <<: *mini-router-base
+    profiles: ["prod"]
+    depends_on:
+      mysql: { condition: service_healthy }
+      secret-service: { condition: service_healthy }
+      hermes-agent-dev1: { condition: service_started }
+    environment:
+      <<: *mini-router-env-base
+      AGENT_NAME: "dev1"
+      GITEA_PASSWORD_FILE: "/run/omcgitea/tokens/agent-dev1.password"
+    volumes:
+      - ../.claude-team-data/${PROFILE:-dev}/acp/dev1:/var/run/acp:ro
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-dev1.password:/run/omcgitea/tokens/agent-dev1.password:ro
+    expose: ["8645"]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8645/healthz >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+
+  mini-router-dev2:
+    <<: *mini-router-base
+    profiles: ["prod"]
+    depends_on:
+      mysql: { condition: service_healthy }
+      secret-service: { condition: service_healthy }
+      hermes-agent-dev2: { condition: service_started }
+    environment:
+      <<: *mini-router-env-base
+      AGENT_NAME: "dev2"
+      GITEA_PASSWORD_FILE: "/run/omcgitea/tokens/agent-dev2.password"
+    volumes:
+      - ../.claude-team-data/${PROFILE:-dev}/acp/dev2:/var/run/acp:ro
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-dev2.password:/run/omcgitea/tokens/agent-dev2.password:ro
+    expose: ["8645"]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8645/healthz >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+
+  mini-router-dev3:
+    <<: *mini-router-base
+    profiles: ["prod"]
+    depends_on:
+      mysql: { condition: service_healthy }
+      secret-service: { condition: service_healthy }
+      hermes-agent-dev3: { condition: service_started }
+    environment:
+      <<: *mini-router-env-base
+      AGENT_NAME: "dev3"
+      GITEA_PASSWORD_FILE: "/run/omcgitea/tokens/agent-dev3.password"
+    volumes:
+      - ../.claude-team-data/${PROFILE:-dev}/acp/dev3:/var/run/acp:ro
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-dev3.password:/run/omcgitea/tokens/agent-dev3.password:ro
+    expose: ["8645"]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8645/healthz >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+
+  mini-router-dev4:
+    <<: *mini-router-base
+    profiles: ["prod"]
+    depends_on:
+      mysql: { condition: service_healthy }
+      secret-service: { condition: service_healthy }
+      hermes-agent-dev4: { condition: service_started }
+    environment:
+      <<: *mini-router-env-base
+      AGENT_NAME: "dev4"
+      GITEA_PASSWORD_FILE: "/run/omcgitea/tokens/agent-dev4.password"
+    volumes:
+      - ../.claude-team-data/${PROFILE:-dev}/acp/dev4:/var/run/acp:ro
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-dev4.password:/run/omcgitea/tokens/agent-dev4.password:ro
+    expose: ["8645"]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8645/healthz >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+
+  mini-router-dev5:
+    <<: *mini-router-base
+    profiles: ["prod"]
+    depends_on:
+      mysql: { condition: service_healthy }
+      secret-service: { condition: service_healthy }
+      hermes-agent-dev5: { condition: service_started }
+    environment:
+      <<: *mini-router-env-base
+      AGENT_NAME: "dev5"
+      GITEA_PASSWORD_FILE: "/run/omcgitea/tokens/agent-dev5.password"
+    volumes:
+      - ../.claude-team-data/${PROFILE:-dev}/acp/dev5:/var/run/acp:ro
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-dev5.password:/run/omcgitea/tokens/agent-dev5.password:ro
+    expose: ["8645"]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8645/healthz >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+
+  hermes-agent-coder11:
+    <<: *hermes-agent-base
+    profiles: ["dev", "test"]
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+    environment:
+      <<: *hermes-env-base
+      AGENT_NAME: "coder11"
+      GITEA_TOKEN_FILE: "/run/omcgitea/tokens/agent-coder11.token"
+    volumes:
+      - ../.claude-team-data/${PROFILE:-dev}/hermes/coder11:/opt/data
+      - ../.claude-team-data/${PROFILE:-dev}/acp/coder11:/var/run/acp
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-coder11.token:/run/omcgitea/tokens/agent-coder11.token:ro
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-coder11-mm.token:/run/omcgitea/tokens/agent-coder11-mm.token:ro
+
+  mini-router-coder11:
+    <<: *mini-router-base
+    profiles: ["dev", "test"]
+    depends_on:
+      mysql: { condition: service_healthy }
+      secret-service: { condition: service_healthy }
+      hermes-agent-coder11: { condition: service_started }
+    environment:
+      <<: *mini-router-env-base
+      AGENT_NAME: "coder11"
+      GITEA_PASSWORD_FILE: "/run/omcgitea/tokens/agent-coder11.password"
+    volumes:
+      - ../.claude-team-data/${PROFILE:-dev}/acp/coder11:/var/run/acp:ro
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-coder11.password:/run/omcgitea/tokens/agent-coder11.password:ro
+    expose: ["8645"]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8645/healthz >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+
+  hermes-agent-coder12:
+    <<: *hermes-agent-base
+    profiles: ["dev", "test"]
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+    environment:
+      <<: *hermes-env-base
+      AGENT_NAME: "coder12"
+      GITEA_TOKEN_FILE: "/run/omcgitea/tokens/agent-coder12.token"
+    volumes:
+      - ../.claude-team-data/${PROFILE:-dev}/hermes/coder12:/opt/data
+      - ../.claude-team-data/${PROFILE:-dev}/acp/coder12:/var/run/acp
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-coder12.token:/run/omcgitea/tokens/agent-coder12.token:ro
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-coder12-mm.token:/run/omcgitea/tokens/agent-coder12-mm.token:ro
+
+  mini-router-coder12:
+    <<: *mini-router-base
+    profiles: ["dev", "test"]
+    depends_on:
+      mysql: { condition: service_healthy }
+      secret-service: { condition: service_healthy }
+      hermes-agent-coder12: { condition: service_started }
+    environment:
+      <<: *mini-router-env-base
+      AGENT_NAME: "coder12"
+      GITEA_PASSWORD_FILE: "/run/omcgitea/tokens/agent-coder12.password"
+    volumes:
+      - ../.claude-team-data/${PROFILE:-dev}/acp/coder12:/var/run/acp:ro
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-coder12.password:/run/omcgitea/tokens/agent-coder12.password:ro
+    expose: ["8645"]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8645/healthz >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+
+  hermes-agent-coder13:
+    <<: *hermes-agent-base
+    profiles: ["dev", "test"]
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+    environment:
+      <<: *hermes-env-base
+      AGENT_NAME: "coder13"
+      GITEA_TOKEN_FILE: "/run/omcgitea/tokens/agent-coder13.token"
+    volumes:
+      - ../.claude-team-data/${PROFILE:-dev}/hermes/coder13:/opt/data
+      - ../.claude-team-data/${PROFILE:-dev}/acp/coder13:/var/run/acp
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-coder13.token:/run/omcgitea/tokens/agent-coder13.token:ro
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-coder13-mm.token:/run/omcgitea/tokens/agent-coder13-mm.token:ro
+
+  mini-router-coder13:
+    <<: *mini-router-base
+    profiles: ["dev", "test"]
+    depends_on:
+      mysql: { condition: service_healthy }
+      secret-service: { condition: service_healthy }
+      hermes-agent-coder13: { condition: service_started }
+    environment:
+      <<: *mini-router-env-base
+      AGENT_NAME: "coder13"
+      GITEA_PASSWORD_FILE: "/run/omcgitea/tokens/agent-coder13.password"
+    volumes:
+      - ../.claude-team-data/${PROFILE:-dev}/acp/coder13:/var/run/acp:ro
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-coder13.password:/run/omcgitea/tokens/agent-coder13.password:ro
+    expose: ["8645"]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8645/healthz >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+
+  hermes-agent-coder14:
+    <<: *hermes-agent-base
+    profiles: ["dev", "test"]
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+    environment:
+      <<: *hermes-env-base
+      AGENT_NAME: "coder14"
+      GITEA_TOKEN_FILE: "/run/omcgitea/tokens/agent-coder14.token"
+    volumes:
+      - ../.claude-team-data/${PROFILE:-dev}/hermes/coder14:/opt/data
+      - ../.claude-team-data/${PROFILE:-dev}/acp/coder14:/var/run/acp
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-coder14.token:/run/omcgitea/tokens/agent-coder14.token:ro
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-coder14-mm.token:/run/omcgitea/tokens/agent-coder14-mm.token:ro
+
+  mini-router-coder14:
+    <<: *mini-router-base
+    profiles: ["dev", "test"]
+    depends_on:
+      mysql: { condition: service_healthy }
+      secret-service: { condition: service_healthy }
+      hermes-agent-coder14: { condition: service_started }
+    environment:
+      <<: *mini-router-env-base
+      AGENT_NAME: "coder14"
+      GITEA_PASSWORD_FILE: "/run/omcgitea/tokens/agent-coder14.password"
+    volumes:
+      - ../.claude-team-data/${PROFILE:-dev}/acp/coder14:/var/run/acp:ro
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-coder14.password:/run/omcgitea/tokens/agent-coder14.password:ro
+    expose: ["8645"]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8645/healthz >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+
+  hermes-agent-coder15:
+    <<: *hermes-agent-base
+    profiles: ["dev", "test"]
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+    environment:
+      <<: *hermes-env-base
+      AGENT_NAME: "coder15"
+      GITEA_TOKEN_FILE: "/run/omcgitea/tokens/agent-coder15.token"
+    volumes:
+      - ../.claude-team-data/${PROFILE:-dev}/hermes/coder15:/opt/data
+      - ../.claude-team-data/${PROFILE:-dev}/acp/coder15:/var/run/acp
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-coder15.token:/run/omcgitea/tokens/agent-coder15.token:ro
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-coder15-mm.token:/run/omcgitea/tokens/agent-coder15-mm.token:ro
+
+  mini-router-coder15:
+    <<: *mini-router-base
+    profiles: ["dev", "test"]
+    depends_on:
+      mysql: { condition: service_healthy }
+      secret-service: { condition: service_healthy }
+      hermes-agent-coder15: { condition: service_started }
+    environment:
+      <<: *mini-router-env-base
+      AGENT_NAME: "coder15"
+      GITEA_PASSWORD_FILE: "/run/omcgitea/tokens/agent-coder15.password"
+    volumes:
+      - ../.claude-team-data/${PROFILE:-dev}/acp/coder15:/var/run/acp:ro
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-coder15.password:/run/omcgitea/tokens/agent-coder15.password:ro
+    expose: ["8645"]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8645/healthz >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+
+  hermes-agent-coder16:
+    <<: *hermes-agent-base
+    profiles: ["dev", "test"]
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+    environment:
+      <<: *hermes-env-base
+      AGENT_NAME: "coder16"
+      GITEA_TOKEN_FILE: "/run/omcgitea/tokens/agent-coder16.token"
+    volumes:
+      - ../.claude-team-data/${PROFILE:-dev}/hermes/coder16:/opt/data
+      - ../.claude-team-data/${PROFILE:-dev}/acp/coder16:/var/run/acp
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-coder16.token:/run/omcgitea/tokens/agent-coder16.token:ro
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-coder16-mm.token:/run/omcgitea/tokens/agent-coder16-mm.token:ro
+
+  mini-router-coder16:
+    <<: *mini-router-base
+    profiles: ["dev", "test"]
+    depends_on:
+      mysql: { condition: service_healthy }
+      secret-service: { condition: service_healthy }
+      hermes-agent-coder16: { condition: service_started }
+    environment:
+      <<: *mini-router-env-base
+      AGENT_NAME: "coder16"
+      GITEA_PASSWORD_FILE: "/run/omcgitea/tokens/agent-coder16.password"
+    volumes:
+      - ../.claude-team-data/${PROFILE:-dev}/acp/coder16:/var/run/acp:ro
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-coder16.password:/run/omcgitea/tokens/agent-coder16.password:ro
+    expose: ["8645"]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8645/healthz >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+
+  hermes-agent-coder17:
+    <<: *hermes-agent-base
+    profiles: ["dev", "test"]
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+    environment:
+      <<: *hermes-env-base
+      AGENT_NAME: "coder17"
+      GITEA_TOKEN_FILE: "/run/omcgitea/tokens/agent-coder17.token"
+    volumes:
+      - ../.claude-team-data/${PROFILE:-dev}/hermes/coder17:/opt/data
+      - ../.claude-team-data/${PROFILE:-dev}/acp/coder17:/var/run/acp
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-coder17.token:/run/omcgitea/tokens/agent-coder17.token:ro
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-coder17-mm.token:/run/omcgitea/tokens/agent-coder17-mm.token:ro
+
+  mini-router-coder17:
+    <<: *mini-router-base
+    profiles: ["dev", "test"]
+    depends_on:
+      mysql: { condition: service_healthy }
+      secret-service: { condition: service_healthy }
+      hermes-agent-coder17: { condition: service_started }
+    environment:
+      <<: *mini-router-env-base
+      AGENT_NAME: "coder17"
+      GITEA_PASSWORD_FILE: "/run/omcgitea/tokens/agent-coder17.password"
+    volumes:
+      - ../.claude-team-data/${PROFILE:-dev}/acp/coder17:/var/run/acp:ro
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-coder17.password:/run/omcgitea/tokens/agent-coder17.password:ro
+    expose: ["8645"]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8645/healthz >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+
+  hermes-agent-coder18:
+    <<: *hermes-agent-base
+    profiles: ["dev", "test"]
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+    environment:
+      <<: *hermes-env-base
+      AGENT_NAME: "coder18"
+      GITEA_TOKEN_FILE: "/run/omcgitea/tokens/agent-coder18.token"
+    volumes:
+      - ../.claude-team-data/${PROFILE:-dev}/hermes/coder18:/opt/data
+      - ../.claude-team-data/${PROFILE:-dev}/acp/coder18:/var/run/acp
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-coder18.token:/run/omcgitea/tokens/agent-coder18.token:ro
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-coder18-mm.token:/run/omcgitea/tokens/agent-coder18-mm.token:ro
+
+  mini-router-coder18:
+    <<: *mini-router-base
+    profiles: ["dev", "test"]
+    depends_on:
+      mysql: { condition: service_healthy }
+      secret-service: { condition: service_healthy }
+      hermes-agent-coder18: { condition: service_started }
+    environment:
+      <<: *mini-router-env-base
+      AGENT_NAME: "coder18"
+      GITEA_PASSWORD_FILE: "/run/omcgitea/tokens/agent-coder18.password"
+    volumes:
+      - ../.claude-team-data/${PROFILE:-dev}/acp/coder18:/var/run/acp:ro
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-coder18.password:/run/omcgitea/tokens/agent-coder18.password:ro
+    expose: ["8645"]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8645/healthz >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+
+  hermes-agent-coder19:
+    <<: *hermes-agent-base
+    profiles: ["dev", "test"]
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+    environment:
+      <<: *hermes-env-base
+      AGENT_NAME: "coder19"
+      GITEA_TOKEN_FILE: "/run/omcgitea/tokens/agent-coder19.token"
+    volumes:
+      - ../.claude-team-data/${PROFILE:-dev}/hermes/coder19:/opt/data
+      - ../.claude-team-data/${PROFILE:-dev}/acp/coder19:/var/run/acp
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-coder19.token:/run/omcgitea/tokens/agent-coder19.token:ro
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-coder19-mm.token:/run/omcgitea/tokens/agent-coder19-mm.token:ro
+
+  mini-router-coder19:
+    <<: *mini-router-base
+    profiles: ["dev", "test"]
+    depends_on:
+      mysql: { condition: service_healthy }
+      secret-service: { condition: service_healthy }
+      hermes-agent-coder19: { condition: service_started }
+    environment:
+      <<: *mini-router-env-base
+      AGENT_NAME: "coder19"
+      GITEA_PASSWORD_FILE: "/run/omcgitea/tokens/agent-coder19.password"
+    volumes:
+      - ../.claude-team-data/${PROFILE:-dev}/acp/coder19:/var/run/acp:ro
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-coder19.password:/run/omcgitea/tokens/agent-coder19.password:ro
+    expose: ["8645"]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8645/healthz >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+
+  hermes-agent-coder20:
+    <<: *hermes-agent-base
+    profiles: ["dev", "test"]
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+    environment:
+      <<: *hermes-env-base
+      AGENT_NAME: "coder20"
+      GITEA_TOKEN_FILE: "/run/omcgitea/tokens/agent-coder20.token"
+    volumes:
+      - ../.claude-team-data/${PROFILE:-dev}/hermes/coder20:/opt/data
+      - ../.claude-team-data/${PROFILE:-dev}/acp/coder20:/var/run/acp
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-coder20.token:/run/omcgitea/tokens/agent-coder20.token:ro
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-coder20-mm.token:/run/omcgitea/tokens/agent-coder20-mm.token:ro
+
+  mini-router-coder20:
+    <<: *mini-router-base
+    profiles: ["dev", "test"]
+    depends_on:
+      mysql: { condition: service_healthy }
+      secret-service: { condition: service_healthy }
+      hermes-agent-coder20: { condition: service_started }
+    environment:
+      <<: *mini-router-env-base
+      AGENT_NAME: "coder20"
+      GITEA_PASSWORD_FILE: "/run/omcgitea/tokens/agent-coder20.password"
+    volumes:
+      - ../.claude-team-data/${PROFILE:-dev}/acp/coder20:/var/run/acp:ro
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-coder20.password:/run/omcgitea/tokens/agent-coder20.password:ro
+    expose: ["8645"]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8645/healthz >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+
+  hermes-agent-coder21:
+    <<: *hermes-agent-base
+    profiles: ["dev", "test"]
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+    environment:
+      <<: *hermes-env-base
+      AGENT_NAME: "coder21"
+      GITEA_TOKEN_FILE: "/run/omcgitea/tokens/agent-coder21.token"
+    volumes:
+      - ../.claude-team-data/${PROFILE:-dev}/hermes/coder21:/opt/data
+      - ../.claude-team-data/${PROFILE:-dev}/acp/coder21:/var/run/acp
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-coder21.token:/run/omcgitea/tokens/agent-coder21.token:ro
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-coder21-mm.token:/run/omcgitea/tokens/agent-coder21-mm.token:ro
+
+  mini-router-coder21:
+    <<: *mini-router-base
+    profiles: ["dev", "test"]
+    depends_on:
+      mysql: { condition: service_healthy }
+      secret-service: { condition: service_healthy }
+      hermes-agent-coder21: { condition: service_started }
+    environment:
+      <<: *mini-router-env-base
+      AGENT_NAME: "coder21"
+      GITEA_PASSWORD_FILE: "/run/omcgitea/tokens/agent-coder21.password"
+    volumes:
+      - ../.claude-team-data/${PROFILE:-dev}/acp/coder21:/var/run/acp:ro
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-coder21.password:/run/omcgitea/tokens/agent-coder21.password:ro
+    expose: ["8645"]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8645/healthz >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+
+  hermes-agent-coder22:
+    <<: *hermes-agent-base
+    profiles: ["dev", "test"]
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+    environment:
+      <<: *hermes-env-base
+      AGENT_NAME: "coder22"
+      GITEA_TOKEN_FILE: "/run/omcgitea/tokens/agent-coder22.token"
+    volumes:
+      - ../.claude-team-data/${PROFILE:-dev}/hermes/coder22:/opt/data
+      - ../.claude-team-data/${PROFILE:-dev}/acp/coder22:/var/run/acp
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-coder22.token:/run/omcgitea/tokens/agent-coder22.token:ro
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-coder22-mm.token:/run/omcgitea/tokens/agent-coder22-mm.token:ro
+
+  mini-router-coder22:
+    <<: *mini-router-base
+    profiles: ["dev", "test"]
+    depends_on:
+      mysql: { condition: service_healthy }
+      secret-service: { condition: service_healthy }
+      hermes-agent-coder22: { condition: service_started }
+    environment:
+      <<: *mini-router-env-base
+      AGENT_NAME: "coder22"
+      GITEA_PASSWORD_FILE: "/run/omcgitea/tokens/agent-coder22.password"
+    volumes:
+      - ../.claude-team-data/${PROFILE:-dev}/acp/coder22:/var/run/acp:ro
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-coder22.password:/run/omcgitea/tokens/agent-coder22.password:ro
+    expose: ["8645"]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8645/healthz >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+
+  hermes-agent-coder23:
+    <<: *hermes-agent-base
+    profiles: ["dev", "test"]
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+    environment:
+      <<: *hermes-env-base
+      AGENT_NAME: "coder23"
+      GITEA_TOKEN_FILE: "/run/omcgitea/tokens/agent-coder23.token"
+    volumes:
+      - ../.claude-team-data/${PROFILE:-dev}/hermes/coder23:/opt/data
+      - ../.claude-team-data/${PROFILE:-dev}/acp/coder23:/var/run/acp
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-coder23.token:/run/omcgitea/tokens/agent-coder23.token:ro
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-coder23-mm.token:/run/omcgitea/tokens/agent-coder23-mm.token:ro
+
+  mini-router-coder23:
+    <<: *mini-router-base
+    profiles: ["dev", "test"]
+    depends_on:
+      mysql: { condition: service_healthy }
+      secret-service: { condition: service_healthy }
+      hermes-agent-coder23: { condition: service_started }
+    environment:
+      <<: *mini-router-env-base
+      AGENT_NAME: "coder23"
+      GITEA_PASSWORD_FILE: "/run/omcgitea/tokens/agent-coder23.password"
+    volumes:
+      - ../.claude-team-data/${PROFILE:-dev}/acp/coder23:/var/run/acp:ro
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-coder23.password:/run/omcgitea/tokens/agent-coder23.password:ro
+    expose: ["8645"]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8645/healthz >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+
+  hermes-agent-coder24:
+    <<: *hermes-agent-base
+    profiles: ["dev", "test"]
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+    environment:
+      <<: *hermes-env-base
+      AGENT_NAME: "coder24"
+      GITEA_TOKEN_FILE: "/run/omcgitea/tokens/agent-coder24.token"
+    volumes:
+      - ../.claude-team-data/${PROFILE:-dev}/hermes/coder24:/opt/data
+      - ../.claude-team-data/${PROFILE:-dev}/acp/coder24:/var/run/acp
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-coder24.token:/run/omcgitea/tokens/agent-coder24.token:ro
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-coder24-mm.token:/run/omcgitea/tokens/agent-coder24-mm.token:ro
+
+  mini-router-coder24:
+    <<: *mini-router-base
+    profiles: ["dev", "test"]
+    depends_on:
+      mysql: { condition: service_healthy }
+      secret-service: { condition: service_healthy }
+      hermes-agent-coder24: { condition: service_started }
+    environment:
+      <<: *mini-router-env-base
+      AGENT_NAME: "coder24"
+      GITEA_PASSWORD_FILE: "/run/omcgitea/tokens/agent-coder24.password"
+    volumes:
+      - ../.claude-team-data/${PROFILE:-dev}/acp/coder24:/var/run/acp:ro
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-coder24.password:/run/omcgitea/tokens/agent-coder24.password:ro
+    expose: ["8645"]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8645/healthz >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+
+  hermes-agent-coder25:
+    <<: *hermes-agent-base
+    profiles: ["dev", "test"]
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+    environment:
+      <<: *hermes-env-base
+      AGENT_NAME: "coder25"
+      GITEA_TOKEN_FILE: "/run/omcgitea/tokens/agent-coder25.token"
+    volumes:
+      - ../.claude-team-data/${PROFILE:-dev}/hermes/coder25:/opt/data
+      - ../.claude-team-data/${PROFILE:-dev}/acp/coder25:/var/run/acp
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-coder25.token:/run/omcgitea/tokens/agent-coder25.token:ro
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-coder25-mm.token:/run/omcgitea/tokens/agent-coder25-mm.token:ro
+
+  mini-router-coder25:
+    <<: *mini-router-base
+    profiles: ["dev", "test"]
+    depends_on:
+      mysql: { condition: service_healthy }
+      secret-service: { condition: service_healthy }
+      hermes-agent-coder25: { condition: service_started }
+    environment:
+      <<: *mini-router-env-base
+      AGENT_NAME: "coder25"
+      GITEA_PASSWORD_FILE: "/run/omcgitea/tokens/agent-coder25.password"
+    volumes:
+      - ../.claude-team-data/${PROFILE:-dev}/acp/coder25:/var/run/acp:ro
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-coder25.password:/run/omcgitea/tokens/agent-coder25.password:ro
+    expose: ["8645"]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8645/healthz >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+
+  hermes-agent-coder26:
+    <<: *hermes-agent-base
+    profiles: ["dev", "test"]
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+    environment:
+      <<: *hermes-env-base
+      AGENT_NAME: "coder26"
+      GITEA_TOKEN_FILE: "/run/omcgitea/tokens/agent-coder26.token"
+    volumes:
+      - ../.claude-team-data/${PROFILE:-dev}/hermes/coder26:/opt/data
+      - ../.claude-team-data/${PROFILE:-dev}/acp/coder26:/var/run/acp
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-coder26.token:/run/omcgitea/tokens/agent-coder26.token:ro
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-coder26-mm.token:/run/omcgitea/tokens/agent-coder26-mm.token:ro
+
+  mini-router-coder26:
+    <<: *mini-router-base
+    profiles: ["dev", "test"]
+    depends_on:
+      mysql: { condition: service_healthy }
+      secret-service: { condition: service_healthy }
+      hermes-agent-coder26: { condition: service_started }
+    environment:
+      <<: *mini-router-env-base
+      AGENT_NAME: "coder26"
+      GITEA_PASSWORD_FILE: "/run/omcgitea/tokens/agent-coder26.password"
+    volumes:
+      - ../.claude-team-data/${PROFILE:-dev}/acp/coder26:/var/run/acp:ro
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-coder26.password:/run/omcgitea/tokens/agent-coder26.password:ro
+    expose: ["8645"]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8645/healthz >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+
+  hermes-agent-coder27:
+    <<: *hermes-agent-base
+    profiles: ["dev", "test"]
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+    environment:
+      <<: *hermes-env-base
+      AGENT_NAME: "coder27"
+      GITEA_TOKEN_FILE: "/run/omcgitea/tokens/agent-coder27.token"
+    volumes:
+      - ../.claude-team-data/${PROFILE:-dev}/hermes/coder27:/opt/data
+      - ../.claude-team-data/${PROFILE:-dev}/acp/coder27:/var/run/acp
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-coder27.token:/run/omcgitea/tokens/agent-coder27.token:ro
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-coder27-mm.token:/run/omcgitea/tokens/agent-coder27-mm.token:ro
+
+  mini-router-coder27:
+    <<: *mini-router-base
+    profiles: ["dev", "test"]
+    depends_on:
+      mysql: { condition: service_healthy }
+      secret-service: { condition: service_healthy }
+      hermes-agent-coder27: { condition: service_started }
+    environment:
+      <<: *mini-router-env-base
+      AGENT_NAME: "coder27"
+      GITEA_PASSWORD_FILE: "/run/omcgitea/tokens/agent-coder27.password"
+    volumes:
+      - ../.claude-team-data/${PROFILE:-dev}/acp/coder27:/var/run/acp:ro
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-coder27.password:/run/omcgitea/tokens/agent-coder27.password:ro
+    expose: ["8645"]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8645/healthz >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+
+  hermes-agent-coder28:
+    <<: *hermes-agent-base
+    profiles: ["dev", "test"]
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+    environment:
+      <<: *hermes-env-base
+      AGENT_NAME: "coder28"
+      GITEA_TOKEN_FILE: "/run/omcgitea/tokens/agent-coder28.token"
+    volumes:
+      - ../.claude-team-data/${PROFILE:-dev}/hermes/coder28:/opt/data
+      - ../.claude-team-data/${PROFILE:-dev}/acp/coder28:/var/run/acp
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-coder28.token:/run/omcgitea/tokens/agent-coder28.token:ro
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-coder28-mm.token:/run/omcgitea/tokens/agent-coder28-mm.token:ro
+
+  mini-router-coder28:
+    <<: *mini-router-base
+    profiles: ["dev", "test"]
+    depends_on:
+      mysql: { condition: service_healthy }
+      secret-service: { condition: service_healthy }
+      hermes-agent-coder28: { condition: service_started }
+    environment:
+      <<: *mini-router-env-base
+      AGENT_NAME: "coder28"
+      GITEA_PASSWORD_FILE: "/run/omcgitea/tokens/agent-coder28.password"
+    volumes:
+      - ../.claude-team-data/${PROFILE:-dev}/acp/coder28:/var/run/acp:ro
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-coder28.password:/run/omcgitea/tokens/agent-coder28.password:ro
+    expose: ["8645"]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8645/healthz >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+
+  hermes-agent-coder29:
+    <<: *hermes-agent-base
+    profiles: ["dev", "test"]
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+    environment:
+      <<: *hermes-env-base
+      AGENT_NAME: "coder29"
+      GITEA_TOKEN_FILE: "/run/omcgitea/tokens/agent-coder29.token"
+    volumes:
+      - ../.claude-team-data/${PROFILE:-dev}/hermes/coder29:/opt/data
+      - ../.claude-team-data/${PROFILE:-dev}/acp/coder29:/var/run/acp
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-coder29.token:/run/omcgitea/tokens/agent-coder29.token:ro
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-coder29-mm.token:/run/omcgitea/tokens/agent-coder29-mm.token:ro
+
+  mini-router-coder29:
+    <<: *mini-router-base
+    profiles: ["dev", "test"]
+    depends_on:
+      mysql: { condition: service_healthy }
+      secret-service: { condition: service_healthy }
+      hermes-agent-coder29: { condition: service_started }
+    environment:
+      <<: *mini-router-env-base
+      AGENT_NAME: "coder29"
+      GITEA_PASSWORD_FILE: "/run/omcgitea/tokens/agent-coder29.password"
+    volumes:
+      - ../.claude-team-data/${PROFILE:-dev}/acp/coder29:/var/run/acp:ro
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-coder29.password:/run/omcgitea/tokens/agent-coder29.password:ro
+    expose: ["8645"]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8645/healthz >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+
+  hermes-agent-coder30:
+    <<: *hermes-agent-base
+    profiles: ["dev", "test"]
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+    environment:
+      <<: *hermes-env-base
+      AGENT_NAME: "coder30"
+      GITEA_TOKEN_FILE: "/run/omcgitea/tokens/agent-coder30.token"
+    volumes:
+      - ../.claude-team-data/${PROFILE:-dev}/hermes/coder30:/opt/data
+      - ../.claude-team-data/${PROFILE:-dev}/acp/coder30:/var/run/acp
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-coder30.token:/run/omcgitea/tokens/agent-coder30.token:ro
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-coder30-mm.token:/run/omcgitea/tokens/agent-coder30-mm.token:ro
+
+  mini-router-coder30:
+    <<: *mini-router-base
+    profiles: ["dev", "test"]
+    depends_on:
+      mysql: { condition: service_healthy }
+      secret-service: { condition: service_healthy }
+      hermes-agent-coder30: { condition: service_started }
+    environment:
+      <<: *mini-router-env-base
+      AGENT_NAME: "coder30"
+      GITEA_PASSWORD_FILE: "/run/omcgitea/tokens/agent-coder30.password"
+    volumes:
+      - ../.claude-team-data/${PROFILE:-dev}/acp/coder30:/var/run/acp:ro
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-coder30.password:/run/omcgitea/tokens/agent-coder30.password:ro
+    expose: ["8645"]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8645/healthz >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+
+  # ===== HERMES nodes (AGENT_KIND=hermes) — added for hermes patch e2e test =====
+
+  hermes-agent-hermes1:
+    <<: *hermes-agent-base
+    profiles: ["dev"]
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+    environment:
+      <<: *hermes-env-base
+      AGENT_KIND: "hermes"
+      AGENT_NAME: "hermes1"
+      GITEA_TOKEN_FILE: "/run/omcgitea/tokens/agent-hermes1.token"
+    volumes:
+      - ../.claude-team-data/${PROFILE:-dev}/hermes/hermes1:/opt/data
+      - ../.claude-team-data/${PROFILE:-dev}/acp/hermes1:/var/run/acp
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-hermes1.token:/run/omcgitea/tokens/agent-hermes1.token:ro
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-hermes1-mm.token:/run/omcgitea/tokens/agent-hermes1-mm.token:ro
+
+  hermes-agent-hermes2:
+    <<: *hermes-agent-base
+    profiles: ["dev"]
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+    environment:
+      <<: *hermes-env-base
+      AGENT_KIND: "hermes"
+      AGENT_NAME: "hermes2"
+      GITEA_TOKEN_FILE: "/run/omcgitea/tokens/agent-hermes2.token"
+    volumes:
+      - ../.claude-team-data/${PROFILE:-dev}/hermes/hermes2:/opt/data
+      - ../.claude-team-data/${PROFILE:-dev}/acp/hermes2:/var/run/acp
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-hermes2.token:/run/omcgitea/tokens/agent-hermes2.token:ro
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-hermes2-mm.token:/run/omcgitea/tokens/agent-hermes2-mm.token:ro
+
+  hermes-agent-hermes3:
+    <<: *hermes-agent-base
+    profiles: ["dev"]
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+    environment:
+      <<: *hermes-env-base
+      AGENT_KIND: "hermes"
+      AGENT_NAME: "hermes3"
+      GITEA_TOKEN_FILE: "/run/omcgitea/tokens/agent-hermes3.token"
+    volumes:
+      - ../.claude-team-data/${PROFILE:-dev}/hermes/hermes3:/opt/data
+      - ../.claude-team-data/${PROFILE:-dev}/acp/hermes3:/var/run/acp
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-hermes3.token:/run/omcgitea/tokens/agent-hermes3.token:ro
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-hermes3-mm.token:/run/omcgitea/tokens/agent-hermes3-mm.token:ro
+
+  hermes-agent-hermes4:
+    <<: *hermes-agent-base
+    profiles: ["dev"]
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+    environment:
+      <<: *hermes-env-base
+      AGENT_KIND: "hermes"
+      AGENT_NAME: "hermes4"
+      GITEA_TOKEN_FILE: "/run/omcgitea/tokens/agent-hermes4.token"
+    volumes:
+      - ../.claude-team-data/${PROFILE:-dev}/hermes/hermes4:/opt/data
+      - ../.claude-team-data/${PROFILE:-dev}/acp/hermes4:/var/run/acp
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-hermes4.token:/run/omcgitea/tokens/agent-hermes4.token:ro
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-hermes4-mm.token:/run/omcgitea/tokens/agent-hermes4-mm.token:ro
+
+  hermes-agent-hermes5:
+    <<: *hermes-agent-base
+    profiles: ["dev"]
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+    environment:
+      <<: *hermes-env-base
+      AGENT_KIND: "hermes"
+      AGENT_NAME: "hermes5"
+      GITEA_TOKEN_FILE: "/run/omcgitea/tokens/agent-hermes5.token"
+    volumes:
+      - ../.claude-team-data/${PROFILE:-dev}/hermes/hermes5:/opt/data
+      - ../.claude-team-data/${PROFILE:-dev}/acp/hermes5:/var/run/acp
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-hermes5.token:/run/omcgitea/tokens/agent-hermes5.token:ro
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-hermes5-mm.token:/run/omcgitea/tokens/agent-hermes5-mm.token:ro
+
+  hermes-agent-hermes6:
+    <<: *hermes-agent-base
+    profiles: ["dev"]
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+    environment:
+      <<: *hermes-env-base
+      AGENT_KIND: "hermes"
+      AGENT_NAME: "hermes6"
+      GITEA_TOKEN_FILE: "/run/omcgitea/tokens/agent-hermes6.token"
+    volumes:
+      - ../.claude-team-data/${PROFILE:-dev}/hermes/hermes6:/opt/data
+      - ../.claude-team-data/${PROFILE:-dev}/acp/hermes6:/var/run/acp
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-hermes6.token:/run/omcgitea/tokens/agent-hermes6.token:ro
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-hermes6-mm.token:/run/omcgitea/tokens/agent-hermes6-mm.token:ro
+
+  hermes-agent-hermes7:
+    <<: *hermes-agent-base
+    profiles: ["dev"]
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+    environment:
+      <<: *hermes-env-base
+      AGENT_KIND: "hermes"
+      AGENT_NAME: "hermes7"
+      GITEA_TOKEN_FILE: "/run/omcgitea/tokens/agent-hermes7.token"
+    volumes:
+      - ../.claude-team-data/${PROFILE:-dev}/hermes/hermes7:/opt/data
+      - ../.claude-team-data/${PROFILE:-dev}/acp/hermes7:/var/run/acp
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-hermes7.token:/run/omcgitea/tokens/agent-hermes7.token:ro
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-hermes7-mm.token:/run/omcgitea/tokens/agent-hermes7-mm.token:ro
+
+  hermes-agent-hermes8:
+    <<: *hermes-agent-base
+    profiles: ["dev"]
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+    environment:
+      <<: *hermes-env-base
+      AGENT_KIND: "hermes"
+      AGENT_NAME: "hermes8"
+      GITEA_TOKEN_FILE: "/run/omcgitea/tokens/agent-hermes8.token"
+    volumes:
+      - ../.claude-team-data/${PROFILE:-dev}/hermes/hermes8:/opt/data
+      - ../.claude-team-data/${PROFILE:-dev}/acp/hermes8:/var/run/acp
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-hermes8.token:/run/omcgitea/tokens/agent-hermes8.token:ro
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-hermes8-mm.token:/run/omcgitea/tokens/agent-hermes8-mm.token:ro
+
+  # ===== mini-router sidecars for hermes nodes =====
+
+  mini-router-hermes1:
+    <<: *mini-router-base
+    profiles: ["dev"]
+    depends_on:
+      mysql: { condition: service_healthy }
+      secret-service: { condition: service_healthy }
+      hermes-agent-hermes1: { condition: service_started }
+    environment:
+      <<: *mini-router-env-base
+      ACP_SESSION_NAMESPACE: "hermes"
+      AGENT_NAME: "hermes1"
+      GITEA_PASSWORD_FILE: "/run/omcgitea/tokens/agent-hermes1.password"
+    volumes:
+      - ../.claude-team-data/${PROFILE:-dev}/acp/hermes1:/var/run/acp:ro
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-hermes1.password:/run/omcgitea/tokens/agent-hermes1.password:ro
+    expose: ["8645"]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8645/healthz >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+
+  mini-router-hermes2:
+    <<: *mini-router-base
+    profiles: ["dev"]
+    depends_on:
+      mysql: { condition: service_healthy }
+      secret-service: { condition: service_healthy }
+      hermes-agent-hermes2: { condition: service_started }
+    environment:
+      <<: *mini-router-env-base
+      ACP_SESSION_NAMESPACE: "hermes"
+      AGENT_NAME: "hermes2"
+      GITEA_PASSWORD_FILE: "/run/omcgitea/tokens/agent-hermes2.password"
+    volumes:
+      - ../.claude-team-data/${PROFILE:-dev}/acp/hermes2:/var/run/acp:ro
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-hermes2.password:/run/omcgitea/tokens/agent-hermes2.password:ro
+    expose: ["8645"]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8645/healthz >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+
+  mini-router-hermes3:
+    <<: *mini-router-base
+    profiles: ["dev"]
+    depends_on:
+      mysql: { condition: service_healthy }
+      secret-service: { condition: service_healthy }
+      hermes-agent-hermes3: { condition: service_started }
+    environment:
+      <<: *mini-router-env-base
+      ACP_SESSION_NAMESPACE: "hermes"
+      AGENT_NAME: "hermes3"
+      GITEA_PASSWORD_FILE: "/run/omcgitea/tokens/agent-hermes3.password"
+    volumes:
+      - ../.claude-team-data/${PROFILE:-dev}/acp/hermes3:/var/run/acp:ro
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-hermes3.password:/run/omcgitea/tokens/agent-hermes3.password:ro
+    expose: ["8645"]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8645/healthz >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+
+  mini-router-hermes4:
+    <<: *mini-router-base
+    profiles: ["dev"]
+    depends_on:
+      mysql: { condition: service_healthy }
+      secret-service: { condition: service_healthy }
+      hermes-agent-hermes4: { condition: service_started }
+    environment:
+      <<: *mini-router-env-base
+      ACP_SESSION_NAMESPACE: "hermes"
+      AGENT_NAME: "hermes4"
+      GITEA_PASSWORD_FILE: "/run/omcgitea/tokens/agent-hermes4.password"
+    volumes:
+      - ../.claude-team-data/${PROFILE:-dev}/acp/hermes4:/var/run/acp:ro
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-hermes4.password:/run/omcgitea/tokens/agent-hermes4.password:ro
+    expose: ["8645"]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8645/healthz >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+
+  mini-router-hermes5:
+    <<: *mini-router-base
+    profiles: ["dev"]
+    depends_on:
+      mysql: { condition: service_healthy }
+      secret-service: { condition: service_healthy }
+      hermes-agent-hermes5: { condition: service_started }
+    environment:
+      <<: *mini-router-env-base
+      ACP_SESSION_NAMESPACE: "hermes"
+      AGENT_NAME: "hermes5"
+      GITEA_PASSWORD_FILE: "/run/omcgitea/tokens/agent-hermes5.password"
+    volumes:
+      - ../.claude-team-data/${PROFILE:-dev}/acp/hermes5:/var/run/acp:ro
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-hermes5.password:/run/omcgitea/tokens/agent-hermes5.password:ro
+    expose: ["8645"]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8645/healthz >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+
+  mini-router-hermes6:
+    <<: *mini-router-base
+    profiles: ["dev"]
+    depends_on:
+      mysql: { condition: service_healthy }
+      secret-service: { condition: service_healthy }
+      hermes-agent-hermes6: { condition: service_started }
+    environment:
+      <<: *mini-router-env-base
+      ACP_SESSION_NAMESPACE: "hermes"
+      AGENT_NAME: "hermes6"
+      GITEA_PASSWORD_FILE: "/run/omcgitea/tokens/agent-hermes6.password"
+    volumes:
+      - ../.claude-team-data/${PROFILE:-dev}/acp/hermes6:/var/run/acp:ro
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-hermes6.password:/run/omcgitea/tokens/agent-hermes6.password:ro
+    expose: ["8645"]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8645/healthz >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+
+  mini-router-hermes7:
+    <<: *mini-router-base
+    profiles: ["dev"]
+    depends_on:
+      mysql: { condition: service_healthy }
+      secret-service: { condition: service_healthy }
+      hermes-agent-hermes7: { condition: service_started }
+    environment:
+      <<: *mini-router-env-base
+      ACP_SESSION_NAMESPACE: "hermes"
+      AGENT_NAME: "hermes7"
+      GITEA_PASSWORD_FILE: "/run/omcgitea/tokens/agent-hermes7.password"
+    volumes:
+      - ../.claude-team-data/${PROFILE:-dev}/acp/hermes7:/var/run/acp:ro
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-hermes7.password:/run/omcgitea/tokens/agent-hermes7.password:ro
+    expose: ["8645"]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8645/healthz >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+
+  mini-router-hermes8:
+    <<: *mini-router-base
+    profiles: ["dev"]
+    depends_on:
+      mysql: { condition: service_healthy }
+      secret-service: { condition: service_healthy }
+      hermes-agent-hermes8: { condition: service_started }
+    environment:
+      <<: *mini-router-env-base
+      ACP_SESSION_NAMESPACE: "hermes"
+      AGENT_NAME: "hermes8"
+      GITEA_PASSWORD_FILE: "/run/omcgitea/tokens/agent-hermes8.password"
+    volumes:
+      - ../.claude-team-data/${PROFILE:-dev}/acp/hermes8:/var/run/acp:ro
+      - ../.claude-team-data/${PROFILE:-dev}/tokens/agent-hermes8.password:/run/omcgitea/tokens/agent-hermes8.password:ro
+    expose: ["8645"]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8645/healthz >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 6

@@ -1,0 +1,48 @@
+.claude/settings.local.json
+.claude/worktrees/
+.claude/coordination/
+*.log
+.DS_Store
+oh-my-claudecode/
+/hermes-agent/
+/mattermost-server/
+/claude-agent-acp/
+.claude-team-data/
+# per-sweep data roots (.claude-team-data-s6a, -method-2a, ...) hold agent
+# tokens and multi-GB run state; the bare pattern above missed them.
+.claude-team-data-*/
+.env
+.env.dev
+.env.prod
+.env.org-pbench
+.env.org-pbench-*
+.env.pbench-*
+.env.eng-3-1-agent*
+__pycache__/
+tests/node_modules/
+tests/_artifacts/
+router/node_modules/
+mini-router/node_modules/
+mini-router/dist/
+v2notes/
+/mattermost-webapp/
+.claude/scheduled_tasks.lock
+
+# prod-side generated per-profile agent compose overrides (rendered by tools/render-prod-agents.py)
+docker/generated/
+docker/_gen-prod.*.yml
+*.bak
+*.bak.*
+/ProgramBench/
+out/
+/agent-lightning/
+
+# internal-only scratch / reproduction notes (machine-specific, real backend/creds) — not for public repo
+/REPRODUCE.md
+/director_sop.md
+/mcp_discipline.md
+/sop_v2_extra.md
+/sop_v3_director.md
+
+# vitest run artifacts (root-owned, regenerated)
+.vite/

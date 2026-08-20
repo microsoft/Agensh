@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Team Harness · What we build</title>
+<style>
+  :root{
+    --bg:#F5F1E8;
+    --paper:#FBF7EE;
+    --ink:#1F1B16;
+    --muted:#6B6356;
+    --team:#CC785C;
+    --team-soft:#F4D5C6;
+    --boot:#E8B339;
+    --base:#8C8275;
+    --line:#E5DCC8;
+
+    --done:#4F8A5E;        /* green: done */
+    --done-soft:#DDEEDF;
+    --wip:#C97A2B;         /* orange: in progress */
+    --wip-soft:#FAE3CB;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;background:var(--bg);color:var(--ink);
+    font-family:"Inter","Helvetica Neue",system-ui,sans-serif;
+    -webkit-font-smoothing:antialiased;}
+  .strip{position:fixed;top:0;left:0;right:0;height:5px;
+    background:linear-gradient(90deg,var(--base) 0%,var(--team) 50%,var(--boot) 100%);z-index:10}
+  .brand{position:fixed;top:18px;right:32px;font-size:11px;letter-spacing:.25em;
+    color:var(--team);text-transform:uppercase;font-weight:700;z-index:10}
+
+  .page{max-width:1280px;margin:0 auto;padding:60px 56px 48px}
+
+  h1{font-size:34px;line-height:1.15;margin:0 0 6px;font-weight:800;letter-spacing:-.4px}
+  h1 .accent{color:var(--team)}
+  .sub{font-size:16px;color:var(--muted);margin-bottom:24px}
+
+  .legend{display:flex;gap:18px;flex-wrap:wrap;margin-bottom:22px;font-size:12.5px}
+  .lg{display:flex;align-items:center;gap:8px;font-weight:600;
+    padding:6px 12px;border-radius:999px;background:var(--paper);border:1px solid var(--line)}
+  .lg .pip{width:10px;height:10px;border-radius:50%}
+  .lg.done .pip{background:var(--done)}
+  .lg.wip .pip{background:var(--wip)}
+
+  .grid{display:grid;grid-template-columns:1fr 1fr;gap:18px}
+
+  .col h3{margin:0 0 10px;font-size:13px;letter-spacing:.18em;text-transform:uppercase;
+    color:var(--team);font-weight:800}
+
+  .item{background:var(--paper);border:1px solid var(--line);border-left:5px solid var(--team);
+    border-radius:10px;padding:14px 16px;margin-bottom:10px;
+    display:flex;align-items:center;justify-content:space-between;gap:14px}
+  .item .left{flex:1}
+  .item .name{font-size:16px;font-weight:700;color:var(--ink);margin-bottom:2px}
+  .item .desc{font-size:12.5px;color:var(--muted);line-height:1.5}
+  .status{flex:0 0 auto;font-size:11.5px;font-weight:800;letter-spacing:.1em;
+    text-transform:uppercase;padding:6px 11px;border-radius:999px;white-space:nowrap}
+  .status.done{background:var(--done-soft);color:var(--done);border:1px solid var(--done)}
+  .status.wip{background:var(--wip-soft);color:var(--wip);border:1px solid var(--wip)}
+  .status .check{margin-right:4px}
+
+  .item.head{background:var(--team-soft);border-left-color:var(--team);
+    border:1.5px solid var(--team)}
+  .item.head .name{color:#8E3D26;font-size:17px}
+
+  .footnote{margin-top:24px;background:var(--paper);border-left:4px solid var(--team);
+    padding:14px 18px;border-radius:6px;font-size:13.5px;line-height:1.6;color:var(--ink)}
+  .footnote b{color:var(--team)}
+</style>
+</head>
+<body>
+<div class="strip"></div>
+<div class="brand">team harness · details</div>
+
+<div class="page">
+
+  <h1>What <span class="accent">We Build</span> — and where we are</h1>
+  <div class="sub">The glue, the platforms, and the bootstrapped layer.</div>
+
+  <div class="legend">
+    <div class="lg done"><span class="pip"></span>Done</div>
+    <div class="lg wip"><span class="pip"></span>In progress</div>
+  </div>
+
+  <div class="grid">
+
+    <!-- LEFT: Team Harness we build -->
+    <div class="col">
+      <h3>Team Harness — what we build</h3>
+
+      <div class="item head">
+        <div class="left">
+          <div class="name">Environment Protocol — ACP</div>
+          <div class="desc">Reverse MCP / ACP · events → agent · the standard input channel for agents</div>
+        </div>
+        <div class="status done"><span class="check">✓</span>Done</div>
+      </div>
+
+      <div class="item">
+        <div class="left">
+          <div class="name">Collaboration platform — Gitea</div>
+          <div class="desc">Per-agent identity &amp; token · issue / PR / review / merge · branch protection · CI</div>
+        </div>
+        <div class="status done"><span class="check">✓</span>Done</div>
+      </div>
+
+      <div class="item">
+        <div class="left">
+          <div class="name">Scale validation — 300+ agents</div>
+          <div class="desc">Sidecar mini-router · precise event delivery · batching · self-healing under load</div>
+        </div>
+        <div class="status done"><span class="check">✓</span>Done</div>
+      </div>
+
+      <div class="item">
+        <div class="left">
+          <div class="name">Communication platform — Slack</div>
+          <div class="desc">Async channels · @mention routing · threading · human observers join on demand</div>
+        </div>
+        <div class="status done"><span class="check">✓</span>Done</div>
+      </div>
+
+      <div class="item">
+        <div class="left">
+          <div class="name">Slack stress test &amp; final integration</div>
+          <div class="desc">Throughput / fan-out validation · end-to-end Git ⨯ Slack workflow wiring</div>
+        </div>
+        <div class="status wip">● In progress</div>
+      </div>
+    </div>
+
+    <!-- RIGHT: Self-bootstrapped -->
+    <div class="col">
+      <h3>Self-Bootstrapped by agents</h3>
+
+      <div class="item" style="border-left-color:var(--boot)">
+        <div class="left">
+          <div class="name">Emergent team collaboration skills</div>
+          <div class="desc">Review patterns · PR etiquette · cross-repo flow — discovered &amp; refined by agents themselves</div>
+        </div>
+        <div class="status done"><span class="check">✓</span>Done</div>
+      </div>
+
+      <div class="item" style="border-left-color:var(--boot);opacity:.55">
+        <div class="left">
+          <div class="name">Team memory at scale</div>
+          <div class="desc">Decisions · post-mortems · domain knowledge · commit/PR semantics</div>
+        </div>
+        <div class="status wip">next</div>
+      </div>
+
+      <div class="item" style="border-left-color:var(--boot);opacity:.55">
+        <div class="left">
+          <div class="name">Feedback loop into LLM training</div>
+          <div class="desc">Skills &amp; memory harvested from real teamwork → next-gen model priors</div>
+        </div>
+        <div class="status wip">next</div>
+      </div>
+
+      <h3 style="margin-top:22px">Baseline (already industry-standard)</h3>
+      <div class="item" style="border-left-color:var(--base);background:#EFE9D8">
+        <div class="left">
+          <div class="name">Single-agent Harness</div>
+          <div class="desc">Tool use (forward MCP) · context management · single-agent skill / memory · LLM loop</div>
+        </div>
+        <div class="status done" style="background:#E1DCC9;color:#5A5040;border-color:#5A5040">baseline</div>
+      </div>
+
+    </div>
+
+  </div>
+
+  <div class="footnote">
+    <b>Where we are:</b> Environment protocol (ACP), collaboration (Gitea), 300+ agent scale, communication (Slack), and the first emergent team skills — <b>all done</b>. Now closing the loop with <b>Slack stress test &amp; final integration</b>.
+  </div>
+
+</div>
+</body>
+</html>

@@ -1,0 +1,129 @@
+# docker-compose.pbench-1team-board.yml — 1team (setting 2a) with shared board.
+#
+# Layers on top of docker-compose.pbench-1team.yml. Adds:
+#   1. A central `board-service` (Python FastAPI) container on the sealed
+#      default network. Reuses the profile's mysql for persistence.
+#   2. Bind-mounts mcp-board/ into every agent at /opt/mcp-board/.
+#   3. Injects BOARD_SERVICE_URL / BOARD_QUEUE_ID / BOARD_IDS into every agent
+#      so the mcp.json.tmpl's `board` MCP server entry gets a live URL.
+#
+# Compose merge semantics: `environment` map merges; `volumes` list REPLACES.
+# So we duplicate the 1team overlay's role-fragment mounts here in addition to
+# the new mcp-board mount. Any change to the 1team overlay's volumes list must
+# be mirrored here.
+
+x-board-agent-env: &board-agent-env
+  BOARD_SERVICE_URL: "http://board-service:8660"
+  BOARD_QUEUE_ID: "pbench-top"
+  BOARD_IDS: "pbench-top"
+
+# Duplicated from docker-compose.pbench-1team.yml because volumes lists
+# are replace-not-merge. Keep in sync.
+x-board-worker-vols: &board-worker-vols
+  - ./hermes-agent/board-preamble.md:/opt/omcgitea/templates-claude/board-preamble.md:ro
+  # The pinned v48-cleanroom image predates the board, so its baked-in
+  # mcp.json.tmpl has no `board` server and the MCP could never register —
+  # agents fell back to hand-rolled curl. Mount the current template rather
+  # than rebuilding the pinned baseline.
+  - ./hermes-agent/templates-claude/mcp.json.tmpl:/opt/omcgitea/templates-claude/mcp.json.tmpl:ro
+  - ./hermes-agent/templates-claude-1team/roles/base.board.md:/opt/omcgitea/templates-claude/roles/base.md:ro
+  - ./hermes-agent/templates-claude-1team/pbench-brief.md:/opt/omcgitea/templates-claude/pbench-brief.md:ro
+  - ./hermes-agent/templates-claude-1team/settings.json.tmpl:/opt/omcgitea/templates-claude/settings.json.tmpl:ro
+  - ../mcp-board:/opt/mcp-board:ro
+
+x-board-lead-vols: &board-lead-vols
+  - ./hermes-agent/board-preamble.md:/opt/omcgitea/templates-claude/board-preamble.md:ro
+  # The pinned v48-cleanroom image predates the board, so its baked-in
+  # mcp.json.tmpl has no `board` server and the MCP could never register —
+  # agents fell back to hand-rolled curl. Mount the current template rather
+  # than rebuilding the pinned baseline.
+  - ./hermes-agent/templates-claude/mcp.json.tmpl:/opt/omcgitea/templates-claude/mcp.json.tmpl:ro
+  - ./hermes-agent/templates-claude-1team/roles/base.board.md:/opt/omcgitea/templates-claude/roles/base.md:ro
+  - ./hermes-agent/templates-claude-1team/pbench-brief.md:/opt/omcgitea/templates-claude/pbench-brief.md:ro
+  - ./hermes-agent/templates-claude-1team/settings.json.tmpl:/opt/omcgitea/templates-claude/settings.json.tmpl:ro
+  - ./hermes-agent/templates-claude-1team/roles/director_lead:/opt/omcgitea/templates-claude/roles/director_lead:ro
+  - ../mcp-board:/opt/mcp-board:ro
+
+services:
+  # ---- central board-service ---------------------------------------------
+  board-service:
+    image: omcgitea-board:local
+    restart: unless-stopped
+    cgroup_parent: pbench.slice
+    depends_on:
+      mysql: { condition: service_healthy }
+    environment:
+      MYSQL_DSN: "mysql://omcgitea:${MYSQL_PASSWORD}@mysql:3306/omcgitea"
+      BOARD_LISTEN_PORT: "8660"
+      # Upstream's shared_lessons_render_mode + the feature flags that
+      # default OFF there but gate real behavior (patch latest-wins, the
+      # [status=final] lifecycle suffix). Overridable per run.
+      BOARD_RENDER_MODE: "${BOARD_RENDER_MODE:-full}"
+      BOARD_FEATURE_FLAGS_JSON: "${BOARD_FEATURE_FLAGS_JSON:-}"
+      BOARD_PATCH_CLEAN_DELAY_STEPS: "${BOARD_PATCH_CLEAN_DELAY_STEPS:-8}"
+      BOARD_LIFECYCLE_DIR: "/data/lifecycle"
+      BOARD_MEMBERS_JSON: >-
+        {"pbench-top":[
+          "${ORG_NAME}-team1-lead",
+          "${ORG_NAME}-team1-reviewer",
+          "${ORG_NAME}-team1-worker1",
+          "${ORG_NAME}-team1-worker2",
+          "${ORG_NAME}-team1-worker3",
+          "${ORG_NAME}-team1-worker4"
+        ]}
+    volumes:
+      # render_count per gist is the only direct evidence a note ever
+      # reached another agent; keep it on the host so it survives teardown.
+      - ${DATA_ROOT:-../.claude-team-data}/${PROFILE}/board-lifecycle:/data/lifecycle
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8660/healthz', timeout=2)\""]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  # ---- inject BOARD_* env + bind-mount mcp-board into every 1team agent --
+  hermes-agent-team1-lead:
+    environment: *board-agent-env
+    volumes: *board-lead-vols
+  hermes-agent-team1-worker1:
+    environment: *board-agent-env
+    volumes: *board-worker-vols
+  hermes-agent-team1-worker2:
+    environment: *board-agent-env
+    volumes: *board-worker-vols
+  hermes-agent-team1-worker3:
+    environment: *board-agent-env
+    volumes: *board-worker-vols
+  hermes-agent-team1-worker4:
+    environment: *board-agent-env
+    volumes: *board-worker-vols
+  hermes-agent-team1-reviewer:
+    environment: *board-agent-env
+    volumes: *board-worker-vols
+
+  # Routers need the same board config as their agent: forced read/write
+  # lives in the router, not the agent.
+  mini-router-team1-lead:
+    environment:
+      BOARD_SERVICE_URL: "http://board-service:8660"
+      BOARD_IDS: "pbench-top"
+  mini-router-team1-worker1:
+    environment:
+      BOARD_SERVICE_URL: "http://board-service:8660"
+      BOARD_IDS: "pbench-top"
+  mini-router-team1-worker2:
+    environment:
+      BOARD_SERVICE_URL: "http://board-service:8660"
+      BOARD_IDS: "pbench-top"
+  mini-router-team1-worker3:
+    environment:
+      BOARD_SERVICE_URL: "http://board-service:8660"
+      BOARD_IDS: "pbench-top"
+  mini-router-team1-worker4:
+    environment:
+      BOARD_SERVICE_URL: "http://board-service:8660"
+      BOARD_IDS: "pbench-top"
+  mini-router-team1-reviewer:
+    environment:
+      BOARD_SERVICE_URL: "http://board-service:8660"
+      BOARD_IDS: "pbench-top"

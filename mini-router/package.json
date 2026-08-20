@@ -1,0 +1,26 @@
+{
+  "name": "omcgitea-mini-router",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20.10"
+  },
+  "description": "Per-agent sidecar router (R7). MySQL-backed events + ACP unix socket.",
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@agentclientprotocol/sdk": "^0.20.0",
+    "@types/ws": "^8.18.1",
+    "mysql2": "^3.22.3",
+    "ws": "^8.20.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.39",
+    "typescript": "^5.9.3",
+    "vitest": "^2.1.9"
+  }
+}

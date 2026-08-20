@@ -1,0 +1,26 @@
+{
+  "name": "omcgitea-tests",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20.10"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "test:unit": "vitest run -c vitest.unit.config.ts",
+    "test:pbench": "vitest run -c pbench/vitest.config.ts",
+    "test:sidecar": "vitest run -c f8_sidecar/vitest.config.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "@types/ws": "^8.18.1",
+    "typescript": "^5.5.0",
+    "vitest": "^2.1.0",
+    "ws": "^8.20.0"
+  },
+  "dependencies": {
+    "mysql2": "^3.22.3"
+  }
+}

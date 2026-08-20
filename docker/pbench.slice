@@ -1,0 +1,41 @@
+# ProgramBench aggregate resource ceiling.
+#
+# Sweep 6.10 took the machine down on 2026-08-06: one `executable` process, started by a test
+# case inside an agent container, reached 474.13 GB of 503 GB and the kernel OOMed system-wide
+# (11 CONSTRAINT_NONE kills). See v2docs/INCIDENT_6.10_MEMORY.md.
+#
+# Nothing bounded it. CI job containers were capped, but workers run the suite inside the AGENT
+# container, which had no limit; the per-case `timeout -k 2 30` never fired because 30s is
+# ample to allocate that much; and 6.6's fan-out fixes do not apply to a single allocation.
+#
+# This slice is the ceiling for everything ProgramBench runs -- agents, mini-routers, gitea,
+# mysql, mattermost, act_runner, the CI job containers it spawns, and host-side eval. On
+# cgroup v2 a child cgroup is created UNDER its parent, so a container can only lower its own
+# limit, never exceed this one. That is the property the whole design rests on: the cap cannot
+# be rewritten from inside a container by an agent.
+#
+# Install:  sudo cp docker/pbench.slice /etc/systemd/system/ && sudo systemctl daemon-reload
+# Verify:   systemctl show pbench.slice -p MemoryMax
+#
+[Unit]
+Description=ProgramBench experiments (rollout, eval, sweep) — aggregate resource ceiling
+Before=slices.target
+
+[Slice]
+# 80% of physical RAM, as a PERCENTAGE: this repo runs on more than one host, and a hardcoded
+# byte count silently becomes the wrong fraction on the next one. The remaining 20% is what
+# keeps sshd, dockerd and the journal alive when a run misbehaves -- in 6.10 the machine became
+# unreachable, which is why the incident ran for 4.5 days before anyone could see it.
+MemoryMax=80%
+
+# Start reclaiming before the hard limit, so a slow leak is throttled rather than OOM-killed.
+MemoryHigh=70%
+
+# Do NOT let the slice push the machine into swap to stay under the cap: swap here is an 8 GB
+# file (1.6% of RAM) and thrashing it is worse than a kill.
+MemorySwapMax=0
+
+# The 6.6 failure was PIDs, not memory: `xargs -P $(nproc)` at nproc=256 exhausted the process
+# table until sshd could not fork. Bound it here too, so both known failure modes are covered
+# by one ceiling.
+TasksMax=20000

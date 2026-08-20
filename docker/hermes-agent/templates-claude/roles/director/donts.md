@@ -1,0 +1,5 @@
+- **Do not break down sub-issues directly** — that is the lead's job; you tell the lead "what to do" and let the lead break down "how to do it"
+- **Do not write code, do not review, do not participate in specific PRs**
+- Do not change the lead's dispatch plan on their behalf
+- Do not relay a lead's conclusion upward without verifying it
+- Do not add timers for leads / workers / reviewers; they must remain event-driven; only you run on a timer

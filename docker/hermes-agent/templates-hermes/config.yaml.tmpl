@@ -1,0 +1,136 @@
+# omcgitea hermes-agent config (rendered at container boot)
+# AGENT_NAME=${AGENT_NAME}
+
+model:
+  default: "${ANTHROPIC_MODEL}"
+  # Context window override — Hermes' built-in model_metadata table
+  # doesn't recognize "claude-opus-4-7" (no entry); without this it
+  # auto-detects via OpenAI-style /v1/models which our backend doesn't
+  # expose, then falls back to a hard-coded 128k floor. We pin 1M to
+  # match the upstream Databricks-fronted Claude Opus 4.7 [1m] limit.
+  # See agent/model_metadata.py probe-down branch.
+  context_length: 1000000
+  # Provider MUST be "anthropic" so Hermes enables prompt caching.
+  # See run_agent.py:744-747 — cache gate is
+  #   (api_mode == "anthropic_messages") AND (provider == "anthropic").
+  # Our backend (an Anthropic-compatible proxy → Claude) speaks the native
+  # Anthropic Messages API.
+  provider: "anthropic"
+  # base_url MUST live under `model:` for the native anthropic path.
+  # runtime_provider.py:_resolve_explicit_runtime() reads model.base_url for
+  # provider="anthropic"; without this it defaults to https://api.anthropic.com
+  # and our key gets a 401. The custom_providers entry below is NOT consulted
+  # for provider="anthropic" because that name is reserved as a built-in
+  # (see _get_named_custom_provider() in runtime_provider.py:259).
+  base_url: "${ANTHROPIC_BASE_URL}"
+
+# NOTE: This `custom_providers` entry is intentionally NOT named "anthropic" —
+# that name is reserved by Hermes' built-in provider registry and would be
+# shadowed by `_get_named_custom_provider()` (runtime_provider.py:259).
+# It exists only as a convenience (e.g. for `hermes model` listings).
+custom_providers: []
+
+# R-cache-ttl: opt into Anthropic's 1h prompt-cache TTL for hermes path.
+# Hermes' run_agent.py:1456-1468 reads this and feeds cache_ttl to
+# apply_anthropic_cache_control(), which stamps {ttl:"1h"} on all 4
+# cache_control breakpoints. Anthropic 1h TTL is GA as of 2026 (no beta
+# header needed). cache_ttl must be "5m" (default) or "1h" — other
+# values silently fall back to 5m.
+prompt_caching:
+  cache_ttl: "1h"
+
+mcp_servers:
+  gitea:
+    command: "/usr/local/bin/gitea-mcp"
+    args: ["-t", "stdio"]
+    env:
+      GITEA_HOST: "${GITEA_HOST}"
+      GITEA_ACCESS_TOKEN: "${GITEA_TOKEN}"
+      GITEA_INSECURE: "true"
+    timeout: 120
+    connect_timeout: 60
+    # Whitelist: only collaboration / metadata tools; write-file/branch/release/tag/wiki are all cut.
+    # The cut tools would tempt the agent to use "web-style editing" to stack commits (contents API),
+    # whereas the correct approach is git fetch + rebase + force-push. Code changes must go through git.
+    tools:
+      include:
+        # self / org introspection
+        - get_me
+        - get_user_orgs
+        - search_org_teams
+        # repo / branch / commit read-only
+        - list_my_repos
+        - list_org_repos
+        - search_repos
+        - list_branches
+        - list_commits
+        - get_commit
+        - get_repository_tree
+        - get_dir_contents
+        - get_file_contents
+        # issues
+        - list_issues
+        - search_issues
+        - issue_read
+        - issue_write
+        # labels & milestones (used by lead to break down work)
+        - label_read
+        - label_write
+        - milestone_read
+        - milestone_write
+        # PR: read-only + review + merge/edit-meta (pull_request_write includes merge / request-review / edit body)
+        - list_pull_requests
+        - pull_request_read
+        - pull_request_write
+        - pull_request_review_write
+        # actions read-only (view CI results)
+        - actions_run_read
+        # users lookup
+        - search_users
+
+  # R8: mattermost MCP server (cloud-ru-tech/mcp-server-mattermost, PyPI).
+  # FastMCP-based stdio binary, 37 tools (channels/messages/users/...).
+  # Pre-installed in the image at /usr/local/bin/mcp-server-mattermost.
+  # Token rendered at boot from /run/omcgitea/tokens/agent-<name>-mm.token.
+  mattermost:
+    command: "/usr/local/bin/mcp-server-mattermost"
+    args: []
+    env:
+      MATTERMOST_URL: "${MATTERMOST_HOST}"
+      MATTERMOST_TOKEN: "${MATTERMOST_TOKEN}"
+      MATTERMOST_LOG_LEVEL: "WARNING"
+      MATTERMOST_LOG_FORMAT: "text"
+      MATTERMOST_VERIFY_SSL: "false"
+    timeout: 120
+    connect_timeout: 60
+    # No tool whitelist for now — all 37 tools exposed. Tighten later if
+    # we observe noise (parallel to gitea's whitelist evolution).
+
+# No `platforms:` block: the legacy webhook path is decommissioned (M2-E.1).
+# Events arrive via the omcgitea-router → ACP stdio adapter, which is spawned
+# externally (`docker exec -i <agent> python -m acp_adapter.entry`) and does
+# NOT need any Hermes-side platform registration.
+
+# Subagent (delegate_tool) credential override.
+# Without this block, children inherit `provider: anthropic` from the parent
+# but can't see parent.api_key (None on AIAgent instance for our local-proxy
+# setup), drop into OPENAI_API_KEY fallback, and POST `Bearer None` against
+# https://api.anthropic.com/chat/completions — wrong transport AND wrong key.
+# Per official Hermes docs (Configuration → Delegation → Precedence):
+#   delegation.provider beats parent inheritance; delegation.api_key/model
+#   are passed through. Setting provider=anthropic keeps the
+#   anthropic_messages transport (NOT chat_completions), preserving prompt
+#   caching (run_agent.py:744-747 cache gate).
+delegation:
+  provider: "anthropic"
+  model: "${ANTHROPIC_MODEL}"
+  api_key: "${ANTHROPIC_API_KEY}"
+
+memory:
+  # Agent-managed personal notes (MEMORY.md). Persists under
+  # $HERMES_HOME/memories/ → bind-mounted into
+  # .claude-team-data/hermes/<agent>/memories/.
+  memory_enabled: true
+  # USER.md profile — useful even with no human in the loop because
+  # other agents register as "users" too.
+  user_profile_enabled: true

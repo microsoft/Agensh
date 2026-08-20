@@ -1,0 +1,151 @@
+# docker-compose.pbench.yml — ProgramBench egress-lock overlay.
+#
+# Loaded ONLY for PROFILE=org-pbench (Makefile adds `-f` for that profile;
+# dev/prod/other org-* never see this file). Layers two things on top of the
+# frozen 37-agent prod template:
+#
+#   1. Network lock: the project's default network becomes `internal: true`,
+#      so Gitea / MySQL / Mattermost / agents / sidecars have ZERO route to
+#      the public internet. This is the ProgramBench anti-cheat boundary —
+#      an agent cannot `git clone` the original project's source from GitHub.
+#      (Mechanism proven by tests/pbench/test_net_isolation.sh on real
+#      containers; the agent image ships no iptables, so we rely on docker's
+#      native internal network rather than in-container firewalling.)
+#
+#   2. egress-proxy: the ONLY way off-cluster. A dual-homed container on both
+#      the locked default net and a normal `egress` bridge. It runs our
+#      scripts/strip_metadata_proxy.py, forwarding agent LLM traffic to the
+#      real LLM VM (PBENCH_LLM_UPSTREAM). Agents point ANTHROPIC_BASE_URL at
+#      http://egress-proxy:4180 (see .env.org-pbench), so the ONLY public host
+#      the whole cluster can reach is the LLM VM, through this single hop.
+#
+# Why an overlay instead of editing the prod template: the prod template is a
+# frozen, profile-agnostic artifact (gen-compose-prod.py). Network-locking it
+# unconditionally would break dev/prod (they need normal egress for image
+# pulls, github actions, etc). Keeping the lock in a separate file that only
+# org-pbench loads keeps the opt-in contract: dev/prod = unchanged.
+
+networks:
+  # Override the project's implicit default network to be internal (no NAT to
+  # the host / outside world). Every service that doesn't declare its own
+  # networks inherits this, so the entire 37-agent cluster is sealed.
+  #
+  # SUBNETS ARE PINNED, NOT AUTO-ALLOCATED.
+  # Each stack needs three networks, and docker's built-in address pool
+  # (172.17.0.0/12 in /16s + 192.168.0.0/16 in /20s) holds only 31 — so the
+  # 10th concurrent stack fails `make up` with "all predefined address pools
+  # have been fully subnetted". That failure is dangerous rather than merely
+  # inconvenient: it lands after the run script's teardown trap is armed, so
+  # the chain still exports an empty submission and eval records a plausible
+  # 0.00% with every test not_run.
+  #
+  # The daemon-side fix (default-address-pools in /etc/docker/daemon.json) does
+  # not survive here: Ansible runs every 30 minutes, reverts daemon.json and
+  # restarts dockerd — which killed seven live stacks mid-run. Only repo-owned
+  # configuration is durable on this host, so the subnets live here.
+  #
+  # 10.176.0.0/16 is free on this host: it routes 10.50.x and 10.217.24.0/21,
+  # k8s defaults its service CIDR to 10.96.0.0/12, and kind uses 10.244.0.0/16.
+  # Parallel sweeps set these per profile (see pbench_gen_env_sweep.sh); the
+  # fallbacks let an unparameterised single-profile run come up unchanged.
+  default:
+    internal: true
+    ipam:
+      config:
+        - subnet: ${PBENCH_SUBNET_DEFAULT:-10.176.253.0/24}
+  # A normal bridge with outbound internet, attached ONLY to egress-proxy.
+  egress:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: ${PBENCH_SUBNET_EGRESS:-10.176.254.0/24}
+  # A normal bridge for host<->edge port publishing. An `internal: true` network
+  # has no host gateway, so a container sitting ONLY on it cannot have its
+  # published ports (EDGE_HTTP_PORT:80) forwarded from the host. nginx-edge must
+  # be reachable from the host (seed push / issue / submission export all hit
+  # http://localhost:EDGE_HTTP_PORT), so we dual-home ONLY nginx-edge here.
+  # Agents/gitea/etc. stay sealed on the internal default net → anti-cheat holds.
+  edge:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: ${PBENCH_SUBNET_EDGE:-10.176.255.0/24}
+
+services:
+  # Dual-home the edge proxy: `default` (internal) to reach gitea/mattermost,
+  # `edge` (bridge) so the host can actually reach its published ports.
+  nginx-edge:
+    networks:
+      - default
+      - edge
+    # Public access: optionally expose Gitea (nginx :80 default_server →
+    # gitea:3000) on a host port the Azure NSG allows from the internet.
+    # Parameterized for multi-instance colocation (each pbench task gets its own
+    # PBENCH_PUBLIC_PORT) and DEFAULTS TO DISABLED (empty → compose binds an
+    # ephemeral host port that nothing routes to, so no public exposure unless
+    # PBENCH_PUBLIC_PORT is set in the instance .env). Appended to the base
+    # EDGE_HTTP_PORT/EDGE_MM_PORT mappings (compose merges `ports` additively).
+    # Results are normally read via localhost:EDGE_HTTP_PORT or an ssh tunnel.
+    ports:
+      - "${PBENCH_PUBLIC_PORT:-}:80"
+
+  egress-proxy:
+    image: python:3.13-slim
+    restart: unless-stopped
+    cgroup_parent: pbench.slice
+    networks:
+      - default   # reachable from agents on the sealed internal net
+      - egress    # the single hop that actually has internet
+    environment:
+      UPSTREAM: "${PBENCH_LLM_UPSTREAM:?PBENCH_LLM_UPSTREAM required (the real LLM VM)}"
+      LISTEN_PORT: "4180"
+      # Bind all interfaces: agents reach this as a SEPARATE container via
+      # egress-proxy:4180 (dev/prod run the proxy as a 127.0.0.1 sidecar, so the
+      # script default stays localhost-only — only pbench overrides it here).
+      LISTEN_HOST: "0.0.0.0"
+      # Optional Bearer-auth injection for upstreams that require
+      # `Authorization: Bearer <token>` (Azure FrontDoor / OpenRouter / etc).
+      # Empty by default → proxy is header-transparent (original behavior).
+      # When set (e.g. via .env.org-pbench-1team), the proxy replaces any
+      # inbound Authorization / x-api-key with a single Bearer header.
+      UPSTREAM_AUTH_TOKEN: "${UPSTREAM_AUTH_TOKEN:-}"
+      # Auth header style. "bearer" (default) sends `Authorization: Bearer …`;
+      # "api-key" sends `api-key: …` (Azure AI Foundry `services.ai.azure.com`
+      # /models endpoint expects this).
+      UPSTREAM_AUTH_STYLE: "${UPSTREAM_AUTH_STYLE:-bearer}"
+      # Optional path override: literal path (query included) forwarded to
+      # UPSTREAM for every request instead of the inbound self.path. Used to
+      # retarget Copilot's `/chat/completions` at Azure AI Foundry's
+      # `/models/chat/completions?api-version=2024-05-01-preview`.
+      UPSTREAM_PATH_OVERRIDE: "${UPSTREAM_PATH_OVERRIDE:-}"
+    volumes:
+      - ../scripts/strip_metadata_proxy.py:/opt/strip_metadata_proxy.py:ro
+    command: ["python3", "/opt/strip_metadata_proxy.py"]
+    healthcheck:
+      # The proxy answers any path; hitting it proves the listener is up.
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request,sys; urllib.request.urlopen('http://127.0.0.1:4180/healthz', timeout=2); sys.exit(0)\" 2>/dev/null || python3 -c \"import socket,sys; s=socket.socket(); s.settimeout(2); sys.exit(0 if s.connect_ex(('127.0.0.1',4180))==0 else 1)\""]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+
+  # --- R1 fix: mysql healthcheck tolerance -----------------------------------
+  # Under docker-daemon pressure (e.g. 4 sibling pbench stacks racing `make up`
+  # in the sweep_2_1_team 4-parallel driver), mysql:8.4 cold start (initdb +
+  # /docker-entrypoint-initdb.d scripts + first schema load) can exceed the
+  # default 30 × 5s = 150s window, causing every `depends_on: {mysql:
+  # {condition: service_healthy}}` service (Gitea, Mattermost, bootstrap) to
+  # abort with "dependency mysql failed to start ... is unhealthy" and take
+  # the whole `make up` down with it. In the 2026-07-15 sweep_2_1_team run
+  # this killed all 5 chain-d tasks.
+  #
+  # start_period: 300s gives mysql a full 5 minutes to become healthy without
+  # any failing probe counting against `retries`. Once mysql answers ping
+  # once, subsequent probes are on the 5s cadence as before.
+  mysql:
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -uroot -p$$MYSQL_ROOT_PASSWORD"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 300s
