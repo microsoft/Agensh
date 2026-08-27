@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Team Harness</title>
+<style>
+  :root{
+    --bg:#F5F1E8;
+    --ink:#1F1B16;
+    --muted:#6B6356;
+
+    --base:#8C8275;        /* deep warm grey */
+    --base-soft:#D9D1BF;
+    --team:#CC785C;        /* clay */
+    --team-soft:#F4D5C6;
+    --boot:#E8B339;        /* amber */
+    --boot-soft:#FBE7A8;
+
+    --line:#E5DCC8;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;background:var(--bg);color:var(--ink);
+    font-family:"Inter","Helvetica Neue",system-ui,sans-serif;
+    -webkit-font-smoothing:antialiased;}
+  .strip{position:fixed;top:0;left:0;right:0;height:5px;
+    background:linear-gradient(90deg,var(--base) 0%,var(--team) 50%,var(--boot) 100%);z-index:10}
+
+  .page{max-width:1200px;margin:0 auto;padding:64px 60px 48px}
+
+  h1{font-size:42px;line-height:1.1;margin:0 0 8px;font-weight:800;letter-spacing:-.6px}
+  h1 .from{color:var(--base)}
+  h1 .to{color:var(--team)}
+  .sub{font-size:17px;color:var(--muted);margin-bottom:28px}
+
+  .legend{display:flex;gap:22px;flex-wrap:wrap;margin-bottom:26px;font-size:13px}
+  .lg{display:flex;align-items:center;gap:9px;font-weight:600}
+  .sw{width:14px;height:14px;border-radius:4px}
+  .sw.b{background:var(--base)}
+  .sw.t{background:var(--team)}
+  .sw.s{background:var(--boot)}
+
+  /* Three stacked layer bars */
+  .layer{border-radius:14px;padding:22px 26px;margin-bottom:14px;
+    display:flex;align-items:center;gap:30px;position:relative}
+  .layer.base{background:var(--base-soft);border-left:8px solid var(--base)}
+  .layer.team{background:var(--team-soft);border-left:8px solid var(--team)}
+  .layer.boot{background:var(--boot-soft);border-left:8px solid var(--boot)}
+
+  .badge{flex:0 0 200px;font-size:13px;font-weight:800;letter-spacing:.18em;
+    text-transform:uppercase}
+  .badge.base{color:#5A5040}
+  .badge.team{color:#8E3D26}
+  .badge.boot{color:#7A5410}
+  .badge .driver{display:block;font-size:11px;font-weight:600;color:var(--muted);
+    letter-spacing:.05em;text-transform:none;margin-top:4px;font-style:italic}
+
+  .what{flex:1;font-size:24px;font-weight:700;line-height:1.3;letter-spacing:-.2px}
+  .what .em{font-weight:800}
+  .what .em.team{color:var(--team)}
+  .what .em.boot{color:#B8860B}
+  .what .em.base{color:#5A5040}
+
+  .icons{flex:0 0 auto;font-size:32px;letter-spacing:6px}
+
+  .arrow{text-align:center;font-size:22px;color:var(--muted);margin:-2px 0;line-height:1}
+
+  .tag{display:inline-block;background:#fff;border:1.5px solid currentColor;
+    padding:4px 12px;border-radius:999px;font-size:14px;font-weight:700;
+    margin:0 4px;vertical-align:2px}
+
+  .footnote{margin-top:30px;text-align:center;font-size:14px;color:var(--muted)}
+  .footnote b{color:var(--team)}
+</style>
+</head>
+<body>
+<div class="strip"></div>
+
+<div class="page">
+
+  <h1>From <span class="from">Harness</span> → <span class="to">Team Harness</span></h1>
+  <div class="sub">Reuse what worked for human teams. Let agents bootstrap the rest.</div>
+
+  <div class="legend">
+    <div class="lg"><span class="sw b"></span>Industry baseline</div>
+    <div class="lg"><span class="sw t"></span>What we build</div>
+    <div class="lg"><span class="sw s"></span>Agents bootstrap</div>
+  </div>
+
+  <!-- Layer 1: baseline -->
+  <div class="layer base">
+    <div class="badge base">Harness<span class="driver">driver: human</span></div>
+    <div class="what">One agent uses tools <span class="em base">+</span> manages context.</div>
+    <div class="icons">🛠️</div>
+  </div>
+
+  <div class="arrow">↑</div>
+
+  <!-- Layer 2: team harness -->
+  <div class="layer team">
+    <div class="badge team">Team Harness<span class="driver">driver: agent environment</span></div>
+    <div class="what">
+      Many agents collaborate via
+      <span class="tag" style="color:var(--team)">Git</span>
+      and talk via
+      <span class="tag" style="color:var(--team)">Slack</span>.
+    </div>
+    <div class="icons">👥</div>
+  </div>
+
+  <div class="arrow">↑</div>
+
+  <!-- Layer 3: bootstrap -->
+  <div class="layer boot">
+    <div class="badge boot">Self-Bootstrapped<span class="driver">driver: agents themselves</span></div>
+    <div class="what">Team <span class="em boot">skills</span> &amp; <span class="em boot">memory</span> → next-gen LLM.</div>
+    <div class="icons">🔁</div>
+  </div>
+
+  <div class="footnote">
+    Harness lets one agent work. <b>Team Harness lets a team work — and learn.</b>
+  </div>
+
+</div>
+</body>
+</html>

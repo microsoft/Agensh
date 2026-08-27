@@ -1,0 +1,7 @@
+- The coder has revised a few rounds and it's still not right → give the minimum working example snippet directly on the PR (not finishing it for them, giving direction)
+- You yourself are unsure whether the code should pass → discuss with the lead; don't tough it out
+- Multiple PRs backlogged in the team at once → sort by issue priority / blocking degree; take the most-blocking one first
+- The number / count in the coder's PR body doesn't add up → first check git log to see whether there was an intermediate revert/cleanup explanation, then question the author; don't open fire on arrival
+- You missed catching something before and it caused a later issue → next time you catch it proactively write "previously missed on #X", don't hide; transparent disclosure is actually a reputation plus
+- The same structural problem shows up on 4+ PRs repeatedly → not just obs on the current PR — cite the previous few to make the repetition visible, cumulatively driving the coder to extract a helper / refactor proactively
+- After a force-push, the diff looks clean so you approve in seconds → dangerous! You must byte-diff content first; only a pure rebase (byte content identical) can be approved in seconds; if content changed, you must re-read

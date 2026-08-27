@@ -1,0 +1,199 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>omcgitea · 项目汇报</title>
+<style>
+  :root{
+    --bg:#F5F1E8;
+    --paper:#FBF7EE;
+    --ink:#1F1B16;
+    --muted:#5C5448;
+    --accent:#CC785C;     /* anthropic clay/coral */
+    --accent-2:#D4A27F;   /* warm tan */
+    --line:#E5DCC8;
+    --hi:#B85C3E;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;background:var(--bg);color:var(--ink);
+    font-family:"Inter","PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+    -webkit-font-smoothing:antialiased;}
+  .deck{height:100vh;width:100vw;overflow:hidden;position:relative}
+  .slide{position:absolute;inset:0;display:none;padding:6vh 8vw;
+    flex-direction:column;justify-content:flex-start;}
+  .slide.active{display:flex}
+  .eyebrow{font-size:14px;letter-spacing:.18em;text-transform:uppercase;
+    color:var(--accent);font-weight:600;margin-bottom:18px}
+  h1{font-size:44px;line-height:1.15;margin:0 0 8px;font-weight:700;letter-spacing:-.5px}
+  h2{font-size:22px;color:var(--muted);font-weight:500;margin:0 0 36px}
+  .lead{font-size:19px;line-height:1.7;color:var(--ink);
+    background:var(--paper);border-left:4px solid var(--accent);
+    padding:18px 22px;border-radius:6px;margin-bottom:28px;max-width:1100px}
+  ul{margin:0;padding-left:0;list-style:none;max-width:1100px}
+  li{font-size:18px;line-height:1.65;padding:10px 0 10px 28px;position:relative;
+    border-bottom:1px solid var(--line)}
+  li:last-child{border-bottom:none}
+  li::before{content:"";position:absolute;left:6px;top:20px;width:8px;height:8px;
+    background:var(--accent);border-radius:50%}
+  li b{color:var(--hi)}
+  .quote{margin-top:28px;font-size:17px;color:var(--muted);font-style:italic;
+    border-top:1px dashed var(--line);padding-top:18px;max-width:1100px}
+  table{border-collapse:collapse;width:100%;max-width:1100px;background:var(--paper);
+    border-radius:8px;overflow:hidden;margin-bottom:24px}
+  th,td{padding:16px 20px;text-align:left;font-size:17px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{background:#EFE6D2;color:var(--ink);font-weight:600;font-size:14px;
+    letter-spacing:.1em;text-transform:uppercase}
+  tr:last-child td{border-bottom:none}
+  td:first-child{font-weight:600;color:var(--accent);width:22%}
+  td:last-child{color:var(--muted);width:28%}
+  .pill-row{display:flex;gap:14px;flex-wrap:wrap;margin-top:8px}
+  .pill{background:var(--paper);border:1px solid var(--line);border-radius:999px;
+    padding:10px 18px;font-size:15px;color:var(--ink)}
+  .pill b{color:var(--accent)}
+  .nav{position:fixed;bottom:24px;right:32px;font-size:13px;color:var(--muted);
+    letter-spacing:.1em}
+  .nav b{color:var(--accent)}
+  .pageno{position:fixed;bottom:24px;left:32px;font-size:13px;color:var(--muted);
+    letter-spacing:.15em}
+  .brand{position:fixed;top:24px;right:32px;font-size:12px;letter-spacing:.2em;
+    color:var(--accent);text-transform:uppercase;font-weight:600}
+  .strip{position:fixed;top:0;left:0;right:0;height:6px;
+    background:linear-gradient(90deg,var(--accent) 0%,var(--accent-2) 100%)}
+</style>
+</head>
+<body>
+<div class="strip"></div>
+<div class="brand">omcgitea</div>
+
+<div class="deck">
+
+<!-- SLIDE 1 -->
+<section class="slide active">
+  <div class="eyebrow">阶段一 · Foundation</div>
+  <h1>让 Agent "用起来" 人类的协作平台</h1>
+  <h2>把 Git + 项目管理 这套大规模并行开发的成功范式，开放给 Agent</h2>
+
+  <div class="lead">
+    人类社会能做大规模并行开发，靠的是 <b>Git + 项目管理 + 云平台</b> 三件套。
+    第一步，是让 Agent 真的能在这套人类范式里干活 —— 不是 demo，是上岗。
+  </div>
+
+  <ul>
+    <li>选定自建 <b>Gitea</b> 作为 agent 的协作中枢：issue / PR / review / merge / CI 一应俱全</li>
+    <li>打通 <b>Hermes Agent ↔ Gitea</b> 双向通路，agent 拿到独立身份与 token，像人一样工作</li>
+    <li>一键部署、<b>零侵入上游</b>：不 patch Hermes、不 patch Gitea，纯胶水层</li>
+    <li>验收：单 repo 内 <b>Issue → PR → Review → Merge</b> 闭环跑通，agent 第一次"上岗"</li>
+  </ul>
+
+  <div class="quote">意义：从"agent 单兵聊天"，迈向"agent 在企业级协作平台里工作"。</div>
+</section>
+
+<!-- SLIDE 2 -->
+<section class="slide">
+  <div class="eyebrow">阶段二 · Protocol</div>
+  <h1>把 MCP 做成 "反向协议"</h1>
+  <h2>统一事件输入 —— 上游兼容任意系统，下游兼容任意 Agent 框架</h2>
+
+  <div class="lead">
+    业界 MCP 都是 agent → 工具的<b>正向</b>调用。
+    我们做的是<b>反向 MCP / 反向 ACP</b>：让外部世界的事件，按统一协议<b>反推</b>给 agent。
+  </div>
+
+  <ul>
+    <li>自建 <b>omcgitea-router</b>：把 Gitea 的协作事件（@mention / review / comment / merge…）精准投递给对应 agent</li>
+    <li><b>上游兼容</b>任意事件源 —— 今天是 Gitea，明天是 Jira / Azure DevOps / 飞书</li>
+    <li><b>下游兼容</b>任意 agent 框架 —— 今天是 Hermes，明天可以是别的</li>
+    <li>工程上解决了大规模并行的硬问题：精准投递、批量合并、卡死自愈、不被广播淹没</li>
+  </ul>
+
+  <div class="quote">意义：把"agent 接入企业系统"从一次性集成，升级为<b style="color:var(--hi)">协议级标准</b>。</div>
+</section>
+
+<!-- SLIDE 3 -->
+<section class="slide">
+  <div class="eyebrow">阶段三 · Teamwork</div>
+  <h1>从单兵作战 → 真正的团队开发</h1>
+  <h2>让 Agent 像企业团队一样有角色、有边界、有协作纪律</h2>
+
+  <div class="lead">
+    一个团队 = 一个 repo = N 个 agent。团队内部自组织分工，多 repo 即多团队并行。
+  </div>
+
+  <ul>
+    <li><b>身份与权限</b>：每个 agent 一个独立账号 + token + 角色（开发者 / 审查者 / 董事长）</li>
+    <li><b>企业规约硬约束</b>：禁直推 main、强制 review、approval whitelist —— 与人类同等纪律</li>
+    <li><b>通知精准化</b>：N 个 agent 在同一 repo 协作，每人只收"真正相关"的事件，不被噪音淹没</li>
+    <li><b>工作流对齐人类团队</b>：认领 issue → 开发 → PR → 互相 review → CI 绿 → merge → CD</li>
+  </ul>
+
+  <div class="quote">意义：agent 不再是孤立调 LLM 的脚本，而是有纪律的<b style="color:var(--hi)">团队成员</b>。</div>
+</section>
+
+<!-- SLIDE 4 -->
+<section class="slide">
+  <div class="eyebrow">未来 · Three Steps</div>
+  <h1>三步走 —— 把"团队范式"固化进 LLM</h1>
+  <h2>让大规模并行协作的成功范式，成为 Agent 的默认能力</h2>
+
+  <table>
+    <thead>
+      <tr><th>步骤</th><th>做什么</th><th>产出</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>第一步 · 用起来</td>
+        <td>让 agent 在 Git / 项目管理 / Azure 这类企业平台上真实工作</td>
+        <td>可运行的多 agent 团队</td>
+      </tr>
+      <tr>
+        <td>第二步 · 学起来</td>
+        <td>在协作中发现问题、收集反馈，沉淀<b>团队级 / 企业级</b>的 Skill 与 Memory</td>
+        <td>可复用的团队知识库</td>
+      </tr>
+      <tr>
+        <td>第三步 · 固化</td>
+        <td>把沉淀的 Skill / Memory <b>反哺训练</b>，成为模型的先验能力</td>
+        <td>下一代具备团队协作本能的 LLM</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="pill-row">
+    <div class="pill">核心资产 · <b>反向 MCP / ACP 协议</b></div>
+    <div class="pill">核心资产 · <b>企业级 Skill 库</b></div>
+    <div class="pill">核心资产 · <b>企业级 Memory 体系</b></div>
+  </div>
+
+  <div class="quote">我们做的不是又一个 agent demo —— 而是让 agent 学会<b style="color:var(--hi)">"像企业一样协作"</b>的基础设施。</div>
+</section>
+
+</div>
+
+<div class="pageno"><span id="cur">1</span> / 4</div>
+<div class="nav">← → 翻页 &nbsp;·&nbsp; <b>F</b> 全屏</div>
+
+<script>
+  const slides=[...document.querySelectorAll('.slide')];
+  let i=0;
+  const cur=document.getElementById('cur');
+  function go(n){
+    i=(n+slides.length)%slides.length;
+    slides.forEach((s,k)=>s.classList.toggle('active',k===i));
+    cur.textContent=i+1;
+  }
+  document.addEventListener('keydown',e=>{
+    if(e.key==='ArrowRight'||e.key===' '||e.key==='PageDown')go(i+1);
+    else if(e.key==='ArrowLeft'||e.key==='PageUp')go(i-1);
+    else if(e.key==='Home')go(0);
+    else if(e.key==='End')go(slides.length-1);
+    else if(e.key==='f'||e.key==='F'){
+      if(!document.fullscreenElement)document.documentElement.requestFullscreen();
+      else document.exitFullscreen();
+    }
+  });
+  document.addEventListener('click',e=>{
+    if(e.clientX>window.innerWidth/2)go(i+1);else go(i-1);
+  });
+</script>
+</body>
+</html>

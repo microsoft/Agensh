@@ -1,0 +1,287 @@
+# docker-compose.pbench-1team.yml — 1-team subset overlay for org-pbench-1team.
+#
+# Loaded ONLY for PROFILE=org-pbench-1team (Makefile adds `-f` for that profile;
+# org-pbench and other org-* never see this file). Layers on top of prod.yml +
+# pbench.yml to disable 62 of the 74 agent/router services, leaving:
+#   - infra: gitea, mattermost, mysql, secret-service, bootstrap, nginx-edge,
+#            egress-proxy, act-runner (unchanged)
+#   - 1 team (10 services): hermes-agent-team1-{lead,worker1..4}
+#     + mini-router-team1-{lead,worker1..4}
+#     The lead absorbs the reviewer role (director + lead + reviewer merged
+#     into one agent); there is no standalone reviewer service.
+#
+# Mechanism: adds `profiles: [_disabled]` to unwanted services. Compose activates
+# services whose profile list is empty OR intersects the active --profile set.
+# Because Makefile passes `--profile org-pbench-1team` (not `_disabled`), these
+# services are never created.
+#
+# Why an overlay instead of editing the prod template: prod.yml is a frozen,
+# profile-agnostic artifact. This overlay keeps the 37-agent path untouched.
+services:
+  hermes-agent-auditor:
+    profiles: [_disabled]
+  hermes-agent-director:
+    profiles: [_disabled]
+  hermes-agent-team2-lead:
+    profiles: [_disabled]
+  hermes-agent-team2-reviewer:
+    profiles: [_disabled]
+  hermes-agent-team2-worker1:
+    profiles: [_disabled]
+  hermes-agent-team2-worker2:
+    profiles: [_disabled]
+  hermes-agent-team2-worker3:
+    profiles: [_disabled]
+  hermes-agent-team2-worker4:
+    profiles: [_disabled]
+  hermes-agent-team2-worker5:
+    profiles: [_disabled]
+  hermes-agent-team3-lead:
+    profiles: [_disabled]
+  hermes-agent-team3-reviewer:
+    profiles: [_disabled]
+  hermes-agent-team3-worker1:
+    profiles: [_disabled]
+  hermes-agent-team3-worker2:
+    profiles: [_disabled]
+  hermes-agent-team3-worker3:
+    profiles: [_disabled]
+  hermes-agent-team3-worker4:
+    profiles: [_disabled]
+  hermes-agent-team3-worker5:
+    profiles: [_disabled]
+  hermes-agent-team4-lead:
+    profiles: [_disabled]
+  hermes-agent-team4-reviewer:
+    profiles: [_disabled]
+  hermes-agent-team4-worker1:
+    profiles: [_disabled]
+  hermes-agent-team4-worker2:
+    profiles: [_disabled]
+  hermes-agent-team4-worker3:
+    profiles: [_disabled]
+  hermes-agent-team4-worker4:
+    profiles: [_disabled]
+  hermes-agent-team4-worker5:
+    profiles: [_disabled]
+  hermes-agent-team5-lead:
+    profiles: [_disabled]
+  hermes-agent-team5-reviewer:
+    profiles: [_disabled]
+  hermes-agent-team5-worker1:
+    profiles: [_disabled]
+  hermes-agent-team5-worker2:
+    profiles: [_disabled]
+  hermes-agent-team5-worker3:
+    profiles: [_disabled]
+  hermes-agent-team5-worker4:
+    profiles: [_disabled]
+  hermes-agent-team5-worker5:
+    profiles: [_disabled]
+  mini-router-auditor:
+    profiles: [_disabled]
+  mini-router-director:
+    profiles: [_disabled]
+  mini-router-team2-lead:
+    profiles: [_disabled]
+  mini-router-team2-reviewer:
+    profiles: [_disabled]
+  mini-router-team2-worker1:
+    profiles: [_disabled]
+  mini-router-team2-worker2:
+    profiles: [_disabled]
+  mini-router-team2-worker3:
+    profiles: [_disabled]
+  mini-router-team2-worker4:
+    profiles: [_disabled]
+  mini-router-team2-worker5:
+    profiles: [_disabled]
+  mini-router-team3-lead:
+    profiles: [_disabled]
+  mini-router-team3-reviewer:
+    profiles: [_disabled]
+  mini-router-team3-worker1:
+    profiles: [_disabled]
+  mini-router-team3-worker2:
+    profiles: [_disabled]
+  mini-router-team3-worker3:
+    profiles: [_disabled]
+  mini-router-team3-worker4:
+    profiles: [_disabled]
+  mini-router-team3-worker5:
+    profiles: [_disabled]
+  mini-router-team4-lead:
+    profiles: [_disabled]
+  mini-router-team4-reviewer:
+    profiles: [_disabled]
+  mini-router-team4-worker1:
+    profiles: [_disabled]
+  mini-router-team4-worker2:
+    profiles: [_disabled]
+  mini-router-team4-worker3:
+    profiles: [_disabled]
+  mini-router-team4-worker4:
+    profiles: [_disabled]
+  mini-router-team4-worker5:
+    profiles: [_disabled]
+  mini-router-team5-lead:
+    profiles: [_disabled]
+  mini-router-team5-reviewer:
+    profiles: [_disabled]
+  mini-router-team5-worker1:
+    profiles: [_disabled]
+  mini-router-team5-worker2:
+    profiles: [_disabled]
+  mini-router-team5-worker3:
+    profiles: [_disabled]
+  mini-router-team5-worker4:
+    profiles: [_disabled]
+  mini-router-team5-worker5:
+    profiles: [_disabled]
+
+  # ---- shrink team1 from 5→4 workers + drop standalone reviewer ---------
+  # Match the 4team topology's per-team fan-out (4 workers/team) so 1team vs
+  # 4team compare on identical worker count. Also drop the standalone reviewer
+  # — in the 1team topology the merged director_lead role absorbs reviewer
+  # duty (see AGENTS/ROLES override below and role fragments in
+  # templates-claude-1team/roles/director_lead). Disables the 5th worker's
+  # agent, the reviewer agent, and their mini-router sidecars.
+  hermes-agent-team1-worker5:
+    environment:
+      PBENCH_BRIEF_ENABLE: "1"
+      # Spawn the ACP child as uid 10000 so the root:root 0111 reference binary
+      # can be executed and not read. Without this the child runs as root, which
+      # has CAP_DAC_OVERRIDE -- verified: root reads a 0111 file, non-root cannot.
+      ACP_CHILD_UID: "10000"
+      ACP_CHILD_GID: "10000"
+    profiles: [_disabled]
+  mini-router-team1-worker5:
+    profiles: [_disabled]
+  hermes-agent-team1-reviewer:
+    profiles: [_disabled]
+  mini-router-team1-reviewer:
+    profiles: [_disabled]
+
+  # ---- bootstrap: shrink AGENTS/ROLES to the 5 agents that actually run --
+  # Without this override, bootstrap seeds Mattermost accounts for every
+  # agent named in the base prod.yml (director, auditor, team1..5 leads /
+  # reviewers / worker1..5), and the merged director/lead sees phantom
+  # accounts it cannot dispatch to. Restrict to the 5 agents that this
+  # overlay actually enables: merged director/lead/reviewer, 4 workers.
+  #
+  # ROLES: bootstrap.sh's parser only recognises `director|lead|reviewer|coder`
+  # (see docker/bootstrap/bootstrap.sh:212-224). An earlier version used
+  # `director_lead=...` which the parser silently dropped → team1-lead was
+  # added to zero gitea teams → no repo write permission → gitea's
+  # `POST /issues` accepted `assignees=[...worker]` but silently discarded it
+  # (Gitea only honours assignees when the caller has write access) → no
+  # `issue_assignees` row → no `notification` row → workers' mini-router SSE
+  # never fired → ACP `prompt()` never dialled → workers stayed idle for the
+  # whole 6 h task. Fix: map the merged director/lead into the `directors`,
+  # `leads`, AND `reviewers` gitea teams so:
+  #   - assignees=[...worker] on issue_write sticks (directors/leads have admin);
+  #   - team1-lead's APPROVE counts for branch protection
+  #     (approvals_whitelist_teams=["reviewers"] at bootstrap.sh:432).
+  bootstrap:
+    environment:
+      # ---- test-gate topology switches -----------------------------------
+      # All three were inert through sweeps 6.5 and 6.6: bootstrap.sh implements
+      # the topology but reads it from env vars nothing set, so every stack came
+      # up in the REVIEW configuration the code was written to replace. A 20-min
+      # smoke on 2026-08-02 showed main protected with required_approvals=1 and
+      # push_whitelist=[chairman] -- i.e. no PR could merge without an approval
+      # from a lead we instruct never to approve, and the lead could not push the
+      # tests/ suite that is its entire job.
+      REQUIRED_APPROVALS: "0"          # no reviewer exists; also clears the
+                                       # review-derived merge blockers
+      PBENCH_LEAD_USER: "${ORG_NAME}-team1-lead"   # push rights for tests/
+      PBENCH_REQUIRE_LEAD_TESTS: "1"   # the suite is the gate, so require it
+      AGENTS: "${ORG_NAME}-team1-lead,${ORG_NAME}-team1-worker1,${ORG_NAME}-team1-worker2,${ORG_NAME}-team1-worker3,${ORG_NAME}-team1-worker4"
+      ROLES:  "director=${ORG_NAME}-team1-lead;lead=${ORG_NAME}-team1-lead;reviewer=${ORG_NAME}-team1-lead;coder=${ORG_NAME}-team1-worker1,${ORG_NAME}-team1-worker2,${ORG_NAME}-team1-worker3,${ORG_NAME}-team1-worker4"
+
+  # ---- team1-lead role override ------------------------------------------
+  # In the 1team topology the leader plays director, lead, AND reviewer: it
+  # must scope + dispatch + track + review + approve + integrate + deliver by
+  # itself, with no upstream authority to escalate to and no separate reviewer
+  # to hand PRs off to. We keep the frozen v48 image untouched and instead:
+  #   1. Bind-mount a new role fragment set (director_lead/) into the image's
+  #      templates dir. entrypoint.sh reads role fragments from
+  #      $TMPL_DIR/templates-claude/roles/${AGENT_ROLE}/ at container start
+  #      and splices them into /work/CLAUDE.md via envsubst.
+  #   2. Set AGENT_ROLE=director_lead so the entrypoint picks the new role
+  #      (default resolution from AGENT_NAME=*lead* would land on plain lead
+  #      and re-import the "escalate to director / hand off to reviewer"
+  #      language we do not want).
+  #   3. Bind-mount clean roles/base.md + pbench-brief.md over the baked
+  #      versions so nobody reads a hierarchy line naming director/auditor or
+  #      a per-role brief listing 5 roles that don't exist here. Applied to
+  #      ALL 5 agents via a YAML anchor so workers see the same clean
+  #      1team-native framing.
+  hermes-agent-team1-lead:
+    environment:
+      AGENT_ROLE: director_lead
+      # entrypoint renders ${PBENCH_BRIEF} into base.md only when this is set (or
+      # when ACP_CHILD_UID is, which the team profiles never set). Without it the
+      # goal, the iron rules and the compile.sh delivery contract never appear in
+      # any agent system prompt -- as in sweeps 6.5 and 6.6.
+      PBENCH_BRIEF_ENABLE: "1"
+      # Spawn the ACP child as uid 10000 so the root:root 0111 reference binary
+      # can be executed and not read. Without this the child runs as root, which
+      # has CAP_DAC_OVERRIDE -- verified: root reads a 0111 file, non-root cannot.
+      ACP_CHILD_UID: "10000"
+      ACP_CHILD_GID: "10000"
+    volumes:
+      # Shared clean framing (base.md + pbench-brief.md + xhigh effort) applied
+      # to every 1team agent — see the shared-mount block on workers.
+      - ./hermes-agent/templates-claude-1team/roles/base.md:/opt/omcgitea/templates-claude/roles/base.md:ro
+      - ./hermes-agent/templates-claude-1team/pbench-brief.md:/opt/omcgitea/templates-claude/pbench-brief.md:ro
+      - ./hermes-agent/templates-claude-1team/settings.json.tmpl:/opt/omcgitea/templates-claude/settings.json.tmpl:ro
+      # Lead-only: the new merged-role fragment set.
+      - ./hermes-agent/templates-claude-1team/roles/director_lead:/opt/omcgitea/templates-claude/roles/director_lead:ro
+
+  hermes-agent-team1-worker1:
+    environment:
+      PBENCH_BRIEF_ENABLE: "1"
+      # Spawn the ACP child as uid 10000 so the root:root 0111 reference binary
+      # can be executed and not read. Without this the child runs as root, which
+      # has CAP_DAC_OVERRIDE -- verified: root reads a 0111 file, non-root cannot.
+      ACP_CHILD_UID: "10000"
+      ACP_CHILD_GID: "10000"
+    volumes: &pbench-1team-shared-mounts
+      - ./hermes-agent/templates-claude-1team/roles/base.md:/opt/omcgitea/templates-claude/roles/base.md:ro
+      - ./hermes-agent/templates-claude-1team/pbench-brief.md:/opt/omcgitea/templates-claude/pbench-brief.md:ro
+      - ./hermes-agent/templates-claude-1team/settings.json.tmpl:/opt/omcgitea/templates-claude/settings.json.tmpl:ro
+      # Worker-only: retarget review requests at the lead. Mounted per-file
+      # rather than as a directory — the other three coder fragments are
+      # topology-independent and stay baked.
+      # R6.5: these three used to fall through to templates-claude/roles/coder,
+      # so a rewrite here would have been silently ignored at run time.
+      - ./hermes-agent/templates-claude-1team/roles/coder/name.md:/opt/omcgitea/templates-claude/roles/coder/name.md:ro
+      - ./hermes-agent/templates-claude-1team/roles/coder/one_liner.md:/opt/omcgitea/templates-claude/roles/coder/one_liner.md:ro
+  hermes-agent-team1-worker2:
+    environment:
+      PBENCH_BRIEF_ENABLE: "1"
+      # Spawn the ACP child as uid 10000 so the root:root 0111 reference binary
+      # can be executed and not read. Without this the child runs as root, which
+      # has CAP_DAC_OVERRIDE -- verified: root reads a 0111 file, non-root cannot.
+      ACP_CHILD_UID: "10000"
+      ACP_CHILD_GID: "10000"
+    volumes: *pbench-1team-shared-mounts
+  hermes-agent-team1-worker3:
+    environment:
+      PBENCH_BRIEF_ENABLE: "1"
+      # Spawn the ACP child as uid 10000 so the root:root 0111 reference binary
+      # can be executed and not read. Without this the child runs as root, which
+      # has CAP_DAC_OVERRIDE -- verified: root reads a 0111 file, non-root cannot.
+      ACP_CHILD_UID: "10000"
+      ACP_CHILD_GID: "10000"
+    volumes: *pbench-1team-shared-mounts
+  hermes-agent-team1-worker4:
+    environment:
+      PBENCH_BRIEF_ENABLE: "1"
+      # Spawn the ACP child as uid 10000 so the root:root 0111 reference binary
+      # can be executed and not read. Without this the child runs as root, which
+      # has CAP_DAC_OVERRIDE -- verified: root reads a 0111 file, non-root cannot.
+      ACP_CHILD_UID: "10000"
+      ACP_CHILD_GID: "10000"
+    volumes: *pbench-1team-shared-mounts

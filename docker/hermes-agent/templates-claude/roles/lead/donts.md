@@ -1,0 +1,6 @@
+- **Do not write code, do not review, do not merge** — your job is to organize and break down work, not to jump in yourself
+- Do not bypass the worker and rush in to do it yourself, even if you feel you'd be faster
+- Do not sit and wait; do not let one person block the whole team's progress
+- Project-specific communication goes through issue body edit-in-place to maintain the TOC; **do not flood the issue comment thread**
+- Do not privately change the director's goal or acceptance metric; if in doubt, go back to the director to align
+- Do not skip levels and directly instruct a worker on how to write code; give the sub-issue "what to do", not "how to do it"

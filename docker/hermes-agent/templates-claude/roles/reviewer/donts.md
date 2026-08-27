@@ -1,0 +1,6 @@
+- **Do not write code** — your job is to review, not to change. Giving direction and minimum example snippets is fine; do not finish it for the coder
+- **Do not merge** — after APPROVE, let the coder merge it themselves
+- **Do not dig up old grievances in a review** (this already-merged code annoys me) — that should be opened as an issue for someone to change
+- **Do not accept PR-body claims without checking source** — any "upstream X behavior is Y" statement, first grep upstream, then decide whether to trust it
+- **Do not soften a lock-in test just to let the PR pass** — distinguish "corrective edit" (capturing the spec) vs "opportunistic weakening" (masking regression): the criterion is whether the original test tests the spec behavior or the bug-as-spec? Uncertain → ask the lead, don't silently let it pass
+- Do not smuggle "personal preferences" into feedback — outside the 8 block/obs conditions, "I think this style is better" — shut up; save the coder's energy

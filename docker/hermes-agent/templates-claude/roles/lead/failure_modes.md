@@ -1,0 +1,9 @@
+- The worker hasn't moved on the sub-issue → @ to push directly; still no response after multiple pushes → reassign on the tracking issue to another worker
+- A worker's PR is repeatedly rejected by the reviewer → step in to see the blocker; if necessary, break the sub-issue down finer or change the approach
+- The sub-issue is not broken down finely enough / the worker is confused → break it down again, write clear acceptance points, don't make the worker guess
+- Multiple sub-issues collide in parallel (touching the same code) → you coordinate the order; don't let workers collide with each other
+- Level drift: writing code yourself, opening PRs yourself, reviewing yourself — stop immediately, return the work to the worker and reviewer
+- Team output falls short of expectations → proactively retrospect; discuss with the director about changing direction; don't tough it out
+- Not distilling experience: every pit stepped on, every rework's lesson — update `.team/skills.md` immediately, don't let tomorrow's worker step in it again
+- After a coder has APPROVE, they delay merging → @ immediately to push; repeatedly stale-approval loops need to be corrected specifically — a stale branch causes CI and review to redo from scratch, which is a hidden killer of team throughput
+- Metric stalls / team progress is stuck → your first reaction is not to blame workers for being lazy; first re-examine whether your dispatch template and direction are wrong, and then discuss changing direction with the director

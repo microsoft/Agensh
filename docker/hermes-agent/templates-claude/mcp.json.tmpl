@@ -1,0 +1,43 @@
+{
+  "mcpServers": {
+    "gitea": {
+      "type": "stdio",
+      "command": "/usr/local/bin/gitea-mcp",
+      "args": ["-t", "stdio"],
+      "env": {
+        "GITEA_HOST": "${GITEA_HOST}",
+        "GITEA_ACCESS_TOKEN": "${GITEA_TOKEN}",
+        "GITEA_INSECURE": "true"
+      }
+    },
+    "mattermost": {
+      "type": "stdio",
+      "command": "/usr/local/bin/mcp-server-mattermost",
+      "args": [],
+      "env": {
+        "MATTERMOST_URL": "${MATTERMOST_HOST}",
+        "MATTERMOST_TOKEN": "${MATTERMOST_TOKEN}",
+        "MATTERMOST_LOG_LEVEL": "WARNING",
+        "MATTERMOST_LOG_FORMAT": "text",
+        "MATTERMOST_VERIFY_SSL": "false"
+      }
+    },
+    "playwright": {
+      "type": "stdio",
+      "command": "/usr/bin/npx",
+      "args": ["-y", "@playwright/mcp@latest", "--isolated", "--no-sandbox", "--headless", "--browser=chromium"],
+      "env": {}
+    },
+    "board": {
+      "type": "stdio",
+      "command": "${AGENT_NODE}",
+      "args": ["/opt/mcp-board/src/index.js"],
+      "env": {
+        "BOARD_SERVICE_URL": "${BOARD_SERVICE_URL}",
+        "AGENT_NAME": "${AGENT_NAME}",
+        "BOARD_IDS": "${BOARD_IDS}",
+        "BOARD_QUEUE_ID": "${BOARD_QUEUE_ID}"
+      }
+    }
+  }
+}

@@ -1,0 +1,11 @@
+- On receiving a sub-issue (assignees contains you) → git clone the repo → comment on the issue "took it" + one key judgment, so the lead can confirm your understanding is correct
+- Before starting, reproduce / measure baseline first: for bug-class, pin the symptom at the minimum level (direct API, minimal fixture); for improvements, measure the current number first; guessing at code without reproducing = wasted time
+- After finishing the code on a local feature branch → open a PR; the PR body **must** contain `Closes #<sub-issue number>` (CI blocks merge otherwise)
+- PR body in three parts: **What** (failure scenario + root cause) → **Fix** (what was changed, which invariants were preserved) → **Trace** (before/after comparison / test names), so the reviewer doesn't have to guess
+- Bug fixes must come with a regression test bound to the issue number, taking the bisected scenario as the first case, so next time someone changes adjacent code it won't break again
+- After opening the PR, **must** `request_review` the reviewer of your own team — you must pick **your own team's** reviewer
+- After the reviewer APPROVEs, **you merge yourself, within 1 minute** — you know your own code best. Dragging too long lets the branch be squeezed stale by new commits to main, requiring `update_branch` + CI rerun + possibly the reviewer to re-APPROVE; one delay = one wasted round
+- If at merge time you find the branch is stale → immediately call `update_branch` to pull the latest main rebase, wait for CI green, then merge; don't drag
+- If in the PR body / comments you want to claim "upstream X behavior is Y" / "spec requires Z" → you must grep the upstream source and cite file:line; don't write from memory / speculation
+- Before starting work, take a look at the repo's `.team/skills.md` (if any); step into fewer predecessor pits
+- When you learn something new, open a PR to change `.team/skills.md`, distilling it for the team
