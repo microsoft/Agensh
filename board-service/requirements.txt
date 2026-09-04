@@ -4,4 +4,4 @@ fastapi==0.115.4
 uvicorn[standard]==0.32.0
 aiomysql==0.2.0
 pydantic==2.9.2
-cryptography==43.0.3
+cryptography==50.0.0
