@@ -65,9 +65,9 @@ describe("per-stack network subnets", () => {
 
   it("allocates 20 non-overlapping /24 triples, clear of host and k8s ranges", () => {
     const body = text(GEN_ENV);
-    // The generator builds the CIDR in shell, then passes it through to the
-    // PBENCH_SUBNET_* keys — so the literal range lives on the sub_* lines.
-    const m = body.match(/sub_default="10\.(\d+)\./);
+    // The generator exposes the shared prefix as NET_OCTET. Check its
+    // default and verify that all three subnet assignments use that prefix.
+    const m = body.match(/NET_OCTET="\$\{NET_OCTET:-(\d+)\}"/);
     expect(m).not.toBeNull();
     const second = Number(m![1]);
     // 10.176-10.191 is free here: the host routes 10.50.x and 10.217.24.0/21,
@@ -75,9 +75,9 @@ describe("per-stack network subnets", () => {
     expect(second).toBeGreaterThanOrEqual(176);
     expect(second).toBeLessThan(192);
     // All three networks must come from the same profile-indexed triple.
-    expect(body).toMatch(/sub_default="10\.\d+\.\$\(\(idx\*3\)\)\.0\/24"/);
-    expect(body).toMatch(/sub_egress="10\.\d+\.\$\(\(idx\*3\+1\)\)\.0\/24"/);
-    expect(body).toMatch(/sub_edge="10\.\d+\.\$\(\(idx\*3\+2\)\)\.0\/24"/);
+    expect(body).toMatch(/sub_default="10\.\$NET_OCTET\.\$\(\(idx\*3\)\)\.0\/24"/);
+    expect(body).toMatch(/sub_egress="10\.\$NET_OCTET\.\$\(\(idx\*3\+1\)\)\.0\/24"/);
+    expect(body).toMatch(/sub_edge="10\.\$NET_OCTET\.\$\(\(idx\*3\+2\)\)\.0\/24"/);
     // idx must be the pre-increment index, or profile a starts at .3 and the
     // last profile can run past 255.
     expect(body).toMatch(/idx=\$i\s*#[^\n]*\n\s*i=\$\(\(i\+1\)\)/);

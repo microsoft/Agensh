@@ -15,12 +15,13 @@
   "dependencies": {
     "@agentclientprotocol/sdk": "^0.20.0",
     "@types/ws": "^8.18.1",
-    "mysql2": "^3.22.3",
-    "ws": "^8.20.0"
+    "mysql2": "^3.23.1",
+    "ws": "^8.21.0"
   },
   "devDependencies": {
     "@types/node": "^20.19.39",
     "typescript": "^5.9.3",
-    "vitest": "^2.1.9"
+    "vite": "^6.4.3",
+    "vitest": "^4.1.11"
   }
 }

@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import re
 import sys
+import tempfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 AUTH = os.environ.get("SECRET_SERVICE_INTERNAL_AUTH", "")
@@ -19,7 +20,16 @@ NAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 
 
 def _token_path(name: str) -> str:
-    return os.path.join(TOKENS_DIR, f"agent-{name}.token")
+    if not NAME_RE.fullmatch(name):
+        raise ValueError("bad agent name")
+    root = os.path.realpath(TOKENS_DIR)
+    path = os.path.abspath(os.path.join(root, f"agent-{name}.token"))
+    if (
+        not path.startswith(os.path.join(root, ""))
+        or os.path.commonpath((root, os.path.realpath(path))) != root
+    ):
+        raise ValueError("token path outside storage directory")
+    return path
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -35,6 +45,11 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
+        if code >= 400:
+            # Rejected POST bodies may still be unread. Do not parse their
+            # token bytes as a second request and include them in error logs.
+            self.close_connection = True
+            self.send_header("Connection", "close")
         self.end_headers()
         if body:
             self.wfile.write(body)
@@ -48,15 +63,16 @@ class Handler(BaseHTTPRequestHandler):
             return False
         return True
 
-    def _parse_agent(self, prefix: str) -> str | None:
+    def _parse_token_path(self, prefix: str) -> str | None:
         if not self.path.startswith(prefix):
             self._send(404, b"not found\n")
             return None
         name = self.path[len(prefix):].split("?", 1)[0]
-        if not NAME_RE.match(name):
+        try:
+            return _token_path(name)
+        except ValueError:
             self._send(400, b"bad agent name\n")
             return None
-        return name
 
     def do_GET(self) -> None:  # noqa: N802
         if self.path == "/healthz":
@@ -64,10 +80,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if not self._check_auth():
             return
-        name = self._parse_agent("/tokens/")
-        if name is None:
+        path = self._parse_token_path("/tokens/")
+        if path is None:
             return
-        path = _token_path(name)
         if not os.path.isfile(path):
             self._send(404, b"no such token\n")
             return
@@ -77,20 +92,22 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
         if not self._check_auth():
             return
-        name = self._parse_agent("/tokens/")
-        if name is None:
+        path = self._parse_token_path("/tokens/")
+        if path is None:
             return
         n = int(self.headers.get("Content-Length", "0") or "0")
         body = self.rfile.read(n) if n > 0 else b""
         os.makedirs(TOKENS_DIR, exist_ok=True)
-        path = _token_path(name)
-        tmp = path + ".tmp"
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        fd, tmp = tempfile.mkstemp(prefix=".token-", dir=TOKENS_DIR)
         try:
-            os.write(fd, body)
+            with os.fdopen(fd, "wb") as stream:
+                stream.write(body)
+            os.replace(tmp, path)
         finally:
-            os.close(fd)
-        os.replace(tmp, path)
+            try:
+                os.unlink(tmp)
+            except FileNotFoundError:
+                pass
         self._send(204)
 
 
@@ -100,7 +117,7 @@ def main() -> None:
         sys.exit(2)
     os.makedirs(TOKENS_DIR, exist_ok=True)
     srv = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
-    sys.stderr.write(f"[secret-service] listening on :{PORT} dir={TOKENS_DIR}\n")
+    sys.stderr.write(f"[secret-service] listening on :{PORT}\n")
     srv.serve_forever()
 
 

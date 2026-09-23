@@ -338,6 +338,15 @@ UPDATE events
 
 ### 7.2 Storage
 
+Agent names must match the complete ASCII name grammar (1–64 letters, digits,
+dots, underscores or hyphens). Token paths must resolve inside the configured
+token directory; a symlink to a file outside that directory is rejected.
+Writes use a newly created, private temporary file before the atomic replace,
+so an existing temporary-path symlink cannot redirect a token write. Startup
+logs report the listening port without printing the token storage path.
+Rejected requests close their HTTP connection so unread token bodies cannot
+be interpreted as another request and copied into an HTTP parser error log.
+
 - On disk: `/data/tokens/agent-<name>.token`, `0600`
 - Same layout as current state, bootstrap writes then directly mounts to secret-service (M1 compatible)
 - secret-service process **only reads** this directory; POST also only atomic-writes this directory

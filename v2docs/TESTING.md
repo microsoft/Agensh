@@ -1,7 +1,7 @@
 # omcgitea Testing Document
 
 > Companion: `REQUIREMENTS.md`, `DESIGN.md`, `DESIGN_R7_SIDECAR.md`, `INTERFACE.md`
-> Test stack: **TypeScript + vitest** (Node 20.10+) for the sidecar/contract layer,
+> Test stack: **TypeScript + Vitest 4 + Vite 6** (Node 20.10+) for the sidecar/contract layer,
 > **bash + python3** for the ProgramBench layer.
 
 This snapshot carries the two suites the ProgramBench 1-team sweep 6.11 arm depends on:
@@ -24,7 +24,7 @@ output, real generator stdout, real tar archives and real git repos.
 ### 0.2 Repeatability
 
 - vitest `globalSetup` (`tests/setup.ts`) brings the cluster up once per run and tears it down at
-  the end; single worker, serial (`fileParallelism:false` + `singleFork:true`).
+  the end; single worker, serial (`fileParallelism:false` + `maxWorkers:1`).
 - `make clean PROFILE=<p>` wipes only that profile's data dir.
 - A test run must leave behind no container / network / volume outside this project's
   `omcgitea-<profile>` project name.
@@ -159,3 +159,24 @@ Stack lifecycle is `make up / down / clean PROFILE=<p>` (see `Makefile`); there 
 
 Requirements V1 / V3 / V4 / V5–V8 were verified by the M1/M2 e2e suites, which are not part of this
 snapshot; the benchmark harness exercises the same PR → review → merge loop in production instead.
+
+## 6. Security Regression Checks
+
+`tests/security/` exercises token path validation, real token-service HTTP
+requests, atomic writes in the presence of a malicious temporary-file symlink,
+startup log redaction, and lifecycle export containment with the real board
+implementation and filesystem. These tests preserve valid agent and board
+identifiers and check that outside sentinel files remain unchanged.
+
+Run with the board-service requirements installed:
+
+```
+python3 -m unittest discover -s tests/security -p 'test_*.py' -v
+```
+
+The container integration suites additionally validate these boundaries over
+HTTP using freshly built images and resources created by that test run.
+Dependency updates must keep both npm lockfiles and the tests pnpm lockfile in
+sync, pass their vulnerability audits, and preserve the supported Node 20
+runtime. Test profile values are read through the existing environment parser,
+never interpolated into a shell command.

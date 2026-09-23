@@ -14,7 +14,7 @@
 import { describe, expect, it, beforeAll } from "vitest";
 import { setTimeout as sleep } from "node:timers/promises";
 import { spawnSync } from "node:child_process";
-import { loadEnv, REPO_ROOT, TOKENS_DIR, ENV_FILE_NAME, PROJECT_NAME } from "../lib/env.ts";
+import { loadEnv, TOKENS_DIR, ENV_FILE_NAME, PROJECT_NAME } from "../lib/env.ts";
 
 const env = loadEnv();
 const baseUrl = `http://gitea.${env.EDGE_DOMAIN}:${env.EDGE_HTTP_PORT}`;
@@ -34,8 +34,8 @@ function leadToken(): string {
 }
 
 function mysqlQuery(sql: string): string {
-  const pwRes = spawnSync("bash", ["-c", `grep MYSQL_PASSWORD ${REPO_ROOT}/${ENV_FILE_NAME} | cut -d= -f2`], { encoding: "utf8" });
-  const pw = pwRes.stdout.trim();
+  const pw = env.raw.MYSQL_PASSWORD;
+  if (!pw) throw new Error(`${ENV_FILE_NAME}: MYSQL_PASSWORD is required`);
   const r = spawnSync("sudo", [
     "docker", "exec", `${PROJECT_NAME}-mysql-1`,
     "mysql", "-uomcgitea", `-p${pw}`, "omcgitea", "-sNe", sql,
