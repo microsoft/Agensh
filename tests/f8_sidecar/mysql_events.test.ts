@@ -18,10 +18,10 @@ import {
   type UEMLike,
 } from "../../mini-router/src/state.ts";
 
-const CONTAINER = "omcgitea-test-mysql";
-const ROOT_PW = "test-root-pw";
+const CONTAINER = process.env.OMC_TEST_MYSQL_CONTAINER || "omcgitea-test-mysql";
+const ROOT_PW = process.env.OMC_TEST_MYSQL_PASSWORD || "test-root-pw";
 const DB = "omcgitea_test";
-const PORT = 23306; // host-side; avoids clashing with prod 3306
+const PORT = Number(process.env.OMC_TEST_MYSQL_PORT || 23306);
 
 function sh(cmd: string, args: string[]): { code: number; out: string; err: string } {
   const r = spawnSync(cmd, args, { encoding: "utf8" });
@@ -230,7 +230,7 @@ describe("EventStore.markFailed (retry backoff)", () => {
     const now = 1_700_000_000_000;
     const res = await store.markFailed(id, "boom", now);
     expect(res?.attempts).toBe(2); // 1 from sending, +1 from failure
-    expect(res?.next_retry_at).toBe(now + RETRY_BACKOFF_MS[1]); // attempts-1 = 1 → 5s
+    expect(res?.next_retry_at).toBe(now + RETRY_BACKOFF_MS[1]!); // attempts-1 = 1 → 5s
     const r = await store._getById(id);
     expect(r?.state).toBe("failed");
     expect(r?.last_error).toBe("boom");

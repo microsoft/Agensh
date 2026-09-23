@@ -16,7 +16,7 @@ export default defineConfig({
   test: {
     fileParallelism: false,
     pool: "forks",
-    poolOptions: { forks: { singleFork: true } },
+    maxWorkers: 1,
     testTimeout: 2 * 60 * 1000,
     hookTimeout: 2 * 60 * 1000,
     include: ["**/*.test.ts"],

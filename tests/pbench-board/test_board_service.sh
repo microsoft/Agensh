@@ -7,8 +7,12 @@
 # Requires: sudo docker, curl, jq. Runs as root inside its own throwaway
 # docker network to avoid colliding with any live pbench profile.
 set -u
-PROJECT="pbench-board-smoke-$$"
+PROJECT="omcgitea-board-smoke-$(openssl rand -hex 8)"
 NET="$PROJECT-net"
+BOARD_IMAGE="$PROJECT:test"
+CREATED_MYSQL=0
+CREATED_BOARD=0
+CREATED_NETWORK=0
 MYSQL_PW="smoke_$(openssl rand -hex 8)"
 BOARD_PORT=$((RANDOM % 20000 + 30000))
 MYSQL_PORT=$((RANDOM % 20000 + 30000))
@@ -16,24 +20,24 @@ LOG=/tmp/$PROJECT.log
 : > "$LOG"
 
 cleanup() {
-    sudo docker rm -f "$PROJECT-mysql" "$PROJECT-board" 2>/dev/null >/dev/null || true
-    sudo docker network rm "$NET" 2>/dev/null >/dev/null || true
+    [ "$CREATED_BOARD" = 0 ] || sudo docker rm -f "$PROJECT-board" >/dev/null 2>&1 || true
+    [ "$CREATED_MYSQL" = 0 ] || sudo docker rm -fv "$PROJECT-mysql" >/dev/null 2>&1 || true
+    [ "$CREATED_NETWORK" = 0 ] || sudo docker network rm "$NET" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 say()  { echo "[test $(date -u +%H:%M:%S)] $*" | tee -a "$LOG"; }
 
-# --- 1. Build board-service image if missing --------------------------------
-if ! sudo docker image inspect omcgitea-board:local >/dev/null 2>&1; then
-    say "building omcgitea-board:local"
-    sudo docker build -t omcgitea-board:local \
-        "$(cd "$(dirname "$0")/../../board-service" && pwd)" \
-        >>"$LOG" 2>&1 || fail "build omcgitea-board:local"
-fi
+# --- 1. Build this checkout under a tag owned by this test run ---------------
+say "building $BOARD_IMAGE"
+sudo docker build -t "$BOARD_IMAGE" \
+    "$(cd "$(dirname "$0")/../../board-service" && pwd)" \
+    >>"$LOG" 2>&1 || fail "build board-service"
 
 # --- 2. Ephemeral network + mysql -----------------------------------------
 sudo docker network create "$NET" >/dev/null || fail "docker network create"
+CREATED_NETWORK=1
 say "starting mysql on host port $MYSQL_PORT"
 sudo docker run -d --name "$PROJECT-mysql" --network "$NET" \
     -e MYSQL_ROOT_PASSWORD="$MYSQL_PW" \
@@ -41,8 +45,9 @@ sudo docker run -d --name "$PROJECT-mysql" --network "$NET" \
     -e MYSQL_USER=omcgitea \
     -e MYSQL_PASSWORD="$MYSQL_PW" \
     -v "$(cd "$(dirname "$0")/../../mini-router/sql" && pwd):/docker-entrypoint-initdb.d:ro" \
-    -p "$MYSQL_PORT:3306" \
+    -p "127.0.0.1:$MYSQL_PORT:3306" \
     mysql:8.4 >/dev/null || fail "docker run mysql"
+CREATED_MYSQL=1
 
 # Wait for mysql
 for i in $(seq 1 40); do
@@ -61,8 +66,9 @@ sudo docker run -d --name "$PROJECT-board" --network "$NET" \
     -e MYSQL_DSN="mysql://omcgitea:$MYSQL_PW@$PROJECT-mysql:3306/omcgitea" \
     -e BOARD_LISTEN_PORT=8660 \
     -e BOARD_MEMBERS_JSON='{"pbench-top":["planner","team1-lead","team2-lead"],"pbench-team1":["team1-lead","team1-worker1"]}' \
-    -p "$BOARD_PORT:8660" \
-    omcgitea-board:local >/dev/null || fail "docker run board-service"
+    -p "127.0.0.1:$BOARD_PORT:8660" \
+    "$BOARD_IMAGE" >/dev/null || fail "docker run board-service"
+CREATED_BOARD=1
 
 # Wait for healthz
 for i in $(seq 1 20); do
@@ -230,6 +236,10 @@ r=$(curl -sS "$BASE/board/pbench-top/stats?viewer=planner&window_tokens=2000")
 echo "$r" | jq -e '.stored_entries > 0' >/dev/null || fail "4.11a stats: $r"
 r=$(curl -sS -X POST "$BASE/board/pbench-top/lifecycle?viewer=planner")
 echo "$r" | jq -e '.path' >/dev/null || fail "4.11b lifecycle dump: $r"
+dump_path=$(echo "$r" | jq -r '.path')
+sudo docker exec "$PROJECT-board" python -c \
+    'import json,pathlib,sys; rows=[json.loads(s) for s in pathlib.Path(sys.argv[1]).read_text().splitlines()]; assert any(r["kind"]=="entry" for r in rows); assert rows[-1]["kind"]=="summary" and rows[-1]["stored_total"]>0' \
+    "$dump_path" || fail "4.11b lifecycle file contents"
 
 # The harness is not a board member but must still be able to trigger the dump,
 # or the run loses its only record of which gists were ever read.
@@ -240,6 +250,16 @@ r=$(curl -sS -X POST "$BASE/board/pbench-top/note" -H 'Content-Type: application
     -d '{"thread_id":"team1-worker1","type":"FACT","content":"still not a member"}')
 echo "$r" | jq -e '.detail | contains("not a member")' >/dev/null \
     || fail "4.11d membership still enforced for agents: $r"
+
+# A lifecycle filename must not redirect the HTTP export outside its root.
+sudo docker exec "$PROJECT-board" python -c \
+    'from pathlib import Path; p=Path("/tmp/lifecycle-sentinel.jsonl"); p.write_text("outside sentinel"); Path("/data/lifecycle/escape.jsonl").symlink_to(p)' \
+    || fail "4.11e prepare lifecycle symlink"
+status=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$BASE/board/escape/lifecycle?viewer=harness")
+[ "$status" = "400" ] || fail "4.11e symlink escape should return 400, got $status"
+sudo docker exec "$PROJECT-board" python -c \
+    'from pathlib import Path; assert Path("/tmp/lifecycle-sentinel.jsonl").read_text()=="outside sentinel"' \
+    || fail "4.11e outside lifecycle file was changed"
 
 # 4.12 delegation_id must accept our string ids (queue task_ids), not just ints.
 #      The upstream port hard-casts ids to int; agent names and task_ids are

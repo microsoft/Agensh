@@ -625,9 +625,13 @@ async def post_lifecycle(board_id: str, viewer: str = Query(...)) -> Dict[str, A
     """
     _authorize(viewer, board_id)
     out_dir = Path(os.environ.get("BOARD_LIFECYCLE_DIR", "/data/lifecycle"))
-    out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / f"{board_id}.jsonl"
-    await STATE.board(board_id).write_lifecycle_summary(path)
+    root = os.path.realpath(out_dir)
+    destination = os.path.realpath(path)
+    if destination == root or not destination.startswith(os.path.join(root, "")):
+        raise HTTPException(status_code=400, detail="lifecycle path outside export directory")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    await STATE.board(board_id).write_lifecycle_summary(Path(destination))
     return {"board_id": board_id, "path": str(path)}
 
 

@@ -525,3 +525,13 @@ Proxy must support messages API streaming + tool calls, response must contain `c
 - Agent-specific prompt engineering, skill content → Hermes team self-manages
 - Business flows within Gitea (label / PR template / branch protection rules) → each team self-manages
 - LLM selection / rate / cost / proxy form → deployer self-manages
+
+## 9. Board Lifecycle Export
+
+The diagnostic `POST /board/{board_id}/lifecycle` endpoint writes the existing
+JSONL lifecycle summary under `BOARD_LIFECYCLE_DIR` (default `/data/lifecycle`).
+The output name remains `{board_id}.jsonl`; identifiers are not rewritten or
+aliased. Resolve the destination and verify containment in the configured
+directory before creating directories or writing files. Traversal and symlinks
+that would escape that directory return HTTP 400 without writing outside it.
+Board membership and the existing operator exception still apply.

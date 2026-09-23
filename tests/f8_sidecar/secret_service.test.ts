@@ -9,6 +9,7 @@
  * on the sidecar refactor without waiting for the whole Gitea stack.
  */
 import { execFileSync, spawnSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, chmodSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -21,10 +22,10 @@ const __dirname = dirname(__filename);
 const REPO_ROOT = resolve(__dirname, "..", "..");
 const COMPOSE_FILE = resolve(REPO_ROOT, "docker", "docker-compose.yml");
 const SECRET_DIR = resolve(REPO_ROOT, "secret-service");
-const PROJECT = "omcgitea-f8secret";
+const PROJECT = `omcgitea-f8secret-${randomUUID().slice(0, 8)}`;
+const IMAGE = `${PROJECT}:test`;
 const AUTH = "test-auth-secret-do-not-use-in-prod-9b2c1f";
-// Free-ish high port for host publish; collision unlikely in dev.
-const HOST_PORT = 18650;
+let HOST_PORT = 0; // Docker allocates a free loopback port for this run.
 
 let tokensDir: string;
 let containerId: string | null = null;
@@ -94,7 +95,7 @@ beforeAll(async () => {
     "docker",
     "build",
     "-t",
-    "omcgitea-secret-service:local",
+    IMAGE,
     SECRET_DIR,
   ]);
   console.log("[f8] build done");
@@ -106,8 +107,6 @@ beforeAll(async () => {
   writeFileSync(resolve(tokensDir, "agent-agent1.token"), "real-token-from-disk-abc123\n");
   chmodSync(resolve(tokensDir, "agent-agent1.token"), 0o644);
 
-  // Cleanup any prior leftover container from a previous test run.
-  spawnSync("sudo", ["-n", "docker", "rm", "-f", `${PROJECT}-secret`], { stdio: "ignore" });
   console.log("[f8] launching container…");
 
   // Run the container directly (faster than full compose; we're testing
@@ -119,10 +118,11 @@ beforeAll(async () => {
     "-e", `SECRET_SERVICE_INTERNAL_AUTH=${AUTH}`,
     "-e", "SECRET_SERVICE_TOKENS_DIR=/data/tokens",
     "-v", `${tokensDir}:/data/tokens`,  // rw (POST tests need write)
-    "-p", `127.0.0.1:${HOST_PORT}:8650`,
-    "omcgitea-secret-service:local",
+    "-p", "127.0.0.1::8650",
+    IMAGE,
   ]);
   containerId = out.trim();
+  HOST_PORT = Number(sh("sudo", ["docker", "port", containerId, "8650/tcp"]).trim().split(":").at(-1));
   console.log("[f8] container", containerId.slice(0, 12), "waiting healthy…");
   await waitHealthy();
   console.log("[f8] healthy");
@@ -130,7 +130,7 @@ beforeAll(async () => {
 
 afterAll(() => {
   if (containerId) {
-    spawnSync("sudo", ["-n", "docker", "rm", "-f", `${PROJECT}-secret`], { stdio: "ignore" });
+    spawnSync("sudo", ["-n", "docker", "rm", "-f", containerId], { stdio: "ignore" });
   }
   if (tokensDir) {
     // Files inside may be root-owned (container writes 0600 root) — use sudo.
@@ -187,6 +187,29 @@ describe("secret-service", () => {
   it("POST /tokens/<agent> requires auth → 401 without", async () => {
     const r = await http("POST", "/tokens/agent3", { body: "x" });
     expect(r.status).toBe(401);
+  });
+
+  it("rejects token symlinks outside storage over real HTTP", async () => {
+    sh("sudo", ["docker", "exec", containerId!, "python", "-c",
+      "from pathlib import Path; p=Path('/tmp/outside-token-sentinel'); p.write_text('outside sentinel'); Path('/data/tokens/agent-outside.token').symlink_to(p)",
+    ]);
+    expect((await http("GET", "/tokens/outside", { auth: AUTH })).status).toBe(400);
+    expect((await http("POST", "/tokens/outside", { auth: AUTH, body: "rejected-token-body" })).status).toBe(400);
+    expect(sh("sudo", ["docker", "exec", containerId!, "cat", "/tmp/outside-token-sentinel"])).toBe("outside sentinel");
+    const logs = spawnSync("sudo", ["-n", "docker", "logs", containerId!], { encoding: "utf8" });
+    expect(logs.status).toBe(0);
+    const text = logs.stdout + logs.stderr;
+    expect(text).toContain("POST /tokens/outside");
+    expect(text).not.toContain("rejected-token-body");
+  });
+
+  it("does not follow an existing temporary-file symlink", async () => {
+    sh("sudo", ["docker", "exec", containerId!, "python", "-c",
+      "from pathlib import Path; p=Path('/tmp/temporary-token-sentinel'); p.write_text('temporary sentinel'); Path('/data/tokens/agent-temporary.token.tmp').symlink_to(p)",
+    ]);
+    expect((await http("POST", "/tokens/temporary", { auth: AUTH, body: "new-token" })).status).toBe(204);
+    expect((await http("GET", "/tokens/temporary", { auth: AUTH })).body).toBe("new-token");
+    expect(sh("sudo", ["docker", "exec", containerId!, "cat", "/tmp/temporary-token-sentinel"])).toBe("temporary sentinel");
   });
 
   it("handles concurrent GETs", async () => {

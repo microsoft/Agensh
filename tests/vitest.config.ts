@@ -7,7 +7,7 @@ export default defineConfig({
     // worker so we don't try to bring the cluster up multiple times.
     fileParallelism: false,
     pool: "forks",
-    poolOptions: { forks: { singleFork: true } },
+    maxWorkers: 1,
     testTimeout: 5 * 60 * 1000,
     hookTimeout: 5 * 60 * 1000,
     // Test discovery
