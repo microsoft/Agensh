@@ -1,0 +1,51 @@
+{
+  "mcpServers": {
+    "gitea": {
+      "type": "stdio",
+      "timeout": "${MCP_TOOL_TIMEOUT_MS}",
+      "command": "${AGENT_NODE}",
+      "args": ["/opt/mcp-notice-shim/src/index.js", "--", "/usr/local/bin/gitea-mcp", "-t", "stdio"],
+      "env": {
+        "BOARD_SERVICE_URL": "${BOARD_SERVICE_URL}",
+        "AGENT_NAME": "${AGENT_NAME}",
+        "GITEA_HOST": "${GITEA_HOST}",
+        "GITEA_ACCESS_TOKEN": "${GITEA_TOKEN}",
+        "GITEA_INSECURE": "true"
+      }
+    },
+    "mattermost": {
+      "type": "stdio",
+      "timeout": "${MCP_TOOL_TIMEOUT_MS}",
+      "command": "${AGENT_NODE}",
+      "args": ["/opt/mcp-notice-shim/src/index.js", "--", "/usr/local/bin/mcp-server-mattermost"],
+      "env": {
+        "BOARD_SERVICE_URL": "${BOARD_SERVICE_URL}",
+        "AGENT_NAME": "${AGENT_NAME}",
+        "MATTERMOST_URL": "${MATTERMOST_HOST}",
+        "MATTERMOST_TOKEN": "${MATTERMOST_TOKEN}",
+        "MATTERMOST_LOG_LEVEL": "WARNING",
+        "MATTERMOST_LOG_FORMAT": "text",
+        "MATTERMOST_VERIFY_SSL": "false"
+      }
+    },
+    "playwright": {
+      "type": "stdio",
+      "timeout": "${MCP_TOOL_TIMEOUT_MS}",
+      "command": "/usr/bin/npx",
+      "args": ["-y", "@playwright/mcp@latest", "--isolated", "--no-sandbox", "--headless", "--browser=chromium"],
+      "env": {}
+    },
+    "board": {
+      "type": "stdio",
+      "timeout": "${MCP_TOOL_TIMEOUT_MS}",
+      "command": "${AGENT_NODE}",
+      "args": ["/opt/mcp-notice-shim/src/index.js", "--", "${AGENT_NODE}", "/opt/mcp-board/src/index.js"],
+      "env": {
+        "BOARD_SERVICE_URL": "${BOARD_SERVICE_URL}",
+        "AGENT_NAME": "${AGENT_NAME}",
+        "BOARD_IDS": "${BOARD_IDS}",
+        "BOARD_QUEUE_ID": "${BOARD_QUEUE_ID}"
+      }
+    }
+  }
+}

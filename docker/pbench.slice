@@ -1,0 +1,58 @@
+# ProgramBench aggregate resource ceiling.
+#
+# One `executable` process, started by a test case inside an agent container, can allocate
+# nearly all of the host's RAM and make the kernel OOM system-wide.
+#
+# Per-container limits do not bound that on their own: CI job and agent containers are capped
+# one at a time, and many of them together still exceed the host; the per-case
+# `timeout -k 2 30` does not help because 30s is ample to allocate that much; and fan-out limits
+# do not apply to a single allocation.
+#
+# This slice is the ceiling for everything ProgramBench runs -- agents, mini-routers, gitea,
+# mysql, mattermost, act_runner, the CI job containers it spawns, and host-side eval. On
+# cgroup v2 a child cgroup is created UNDER its parent, so a container can only lower its own
+# limit, never exceed this one. That is the property the whole design rests on: the cap cannot
+# be rewritten from inside a container by an agent.
+#
+# Install:  sudo cp docker/pbench.slice /etc/systemd/system/ && sudo systemctl daemon-reload
+# Verify:   systemctl show pbench.slice -p MemoryMax
+#
+[Unit]
+Description=ProgramBench experiments (rollout, eval, sweep) — aggregate resource ceiling
+Before=slices.target
+
+[Slice]
+# 80% of physical RAM, as a PERCENTAGE: this repo runs on more than one host, and a hardcoded
+# byte count silently becomes the wrong fraction on the next one. The remaining 20% is what
+# keeps sshd, dockerd and the journal alive when a run misbehaves -- a host that is unreachable
+# cannot be seen, diagnosed or recovered.
+MemoryMax=80%
+
+# NO MemoryHigh.
+#
+# MemoryHigh throttles; it does not kill. Several agents probing the reference at once, each
+# entitled to 64 GiB by `ulimit -v 67108864`, push the slice to MemoryHigh within minutes, and
+# the kernel then forces synchronous reclaim on every allocation in the slice: every agent in
+# every stack freezes ALIVE -- no kill, no error, no log -- dockerd's stdio copiers fail as a
+# symptom, and the host sits in permanent reclaim with ssh unable to connect. MemoryMax is never
+# reached, so nothing is killed and nothing recovers until the tasks are torn down.
+#
+# With MemoryMax alone the kernel OOM-kills the process that crossed the line: one task loses
+# a probe, the others keep running, and the operator keeps their session. For a benchmark
+# harness a contained kill beats a global stall every time.
+
+# Do NOT let the slice push the machine into swap to stay under the cap: swap here is an 8 GB
+# file (a small fraction of RAM) and thrashing it is worse than a kill.
+MemorySwapMax=0
+
+# PIDs are the other failure mode: `xargs -P $(nproc)` at nproc=256 exhausts the process table
+# until sshd cannot fork. Bound them here too, so both are covered by one ceiling.
+#
+# The cap must sit well above a multi-stack fleet's steady-state task count. At the cap,
+# acp-bridge.py's Popen dies with BlockingIOError [Errno 11], the serve thread is lost, and the
+# agent is stranded with an accepted socket that no child is behind. It never recovers; the
+# router's initialize has no timeout, so it waits on a dead peer for the rest of the run.
+#
+# 120000 is still a fork-bomb bound -- a few percent of kernel.threads-max -- while leaving
+# several stacks of agents ample headroom over their steady state.
+TasksMax=120000

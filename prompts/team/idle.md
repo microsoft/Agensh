@@ -1,0 +1,1 @@
+There is always new work — do not be bounded by the previous CLAIMs' scope: pick up /opt/pbench/executable, run it against untried inputs, and close the gap between reference and the team's implementation.

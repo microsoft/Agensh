@@ -1,0 +1,32 @@
+# Tear down ProgramBench stacks that outlived their driver.
+#
+# Agents carry `restart: unless-stopped`, so Docker resurrects them on every boot. The
+# launchers are nohup'd processes and do not come back. A reboot therefore restores the work
+# without its supervisor. See scripts/pbench_reboot_guard.sh.
+#
+# Install:
+#   sudo cp docker/pbench-reboot-guard.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable pbench-reboot-guard.service
+# Verify:
+#   systemctl is-enabled pbench-reboot-guard.service
+#   journalctl -u pbench-reboot-guard.service -b
+#
+[Unit]
+Description=Tear down orphaned ProgramBench stacks after a reboot
+# Docker is what brings the orphans back, so the guard has to run after it or it finds an
+# empty container list and exits successfully having done nothing.
+After=docker.service network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=no
+# `docker compose down` on several stacks; 300s per stack inside the script, plus slack.
+TimeoutStartSec=1800
+ExecStart=/home/zhihaozhan/agensteam/scripts/pbench_reboot_guard.sh
+# A failure here must not block boot. The script is defensive on its own; this is a backstop.
+SuccessExitStatus=0 1
+
+[Install]
+WantedBy=multi-user.target

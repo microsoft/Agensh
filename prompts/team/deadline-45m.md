@@ -1,0 +1,1 @@
+@all **45 minutes left.** Stop dispatching new features. From here the only goal is that root `compile.sh` builds `./executable` and that everything already written is merged to the default branch. Land the open PRs; work that is not merged does not count. If a PR cannot be merged, say so and move on.
