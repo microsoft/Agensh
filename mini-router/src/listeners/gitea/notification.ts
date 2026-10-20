@@ -24,26 +24,7 @@
  * categorization can be layered in later by hitting subject.url.
  */
 import type { UEM } from "../../uem.ts";
-
-/** The minimal shape we depend on; extra fields are kept in raw. */
-export interface GiteaNotification {
-  id: number;
-  unread?: boolean;
-  pinned?: boolean;
-  updated_at: string;
-  url?: string;
-  subject?: {
-    title?: string;
-    type?: string;          // "Issue" | "Pull" | "Commit" | etc
-    url?: string;           // API url
-    html_url?: string;      // human url
-    state?: string;
-    latest_comment_url?: string;
-  };
-  repository?: {
-    full_name?: string;
-  };
-}
+import type { GiteaNotificationRaw } from "./fetcher.ts";
 
 /**
  * Map a Gitea notification + the agent it's destined to into a UEM.
@@ -52,7 +33,7 @@ export interface GiteaNotification {
  * the notification itself — Gitea already filtered to per-user-relevant.
  */
 export function giteaNotificationToUEM(
-  notif: GiteaNotification,
+  notif: GiteaNotificationRaw,
   target_agent: string,
   observed_at: number,
 ): UEM {

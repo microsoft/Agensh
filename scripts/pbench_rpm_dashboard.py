@@ -46,7 +46,6 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 WINDOW = 60           # the RPM window, seconds
 POLL = 10             # how often the sampler refreshes
-HISTORY = 90          # rolling samples retained (unused by the chart; kept for /api)
 BUCKET_READ = 150     # seconds of log read each poll, so a finished minute is always covered
 CHART_MINUTES = 720   # fixed 12h X axis, one point per completed minute
 CEILING_UPSTREAM = ""   # the only gateway the --limit applies to; set by main()
@@ -62,16 +61,14 @@ REQ_RE = re.compile(r"\]\s+(POST|GET)\s+(\S+)")
 RETRY_RE = re.compile(r"\]\s+upstream\s.*, retry \d+/\d+ in ")
 
 STATE_FILE = Path("/tmp/pbench_rpm_state.json")
-_state = {"stacks": {}, "groups": {}, "history": [], "updated": None, "error": None}
+_state = {"stacks": {}, "groups": {}, "updated": None, "error": None}
 try:   # survive a restart: in-memory only, every restart would wipe the chart
     _saved = json.loads(STATE_FILE.read_text())
-    _state["minutes"] = {int(k): v for k, v in _saved.get("minutes", {}).items()}
     for _key in ("minutes_by_upstream", "gateway_minutes_by_upstream"):
         _state[_key] = {
             u: {int(k): v for k, v in d.items()}
             for u, d in _saved.get(_key, {}).items()}
 except Exception:
-    _state["minutes"] = {}
     _state["minutes_by_upstream"] = {}
     _state["gateway_minutes_by_upstream"] = {}
 _lock = threading.Lock()
@@ -245,7 +242,7 @@ def _store_up(state_key, merged_up):
     return mbu
 
 
-def sampler(limit, only_upstream):
+def sampler(only_upstream):
     while True:
         try:
             stacks = {}
@@ -297,21 +294,8 @@ def sampler(limit, only_upstream):
                 mbu = _store_up("minutes_by_upstream", merged_up)
                 gmbu = _store_up("gateway_minutes_by_upstream",
                                  _merge_up(stacks, "gateway_buckets", first_full, cur_min))
-                merged = {}
-                for _d in merged_up.values():
-                    for _k, _v in _d.items():
-                        merged[_k] = merged.get(_k, 0) + _v
-                mins = _state.setdefault("minutes", {})
-                # max(), not assignment: every poll that fully covers a minute
-                # must agree, so max is a no-op in the healthy case and a floor
-                # against any residual partial read.
-                for _k, _v in merged.items():
-                    mins[_k] = max(mins.get(_k, 0), _v)
-                for k in sorted(mins)[:-CHART_MINUTES]:
-                    del mins[k]
                 try:
                     STATE_FILE.write_text(json.dumps({
-                        "minutes": {str(k): v for k, v in mins.items()},
                         "minutes_by_upstream": {
                             u: {str(k): v for k, v in d.items()}
                             for u, d in mbu.items()},
@@ -324,12 +308,6 @@ def sampler(limit, only_upstream):
                 _state["slice_pids"], _state["slice_max"] = slice_pids()
                 _state["updated"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
                 _state["error"] = None
-                _state["history"].append({
-                    "t": time.time(),
-                    "total": sum(d["rpm"] for d in stacks.values()),
-                    "by_upstream": {k: v["rpm"] for k, v in groups.items()},
-                })
-                del _state["history"][:-HISTORY]
         except Exception as e:  # a sampler crash must not take the page down
             with _lock:
                 _state["error"] = str(e)
@@ -438,139 +416,131 @@ def render():
               st.get("gateway_minutes_by_upstream", {}).get(ceil_up, {}).items()}
              if ceil_up else {})
     chart_label = ceil_up or "(no rate-limited upstream present)"
-    # Keep the figure visible before the first completed request minute. This
-    # local sentinel falls exactly outside the plotted window, so it enters the
-    # existing render path without inventing a data point or changing API state.
-    if not mins:
-        mins = {int(time.time()) // 60 - CHART_MINUTES: 0}
-    if mins:
-        # Fixed 12h X axis. Points sit at their true time, so a gap in the data
-        # renders as a gap rather than being closed up by the polyline -- an
-        # interpolated line across a dead stack would read as steady traffic.
-        now_min = int(time.time()) // 60
-        span = CHART_MINUTES
-        x0 = now_min - span
-        pts = sorted((k, v) for k, v in mins.items() if k > x0)
-        vals = [v for _, v in pts]
-        peak = max(vals) if vals else 0
-        mean = sum(vals) / len(vals) if vals else 0
-        gpts = sorted((k, v) for k, v in gmins.items() if k > x0)
-        gpeak = max((v for _, v in gpts), default=0)
-        # Fixed y scale: 0 at the bottom, the ceiling at the top. An
-        # auto-scaled axis makes "how close are we to the limit" unreadable --
-        # the curve looks equally tall at 35 rpm and at 400. Values above the
-        # ceiling are CLAMPED for drawing but reported truthfully on hover.
-        top = float(limit)
-        w, h = 1020, 190
-        ceil_y = 1.0                      # the ceiling IS the top edge; inset 1px to stay visible
-        yv = lambda v: h - (min(v, top) / top) * h
+    # Fixed 12h X axis. Points sit at their true time, so a gap in the data
+    # renders as a gap rather than being closed up by the polyline -- an
+    # interpolated line across a dead stack would read as steady traffic.
+    now_min = int(time.time()) // 60
+    span = CHART_MINUTES
+    x0 = now_min - span
+    pts = sorted((k, v) for k, v in mins.items() if k > x0)
+    vals = [v for _, v in pts]
+    peak = max(vals) if vals else 0
+    mean = sum(vals) / len(vals) if vals else 0
+    gpts = sorted((k, v) for k, v in gmins.items() if k > x0)
+    gpeak = max((v for _, v in gpts), default=0)
+    # Fixed y scale: 0 at the bottom, the ceiling at the top. An
+    # auto-scaled axis makes "how close are we to the limit" unreadable --
+    # the curve looks equally tall at 35 rpm and at 400. Values above the
+    # ceiling are CLAMPED for drawing but reported truthfully on hover.
+    top = float(limit)
+    w, h = 1020, 190
+    ceil_y = 1.0                      # the ceiling IS the top edge; inset 1px to stay visible
+    yv = lambda v: h - (min(v, top) / top) * h
 
-        # Break the polyline wherever a minute is missing.
-        def polylines(series, stroke):
-            segs, cur = [], []
-            prev = None
-            for k, v in series:
-                if prev is not None and k != prev + 1:
-                    if len(cur) > 1:
-                        segs.append(cur)
-                    cur = []
-                cur.append(((k - x0) / span * w, yv(v)))
-                prev = k
-            if len(cur) > 1:
-                segs.append(cur)
-            return "".join(
-                f'<polyline fill="none" {stroke} stroke-width="1.8" '
-                f'stroke-linejoin="round" points="{" ".join(f"{x:.2f},{y:.2f}" for x, y in sg)}"/>'
-                for sg in segs)
-        # Gateway hits under client requests: with no retries the two coincide
-        # and only the request line shows.
-        poly = polylines(gpts, 'class="gw"') + polylines(pts, 'stroke="#2b6cb0"')
+    # Break the polyline wherever a minute is missing.
+    def polylines(series, stroke):
+        segs, cur = [], []
+        prev = None
+        for k, v in series:
+            if prev is not None and k != prev + 1:
+                if len(cur) > 1:
+                    segs.append(cur)
+                cur = []
+            cur.append(((k - x0) / span * w, yv(v)))
+            prev = k
+        if len(cur) > 1:
+            segs.append(cur)
+        return "".join(
+            f'<polyline fill="none" {stroke} stroke-width="1.8" '
+            f'stroke-linejoin="round" points="{" ".join(f"{x:.2f},{y:.2f}" for x, y in sg)}"/>'
+            for sg in segs)
+    # Gateway hits under client requests: with no retries the two coincide
+    # and only the request line shows.
+    poly = polylines(gpts, 'class="gw"') + polylines(pts, 'stroke="#2b6cb0"')
 
-        # Hour gridlines across the fixed 12h span.
-        yticks = "".join(
-            f'<line x1="0" y1="{h-(t/top)*h:.1f}" x2="{w}" y2="{h-(t/top)*h:.1f}" '
-            f'stroke="currentColor" opacity=".10"/>'
-            f'<text x="2" y="{max(9, h-(t/top)*h-3):.1f}" font-size="9" fill="currentColor" '
-            f'opacity=".55">{int(t)}</text>'
-            for t in (0, limit * 0.25, limit * 0.5, limit * 0.75))
+    # Hour gridlines across the fixed 12h span.
+    yticks = "".join(
+        f'<line x1="0" y1="{h-(t/top)*h:.1f}" x2="{w}" y2="{h-(t/top)*h:.1f}" '
+        f'stroke="currentColor" opacity=".10"/>'
+        f'<text x="2" y="{max(9, h-(t/top)*h-3):.1f}" font-size="9" fill="currentColor" '
+        f'opacity=".55">{int(t)}</text>'
+        for t in (0, limit * 0.25, limit * 0.5, limit * 0.75))
 
-        grid = "".join(
-            f'<line x1="{i/12*w:.1f}" y1="0" x2="{i/12*w:.1f}" y2="{h}" stroke="currentColor" '
-            f'opacity=".08"/><text x="{i/12*w+3:.1f}" y="{h-4}" font-size="9" '
-            f'fill="currentColor" opacity=".45">-{12-i}h</text>'
-            for i in range(12))
+    grid = "".join(
+        f'<line x1="{i/12*w:.1f}" y1="0" x2="{i/12*w:.1f}" y2="{h}" stroke="currentColor" '
+        f'opacity=".08"/><text x="{i/12*w+3:.1f}" y="{h-4}" font-size="9" '
+        f'fill="currentColor" opacity=".45">-{12-i}h</text>'
+        for i in range(12))
 
-        rd, gd = dict(pts), dict(gpts)
-        data = json.dumps([[k, rd.get(k), gd.get(k)] for k in sorted(set(rd) | set(gd))])
-        parts.append(f"""<div class="card">
-          <div class="muted">requests per minute &mdash; <b>{chart_label}</b> only
-            (the gateway that advertises the {limit}/min ceiling; other arms run against an
-            uncapped gateway and are NOT summed in here) &middot; fixed 12h window
-            &middot; peak <b>{peak}</b> &middot; mean {mean:.0f} &middot; {len(vals)} min of data
-            &middot; gateway peak <b>{gpeak}</b><br>
-            <span class="sw" style="background:#2b6cb0"></span>client requests
-            <span class="sw gw"></span>gateway hits, proxy retries included (what the ceiling counts)</div>
-          <div style="position:relative">
-            <svg id="chart" data-chart-max="{int(top)}" data-gateway-limit="{int(limit)}"
-                 width="{w}" height="{h}" viewBox="0 0 {w} {h}" style="cursor:crosshair">
-              {grid}{yticks}
-              <line x1="0" y1="{ceil_y:.1f}" x2="{w}" y2="{ceil_y:.1f}" stroke="#cc4125"
-                    stroke-width="1" stroke-dasharray="5 4" opacity=".85"/>
-              {poly}
-              <line id="guide" x1="0" y1="0" x2="0" y2="{h}" stroke="#cc4125"
-                    stroke-width="1" opacity="0"/>
-              <circle id="dot" r="3.5" fill="#cc4125" opacity="0"/>
-              <rect id="hit" x="0" y="0" width="{w}" height="{h}" fill="transparent"/>
-            </svg>
-            <div id="tip" style="position:absolute;pointer-events:none;opacity:0;
-                 background:var(--surface-1,#fff);border:1px solid #c9c8c3;border-radius:6px;
-                 padding:5px 9px;font-size:12px;white-space:nowrap;
-                 box-shadow:0 3px 10px rgba(0,0,0,.16);transition:opacity .08s"></div>
-          </div>
-        </div>
-        <script>
-        (function(){{
-          const D={data}, W={w}, H={h}, X0={x0}, SPAN={span}, TOP={top:.4f};
-          const svg=document.getElementById('chart'), g=document.getElementById('guide'),
-                dot=document.getElementById('dot'), tip=document.getElementById('tip'),
-                hit=document.getElementById('hit');
-          if(!D.length) return;
-          const xOf=k=>(k-X0)/SPAN*W, yOf=v=>H-(Math.min(v,TOP)/TOP)*H;
-          hit.addEventListener('mousemove',e=>{{
-            const r=svg.getBoundingClientRect();
-            const mx=(e.clientX-r.left)*(W/r.width);
-            let best=D[0], bd=1e9;
-            for(const p of D){{ const d=Math.abs(xOf(p[0])-mx); if(d<bd){{bd=d;best=p;}} }}
-            const v=best[1]??0, gv=best[2]??v;
-            const px=xOf(best[0]), py=yOf(v);
-            g.setAttribute('x1',px); g.setAttribute('x2',px); g.setAttribute('opacity','.7');
-            dot.setAttribute('cx',px); dot.setAttribute('cy',py); dot.setAttribute('opacity','1');
-            const t=new Date(best[0]*60000);
-            const hh=String(t.getUTCHours()).padStart(2,'0'),
-                  mm=String(t.getUTCMinutes()).padStart(2,'0');
-            tip.innerHTML='<b>'+v+'</b> req/min &middot; '+gv+' gateway hits &middot; '+hh+':'+mm+' UTC'
-                          +(gv>TOP?' <span style="color:#cc4125">over ceiling</span>':'');
-            tip.style.opacity='1';
-            tip.style.left=Math.min(px*(r.width/W)+12, r.width-150)+'px';
-            tip.style.top=Math.max(0, py*(r.height/H)-34)+'px';
-          }});
-          hit.addEventListener('mouseleave',()=>{{
-            g.setAttribute('opacity','0'); dot.setAttribute('opacity','0'); tip.style.opacity='0';
-          }});
-        }})();
-        </script>""")
+    rd, gd = dict(pts), dict(gpts)
+    data = json.dumps([[k, rd.get(k), gd.get(k)] for k in sorted(set(rd) | set(gd))])
+    parts.append(f"""<div class="card">
+      <div class="muted">requests per minute &mdash; <b>{chart_label}</b> only
+        (the gateway that advertises the {limit}/min ceiling; other arms run against an
+        uncapped gateway and are NOT summed in here) &middot; fixed 12h window
+        &middot; peak <b>{peak}</b> &middot; mean {mean:.0f} &middot; {len(vals)} min of data
+        &middot; gateway peak <b>{gpeak}</b><br>
+        <span class="sw" style="background:#2b6cb0"></span>client requests
+        <span class="sw gw"></span>gateway hits, proxy retries included (what the ceiling counts)</div>
+      <div style="position:relative">
+        <svg id="chart" data-chart-max="{int(top)}" data-gateway-limit="{int(limit)}"
+             width="{w}" height="{h}" viewBox="0 0 {w} {h}" style="cursor:crosshair">
+          {grid}{yticks}
+          <line x1="0" y1="{ceil_y:.1f}" x2="{w}" y2="{ceil_y:.1f}" stroke="#cc4125"
+                stroke-width="1" stroke-dasharray="5 4" opacity=".85"/>
+          {poly}
+          <line id="guide" x1="0" y1="0" x2="0" y2="{h}" stroke="#cc4125"
+                stroke-width="1" opacity="0"/>
+          <circle id="dot" r="3.5" fill="#cc4125" opacity="0"/>
+          <rect id="hit" x="0" y="0" width="{w}" height="{h}" fill="transparent"/>
+        </svg>
+        <div id="tip" style="position:absolute;pointer-events:none;opacity:0;
+             background:var(--surface-1,#fff);border:1px solid #c9c8c3;border-radius:6px;
+             padding:5px 9px;font-size:12px;white-space:nowrap;
+             box-shadow:0 3px 10px rgba(0,0,0,.16);transition:opacity .08s"></div>
+      </div>
+    </div>
+    <script>
+    (function(){{
+      const D={data}, W={w}, H={h}, X0={x0}, SPAN={span}, TOP={top:.4f};
+      const svg=document.getElementById('chart'), g=document.getElementById('guide'),
+            dot=document.getElementById('dot'), tip=document.getElementById('tip'),
+            hit=document.getElementById('hit');
+      if(!D.length) return;
+      const xOf=k=>(k-X0)/SPAN*W, yOf=v=>H-(Math.min(v,TOP)/TOP)*H;
+      hit.addEventListener('mousemove',e=>{{
+        const r=svg.getBoundingClientRect();
+        const mx=(e.clientX-r.left)*(W/r.width);
+        let best=D[0], bd=1e9;
+        for(const p of D){{ const d=Math.abs(xOf(p[0])-mx); if(d<bd){{bd=d;best=p;}} }}
+        const v=best[1]??0, gv=best[2]??v;
+        const px=xOf(best[0]), py=yOf(v);
+        g.setAttribute('x1',px); g.setAttribute('x2',px); g.setAttribute('opacity','.7');
+        dot.setAttribute('cx',px); dot.setAttribute('cy',py); dot.setAttribute('opacity','1');
+        const t=new Date(best[0]*60000);
+        const hh=String(t.getUTCHours()).padStart(2,'0'),
+              mm=String(t.getUTCMinutes()).padStart(2,'0');
+        tip.innerHTML='<b>'+v+'</b> req/min &middot; '+gv+' gateway hits &middot; '+hh+':'+mm+' UTC'
+                      +(gv>TOP?' <span style="color:#cc4125">over ceiling</span>':'');
+        tip.style.opacity='1';
+        tip.style.left=Math.min(px*(r.width/W)+12, r.width-150)+'px';
+        tip.style.top=Math.max(0, py*(r.height/H)-34)+'px';
+      }});
+      hit.addEventListener('mouseleave',()=>{{
+        g.setAttribute('opacity','0'); dot.setAttribute('opacity','0'); tip.style.opacity='0';
+      }});
+    }})();
+    </script>""")
     return PAGE.replace("__BODY__", "".join(parts))
 
 
 class H(BaseHTTPRequestHandler):
     def do_GET(self):
-        if self.path.startswith("/api"):
-            with _lock:
-                body = json.dumps(_state, indent=2).encode()
-            ctype = "application/json"
-        else:
-            body = render().encode()
-            ctype = "text/html; charset=utf-8"
+        if self.path != "/":
+            self.send_error(404)
+            return
+        body = render().encode()
+        ctype = "text/html; charset=utf-8"
         self.send_response(200)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
@@ -597,7 +567,7 @@ def main():
     _state["upstream_filter"] = a.upstream
     global CEILING_UPSTREAM
     CEILING_UPSTREAM = a.upstream if a.ceiling_upstream is None else a.ceiling_upstream
-    threading.Thread(target=sampler, args=(a.limit, a.upstream), daemon=True).start()
+    threading.Thread(target=sampler, args=(a.upstream,), daemon=True).start()
     print(f"pbench RPM dashboard -> http://localhost:{a.port}   "
           f"(ceiling {a.limit}/min, endpoint {a.upstream or 'ALL'})")
     ThreadingHTTPServer(("0.0.0.0", a.port), H).serve_forever()

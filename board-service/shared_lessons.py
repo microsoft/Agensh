@@ -1,31 +1,20 @@
 """
-SharedLessons: per-task append-only blackboard for parallel solvers.
+SharedLessons: live per-task context board for parallel solvers.
 """
 from __future__ import annotations
 
 import asyncio
 import json
-import os
 import re
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-VALID_TYPES = ("FACT", "TRIED", "OBSERVED", "FAIL", "CLAIM", "PATCH_SUMMARY")
+VALID_TYPES = ("FACT", "OBSERVED", "FAIL", "CLAIM", "PATCH_SUMMARY")
 MAX_CONTENT_CHARS = 100
 # PATCH_SUMMARY uses the structured "files=A | idea=B | evidence=C | risk=D"
 # schema, which doesn't fit the 100-char durable-note cap.
 MAX_PATCH_SUMMARY_CHARS = 300
-# FACT/OBSERVED are pure observations: agents re-publish them constantly, and
-# they dominate board growth. They are NOT capped: the turn-start render is a
-# DELTA (new entries since this agent's last snapshot, plus all current
-# PATCH_SUMMARY), so cumulative board size does not set per-turn context cost,
-# and a cap would only silently drop the oldest observations. A 6h 16-worker
-# run writes several hundred to about a thousand FACTs. CLAIM / FAIL /
-# PATCH_SUMMARY are never capped: see MAX_OBSERVATION_ENTRIES' use site.
-# 0 = no cap.
-MAX_OBSERVATION_ENTRIES = 0
-_CAPPED_TYPES = ("FACT", "OBSERVED")
 # A hard bound on the board itself, kept deliberately far above a normal run: a
 # completed 6h 16-worker board holds roughly 1,200-2,200 entries, so this is
 # nearly always inert. It is NOT what bounds per-turn context cost (the delta
@@ -35,14 +24,11 @@ _CAPPED_TYPES = ("FACT", "OBSERVED")
 # Applied at the single append site so every downstream reader -- prompt render,
 # board_read, the mid-turn delta -- sees the same bounded list.
 MAX_BOARD_ENTRIES = 2000
-_CHARS_PER_TOKEN = 4
 
 
 def _rel_min(seconds: float) -> float:
     """Seconds elapsed -> minutes, the unit of every "+{rel}m" an agent reads."""
     return seconds / 60.0
-
-_FORMAT_OVERHEAD_CHARS = 25  # "[t{thread}/{TYPE} +{rel_min:.1f}m] " overhead per rendered entry
 
 # CLAIMs: short-lived "thread t is currently working on target X" notes,
 # used so peer threads can pick a different angle. TTL'd so abandoned claims
@@ -61,10 +47,8 @@ _FORMAT_OVERHEAD_CHARS = 25  # "[t{thread}/{TYPE} +{rel_min:.1f}m] " overhead pe
 # read as missing and its issue reassigned, spawning competing implementations
 # and discarded PRs, even while it is the busiest agent on the team.
 #
-# So a claim must be repeatable: refreshing it is how a worker says "still on
-# it". Expiry still reaps genuinely abandoned claims, and the render path is
-# bounded by _MAX_RENDERED_CLAIMS, so leaving claims uncapped costs nothing
-# visible.
+# A claim is repeatable: refreshing it says the work is still live. Expiry
+# reaps abandoned claims; every live claim remains visible in a full read.
 #
 # TTL is 1h. A sub-issue runs for tens of minutes to hours, agents post a claim
 # once rather than renewing it on a timer, and nothing in either role prompt
@@ -75,32 +59,12 @@ _FORMAT_OVERHEAD_CHARS = 25  # "[t{thread}/{TYPE} +{rel_min:.1f}m] " overhead pe
 # crashed agent steering peers away for up to an hour, which is strictly better
 # than a claim that is gone before anyone can act on it.
 DEFAULT_CLAIM_TTL_SECONDS = 3600
-DEFAULT_CLAIM_WINDOW_TOKENS = 100
-_MAX_RENDERED_CLAIMS = 6
 
 # PATCH_SUMMARY: one current candidate-fix summary per (thread, delegation).
 # The latest valid summary replaces the prior one in memory rather than being
 # suppressed, so peers see refined evidence rather than a stale early candidate.
-MAX_PATCH_SUMMARIES_PER_DELEGATION = 1
-DEFAULT_PATCH_SUMMARY_WINDOW_TOKENS = 200  # separate from claims/durable budgets
-_MAX_RENDERED_PATCH_SUMMARIES = 4
-_MAX_SELECTIVE_UNFOLDED_FAILURES = 5
-
-# Concrete-evidence markers used to mark an OBSERVED note as worth keeping
-# in the sticky tier (i.e. it names a path/symbol/test/error).
-_CONCRETE_TOKENS = ("::", "FAILED", "PASSED", "ERROR", "Exception", "Traceback", ".py", "/", "()")
-_CONCRETE_PATTERNS = (
-    re.compile(r"\b(?:exit|status|code)\s*[=:]?\s*\d+\b", re.IGNORECASE),
-    re.compile(r"\bline\s+\d+\b", re.IGNORECASE),
-    re.compile(r"\b[\w./-]+\.py(?::\d+)?\b"),
-)
-
 # Lines that explicitly mean "no notes this turn".
 _NONE_TOKENS = ("(none)", "none", "-", "—")
-_PEER_DIGEST_SPECULATIVE_HINTS = (
-    "likely", "probably", "maybe", "might", "suspect", "speculative",
-    "candidate", "guess", "appears", "seems",
-)
 _PATCH_SUMMARY_WEAK_EVIDENCE = (
     "pending", "not verified", "unverified", "should", "will verify",
     "to be verified", "tbd", "looks", "seems",
@@ -109,34 +73,9 @@ _PATCH_SUMMARY_SOLID_EVIDENCE_RE = re.compile(
     r"\b(pass(?:ed|es)?|verified|confirmed|no longer|now returns|now produces)\b",
     re.IGNORECASE,
 )
-_MAX_PEER_DIGEST_ENTRIES = 12
-_MAX_PEER_DIGEST_BY_TYPE = {
-    "PATCH_SUMMARY": 2,
-    "FAIL": 3,
-    "OBSERVED": 5,
-    "FACT": 6,
-}
 
-_TRIED_ROUTINE_VERB_PREFIXES = (
-    "search", "searched", "searching", "search_file",
-    "grep", "grepped", "grepping",
-    "find", "found", "finding",
-    "ls", "list", "listed", "listing",
-    "open", "opened", "opening",
-    "view", "viewed", "viewing",
-    "cat", "less", "head", "tail",
-    "look", "looked", "looking",
-    "ran ls", "ran grep", "ran find", "ran search", "ran search_file",
-)
 
-_TRIED_FAILURE_HINTS = (
-    "fail", "failed", "incorrect", "wrong", "invalid",
-    "no match", "no matches", "not found", "no result", "no results",
-    "empty", "could not", "couldn't", "doesn't exist", "no such",
-    "0 result", "exception", "error", "broke", "broken",
-)
-
-def _parse_patch_summary_field(content: str, field_name: str) -> Optional[str]:
+def parse_patch_summary_field(content: str, field_name: str) -> Optional[str]:
     prefix = field_name.lower() + "="
     for part in str(content or "").split("|"):
         s = part.strip()
@@ -144,36 +83,6 @@ def _parse_patch_summary_field(content: str, field_name: str) -> Optional[str]:
             return s[len(prefix):].strip()
     return None
 
-def _compact_text(text: Any, limit: int) -> str:
-    s = " ".join(str(text or "").split())
-    if limit > 0 and len(s) > limit:
-        return s[:limit].rstrip()
-    return s
-
-
-def parse_note_body(text: str) -> List[Dict[str, str]]:
-    notes: List[Dict[str, str]] = []
-    if not text:
-        return notes
-    for raw in str(text).strip().split("\n"):
-        line = raw.strip()
-        if not line:
-            continue
-        if line.lower() in _NONE_TOKENS:
-            continue
-        if line.startswith("#") or line.startswith("("):
-            continue
-        parts = line.split(None, 1)
-        if len(parts) < 2:
-            continue
-        t = parts[0].upper()
-        if t not in VALID_TYPES:
-            continue
-        content = parts[1].strip()
-        if content.lower() in _NONE_TOKENS:
-            continue
-        notes.append({"type": t, "content": content})
-    return notes
 
 class SharedLessonsError(ValueError):
     """Raised on invalid type or oversized content."""
@@ -183,36 +92,20 @@ class SharedLessons:
 
     All instances are scoped to a single task (one per task per run). Writes
     are serialized with an asyncio.Lock; reads grab a snapshot under the lock
-    then window outside it.
+    then deduplicate and expire claims outside it.
     """
 
-    DEFAULT_FEATURE_FLAGS = {
-        "tried_admission_filter": True,
-        "patch_summary_enabled": True,
-        "claims_enabled": True,
-        "patch_summary_latest_wins_enabled": False,
-        "patch_summary_lifecycle_enabled": False,
-    }
 
-    def __init__(self, task_id: str, file_path: Optional[Path] = None,
-                 feature_flags: Optional[Dict[str, bool]] = None):
+    def __init__(self, task_id: str):
         self.task_id = task_id
         self._entries: List[Dict[str, Any]] = []
         self._lock = asyncio.Lock()
         self._start_time = time.time()
-        self._file_path = Path(file_path) if file_path else None
-        # Merge caller's flags onto the defaults; unknown keys are ignored.
-        self.feature_flags: Dict[str, bool] = dict(self.DEFAULT_FEATURE_FLAGS)
-        if feature_flags:
-            for k, v in feature_flags.items():
-                if k in self.feature_flags:
-                    self.feature_flags[k] = bool(v)
         self._render_counts: Dict[Tuple[Any, str], int] = {}
 
     async def note(self, thread_id: int, type: str, content: str,
                    delegation_id: Optional[int] = None,
-                   ttl_seconds: Optional[float] = None,
-                   task_instruction: Optional[str] = None) -> Optional[Dict[str, Any]]:
+                   ttl_seconds: Optional[float] = None) -> Optional[Dict[str, Any]]:
         """
         Append one entry. Returns the entry on success; raises on bad input.
         """
@@ -220,10 +113,6 @@ class SharedLessons:
             raise SharedLessonsError(
                 f"invalid type {type!r}; must be one of {VALID_TYPES}"
             )
-        if type == "PATCH_SUMMARY" and not self.feature_flags.get("patch_summary_enabled", False):
-            return None
-        if type == "CLAIM" and not self.feature_flags.get("claims_enabled", False):
-            return None
         content = (content or "").strip()
         if not content:
             raise SharedLessonsError("content is empty after strip()")
@@ -234,18 +123,6 @@ class SharedLessons:
             raise SharedLessonsError(
                 f"content too long for {type}: {len(content)} > {type_cap} chars"
             )
-        if (type == "TRIED"
-                and self.feature_flags.get("tried_admission_filter", True)
-                and self._is_routine_tried(content)):
-            try:
-                from base.engine.logs import logger as _logger
-                _logger.info(
-                    f"[SharedLessons] [{self.task_id}] suppressed routine TRIED "
-                    f"from t{thread_id}: {content[:80]!r}"
-                )
-            except Exception:
-                pass
-            return None
         now_ts = time.time()
         expires_at: Optional[float] = None
         if type == "CLAIM":
@@ -259,23 +136,11 @@ class SharedLessons:
             "delegation_id": (delegation_id if delegation_id is not None else None),
             "_expires_at": expires_at,  # None for non-CLAIM (and CLAIM with ttl=None should also default)
         }
-        if task_instruction:
-            entry["task"] = _compact_text(task_instruction, 300)
         async with self._lock:
-            if not self._admit(entry):
-                return None
-            if self._file_path is not None:
-                try:
-                    self._file_path.parent.mkdir(parents=True, exist_ok=True)
-                    with self._file_path.open("a", encoding="utf-8") as f:
-                        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-                except Exception:
-                    # Disk failure must not break in-memory state — the
-                    # in-memory copy is the authoritative read path.
-                    pass
+            self._admit(entry)
         return entry
 
-    def _admit(self, entry: Dict[str, Any], *, replay: bool = False) -> bool:
+    def _admit(self, entry: Dict[str, Any]) -> None:
         """Put a validated entry on the board: the in-lock half of note().
 
         Sets the PATCH_SUMMARY lifecycle marks (a FAIL invalidates its
@@ -284,30 +149,25 @@ class SharedLessons:
         trims to MAX_BOARD_ENTRIES. main.py's hydrate() re-admits the persisted
         rows through here, so the board rebuilt after a restart is the one the
         live writes built. A persisted replacement always remains latest-wins
-        during replay even if that feature flag has since been disabled; otherwise
-        a restart would resurrect its stale predecessor. The caller holds _lock,
-        or runs before anything reads the board. Returns False when the entry is
-        suppressed.
+        during replay, so a restart cannot resurrect its stale predecessor. The
+        caller holds _lock, or runs before anything reads the board.
         """
         type = entry["type"]
         content = entry["content"]
-        now_ts = entry["ts"]
-        patch_lifecycle_enabled = self.feature_flags.get("patch_summary_lifecycle_enabled", False)
         if (
-            patch_lifecycle_enabled
-            and type == "PATCH_SUMMARY"
+            type == "PATCH_SUMMARY"
             and self._is_verified_patch_summary_checkpoint(content)
         ):
             entry["_verified_checkpoint"] = True
         norm_delegation = entry.get("delegation_id")
         norm_thread = entry["thread_id"]
-        if type == "PATCH_SUMMARY" and patch_lifecycle_enabled:
+        if type == "PATCH_SUMMARY":
             fail_count = self._delegation_fail_count(
                 self._entries, norm_thread, norm_delegation
             )
             if fail_count:
                 entry["_local_fail_count"] = fail_count
-        if type == "FAIL" and patch_lifecycle_enabled:
+        if type == "FAIL":
             fail_count = self._delegation_fail_count(
                 self._entries, norm_thread, norm_delegation
             ) + 1
@@ -316,13 +176,10 @@ class SharedLessons:
                     e.get("type") == "PATCH_SUMMARY"
                     and e.get("thread_id") == norm_thread
                     and e.get("delegation_id") == norm_delegation
-                    and not e.get("_finalized")
                 ):
                     e.pop("_verified_checkpoint", None)
                     e["_invalidated_by_fail"] = content[:MAX_CONTENT_CHARS]
-                    e["_invalidated_ts"] = now_ts
                     e["_local_fail_count"] = fail_count
-                    entry["_grounded_patch_fail"] = True
                     break
         if type == "PATCH_SUMMARY":
             existing_idx: Optional[int] = None
@@ -336,23 +193,11 @@ class SharedLessons:
                     existing_idx = i
                     break
             if existing_idx is not None:
-                if not (replay or self.feature_flags.get("patch_summary_latest_wins_enabled", False)):
-                    try:
-                        from base.engine.logs import logger as _logger
-                        _logger.info(
-                            f"[SharedLessons] [{self.task_id}] suppressed PATCH_SUMMARY "
-                            f"from t{norm_thread}/d{norm_delegation} (cap "
-                            f"{MAX_PATCH_SUMMARIES_PER_DELEGATION} reached): {content[:80]!r}"
-                        )
-                    except Exception:
-                        pass
-                    return False
                 previous = self._entries[existing_idx]
                 entry["_first_ts"] = previous.get("_first_ts", previous.get("ts", entry["ts"]))
                 entry["_last_ts"] = entry["ts"]
-                entry["_replaces_ts"] = previous.get("ts")
                 self._entries[existing_idx] = entry
-                return True
+                return
         self._entries.append(entry)
         # Drop the OLDEST past the bound. Newest-wins because a stale
         # observation is exactly what nobody needs re-read, and because
@@ -360,60 +205,8 @@ class SharedLessons:
         # an entry a peer has already been shown.
         if len(self._entries) > MAX_BOARD_ENTRIES:
             del self._entries[: len(self._entries) - MAX_BOARD_ENTRIES]
-        return True
 
-    async def mark_patch_summary_final(
-        self,
-        thread_id: int,
-        delegation_id: Optional[int],
-        content: Optional[str] = None,
-    ) -> bool:
-        """Mark this delegation's latest PATCH_SUMMARY as finish-done handoff.
 
-        ImplementerAgents may write PATCH_SUMMARY before they finish so PlannerAgent can
-        see a local candidate, but peer threads should trust summaries more
-        when they came from an explicit `finish done` handoff. This metadata is
-        oracle-free: it records only the agent's own lifecycle status, not
-        grader/eval success.
-        """
-        if not self.feature_flags.get("patch_summary_lifecycle_enabled", False):
-            return False
-        norm_thread = thread_id
-        norm_delegation = delegation_id if delegation_id is not None else None
-        wanted = (content or "").strip()
-        now_ts = time.time()
-        updated: Optional[Dict[str, Any]] = None
-        async with self._lock:
-            for e in reversed(self._entries):
-                if (
-                    e.get("type") == "PATCH_SUMMARY"
-                    and e.get("thread_id") == norm_thread
-                    and e.get("delegation_id") == norm_delegation
-                    and (not wanted or str(e.get("content", "")).strip() == wanted)
-                ):
-                    e["_finalized"] = True
-                    e["_finalized_ts"] = now_ts
-                    updated = dict(e)
-                    break
-        if updated is None:
-            return False
-        if self._file_path is not None:
-            try:
-                self._file_path.parent.mkdir(parents=True, exist_ok=True)
-                with self._file_path.open("a", encoding="utf-8") as f:
-                    f.write(json.dumps(updated, ensure_ascii=False) + "\n")
-            except Exception:
-                pass
-        return True
-
-    def _is_concrete(self, content: str) -> bool:
-        """Heuristic: does an OBSERVED note name concrete, expensive-to-rediscover
-        evidence (path / symbol / test / error) vs vague progress chatter?"""
-        lowered = content.lower()
-        return (
-            any(t.lower() in lowered for t in _CONCRETE_TOKENS)
-            or any(p.search(content) for p in _CONCRETE_PATTERNS)
-        )
 
     @staticmethod
     def _is_expired_claim(entry: Dict[str, Any], now_ts: Optional[float] = None) -> bool:
@@ -431,32 +224,12 @@ class SharedLessons:
             return False
         return (now_ts if now_ts is not None else time.time()) > float(exp)
 
-    def _is_routine_tried(self, content: str) -> bool:
-        """should this TRIED note be SUPPRESSED at write time?
-
-        True iff the content is pure search/open verb chatter with no
-        concrete evidence (path/symbol/error/line) and no reusable
-        failure language. False otherwise (admit). Conservative —
-        default-admit when uncertain. Only consulted for TRIED type.
-        """
-        if not content:
-            return False  # let the existing empty-content guard reject it
-        if self._is_concrete(content):
-            return False  # reusable concrete result
-        low = content.lower().strip()
-        if any(h in low for h in _TRIED_FAILURE_HINTS):
-            return False  # reusable failure (dead end peers should avoid)
-        # First 2 words = the "verb phrase". Catches "ran grep" / "search_file".
-        first_two = " ".join(low.split()[:2])
-        first_one = first_two.split(" ")[0] if first_two else ""
-        return any(first_two.startswith(v) or first_one == v
-                   for v in _TRIED_ROUTINE_VERB_PREFIXES)
 
     def _is_verified_patch_summary_checkpoint(self, content: str) -> bool:
         """
         True when a PATCH_SUMMARY has concrete local verification evidence.
         """
-        evidence = _parse_patch_summary_field(content, "evidence")
+        evidence = parse_patch_summary_field(content, "evidence")
         if not evidence:
             return False
         low = evidence.strip().lower()
@@ -466,19 +239,6 @@ class SharedLessons:
             return False
         return bool(_PATCH_SUMMARY_SOLID_EVIDENCE_RE.search(evidence))
 
-    def _priority(self, e: Dict[str, Any]) -> int:
-        t = e.get("type")
-        if t == "PATCH_SUMMARY":
-            return -1
-        if t == "FACT" or (t == "OBSERVED" and self._is_concrete(str(e.get("content", "")))):
-            return 0   # durable evidence
-        if t == "FAIL":
-            return 1   # dead ends worth avoiding
-        if t == "OBSERVED":
-            return 2
-        if t == "TRIED":
-            return 3   # TRIED — most ephemeral / coordination noise
-        return 4       # CLAIM — coordination only, normally rendered in its
                        # own section and stripped before this function runs;
                        # this value only matters as a defensive fallback.
 
@@ -517,9 +277,6 @@ class SharedLessons:
         except (TypeError, ValueError):
             return 0
 
-    def _patch_failure_suffix(self, entry: Dict[str, Any]) -> str:
-        fail_count = self._patch_failure_count(entry)
-        return f" [local_failures={fail_count}]" if fail_count else ""
 
     def _patch_status_values(self, entry: Dict[str, Any]) -> List[str]:
         """
@@ -528,11 +285,9 @@ class SharedLessons:
         if entry.get("type") != "PATCH_SUMMARY":
             return []
         status: List[str] = []
-        if entry.get("_finalized"):
-            status.append("final")
         if entry.get("_verified_checkpoint"):
             status.append("verified")
-        if entry.get("_invalidated_by_fail") and not entry.get("_finalized"):
+        if entry.get("_invalidated_by_fail"):
             status.append("invalidated")
         fail_count = self._patch_failure_count(entry)
         if fail_count:
@@ -540,8 +295,6 @@ class SharedLessons:
         return status
 
     def _patch_status_suffix(self, entry: Dict[str, Any]) -> str:
-        if not self.feature_flags.get("patch_summary_lifecycle_enabled", False):
-            return ""
         status = self._patch_status_values(entry)
         return f" [status={','.join(status)}]" if status else ""
 
@@ -550,7 +303,6 @@ class SharedLessons:
         if entry.get("type") != "PATCH_SUMMARY":
             return {
                 "patch_status": "",
-                "is_finalized": False,
                 "is_verified_checkpoint": False,
                 "local_failures": 0,
                 "invalidated_by_fail": False,
@@ -558,7 +310,6 @@ class SharedLessons:
             }
         return {
             "patch_status": ",".join(self._patch_status_values(entry)),
-            "is_finalized": bool(entry.get("_finalized")),
             "is_verified_checkpoint": bool(entry.get("_verified_checkpoint")),
             "local_failures": self._patch_failure_count(entry),
             "invalidated_by_fail": bool(entry.get("_invalidated_by_fail")),
@@ -609,23 +360,6 @@ class SharedLessons:
             return None
         return (entry.get("type"), files, syms, lines, errors, tests)
 
-    @staticmethod
-    def _cap_observations(entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Keep only the most recent MAX_OBSERVATION_ENTRIES FACT/OBSERVED.
-
-        Order is preserved for everything kept, so the render sequence is
-        unchanged apart from the dropped prefix -- callers downstream index by
-        position, not by identity.
-        """
-        if MAX_OBSERVATION_ENTRIES <= 0:
-            return entries
-        obs_idx = [i for i, e in enumerate(entries) if e.get("type") in _CAPPED_TYPES]
-        if len(obs_idx) <= MAX_OBSERVATION_ENTRIES:
-            return entries
-        # Drop the OLDEST: the newest observations are the ones still worth
-        # acting on, and a stale one is exactly what nobody needs re-read.
-        drop = set(obs_idx[: len(obs_idx) - MAX_OBSERVATION_ENTRIES])
-        return [e for i, e in enumerate(entries) if i not in drop]
 
     def _dedupe_entries(self, entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Collapse exact + semantic duplicate notes without mutating
@@ -712,397 +446,41 @@ class SharedLessons:
             final.append(ee)
         return final
 
-    def _matched_self(self, e: Dict[str, Any], viewer_thread_id: Optional[int],
-                      viewer_delegation_id: Optional[int], self_policy: str) -> bool:
-        """True if a (deduped) note group is EXCLUSIVELY the viewer's own — so it's
-        safe to demote/exclude (the viewer already has it in local memory). A group
-        corroborated by ANY peer thread is never treated as self. Backward-compat:
-        entries without delegation_id are never matched by the current-delegation
-        policies (kept), since we can't prove they're the current run."""
-        if viewer_thread_id is None:
-            return False
-        tids = e.get("_thread_ids") or [e.get("thread_id")]
-        if set(tids) != {viewer_thread_id}:
-            return False
-        if self_policy == "demote_thread":
-            return True  # any delegation on this thread (fallback when no delegation id)
-        if viewer_delegation_id is None:
-            return False
-        raw_dids = e.get("_delegation_ids") or [e.get("delegation_id")]
-        if any(d is None for d in raw_dids):
-            return False
-        dids = [d for d in raw_dids if d is not None]
-        return bool(dids) and set(dids) == {viewer_delegation_id}
 
-    def _select_entries(
-        self,
-        entries: List[Dict[str, Any]],
-        window_tokens: int = 500,
-        viewer_thread_id: Optional[int] = None,
-        viewer_delegation_id: Optional[int] = None,
-        self_policy: str = "include",
-        count_render: bool = True,
-        claim_window_tokens: int = DEFAULT_CLAIM_WINDOW_TOKENS,
-        patch_summary_window_tokens: int = DEFAULT_PATCH_SUMMARY_WINDOW_TOKENS,
-    ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
-        # window_tokens <= 0 means UNLIMITED: render the whole board.
-        #
-        # A windowed render makes an absent CLAIM ambiguous between "nobody
-        # claimed this" and "it was dropped by the budget or the 6-claim cap",
-        # so a second agent starts work a peer already claimed. That is fatal
-        # to the rule the lead is given ("a fresh CLAIM means they are
-        # mid-implementation, not stuck") — absence would carry no information.
-        # A whole run's board is small: 126 entries / ~4k tokens over 6 hours.
-        unlimited = window_tokens <= 0
-        # A large int rather than math.inf: these budgets flow into int() and
-        # into arithmetic downstream (e.g. the PROTECTED_RESERVE_FRACTION
-        # reserve), and infinity raises OverflowError there.
-        _NO_LIMIT = 10 ** 12
-        chars_budget = _NO_LIMIT if unlimited else window_tokens * _CHARS_PER_TOKEN
-        claim_chars_budget = _NO_LIMIT if unlimited else max(claim_window_tokens, 0) * _CHARS_PER_TOKEN
-        patch_chars_budget = _NO_LIMIT if unlimited else max(patch_summary_window_tokens, 0) * _CHARS_PER_TOKEN
-        deduped_pre_expiry = self._dedupe_entries(entries)
-
+    def _select_entries(self, entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Render all deduplicated, live entries in chronological order."""
         now_ts = time.time()
-        deduped = [e for e in deduped_pre_expiry if not self._is_expired_claim(e, now_ts)]
-
-        # Type-aware cap, applied BEFORE the char budget so an unbounded run of
-        # observations cannot crowd out the coordination types further down.
-        #
-        # Only FACT/OBSERVED are capped. The others are load-bearing:
-        #   CLAIM  a second agent that never sees a peer's CLAIM duplicates
-        #          its work. A dropped CLAIM makes absence ambiguous -- "nobody claimed
-        #          this" vs "it was dropped" -- which is fatal to the rule the
-        #          lead is given. CLAIMs are bounded by TTL expiry above, which
-        #          is a liveness bound rather than a budget one.
-        #   FAIL   dropping one invites a peer to repeat the failure.
-        #   PATCH_SUMMARY  the review surface; latest-wins already collapses
-        #          supersessions in place, so it grows with distinct work only.
-        deduped = self._cap_observations(deduped)
-
-        pool = deduped
-        self_excluded: List[Dict[str, Any]] = []
-        if self_policy == "exclude_current":
-            self_excluded = [
-                e for e in deduped
-                if self._matched_self(e, viewer_thread_id, viewer_delegation_id, self_policy)
-            ]
-            self_excluded_ids = {id(e) for e in self_excluded}
-            pool = [e for e in deduped if id(e) not in self_excluded_ids]
-
-        claim_self_excluded = [
-            e for e in pool
-            if e.get("type") == "CLAIM"
-            and self_policy in ("demote_current", "demote_thread", "exclude_current")
-            and self._matched_self(
-                e,
-                viewer_thread_id,
-                viewer_delegation_id,
-                "demote_thread" if self_policy == "exclude_current" else self_policy,
-            )
+        kept = [
+            entry for entry in self._dedupe_entries(entries)
+            if not self._is_expired_claim(entry, now_ts)
         ]
-        if claim_self_excluded:
-            self_excluded.extend(claim_self_excluded)
-        claim_self_excluded_ids = {id(e) for e in claim_self_excluded}
-        claim_pool = [
-            e for e in pool
-            if e.get("type") == "CLAIM"
-            and id(e) not in claim_self_excluded_ids
-        ]
-        claim_pool.sort(key=lambda x: -float(x.get("_last_ts", x.get("ts", 0.0))))
-        claim_kept: List[Dict[str, Any]] = []
-        claim_used = 0
-        claim_cap = len(claim_pool) if unlimited else _MAX_RENDERED_CLAIMS
-        for e in claim_pool[:claim_cap]:
-            sz = self._entry_size(e)
-            if claim_used + sz > claim_chars_budget:
-                continue
-            claim_used += sz
-            claim_kept.append(e)
-        pool = [e for e in pool if e.get("type") != "CLAIM"]
+        kept.sort(key=lambda entry: entry["ts"])
+        for entry in kept:
+            key = self._render_count_key(entry)
+            self._render_counts[key] = self._render_counts.get(key, 0) + 1
+        return kept
 
-        patch_self_excluded = [
-            e for e in pool
-            if e.get("type") == "PATCH_SUMMARY"
-            and self_policy in ("demote_current", "demote_thread", "exclude_current")
-            and self._matched_self(
-                e,
-                viewer_thread_id,
-                viewer_delegation_id,
-                "demote_thread" if self_policy == "exclude_current" else self_policy,
-            )
-        ]
-        if patch_self_excluded:
-            self_excluded.extend(patch_self_excluded)
-        patch_self_excluded_ids = {id(e) for e in patch_self_excluded}
-        patch_pool = [
-            e for e in pool
-            if e.get("type") == "PATCH_SUMMARY"
-            and id(e) not in patch_self_excluded_ids
-        ]
-        patch_pool.sort(key=lambda x: -float(x.get("_last_ts", x.get("ts", 0.0))))
-        patch_kept: List[Dict[str, Any]] = []
-        patch_used = 0
-        # Same conditional as claim_cap above; this one was missed. With
-        # BOARD_WINDOW_TOKENS unset (unlimited -- the shipped config) the whole
-        # board rendered EXCEPT patch summaries, still capped at 4. The pool is
-        # sorted newest-first, so the OLDEST summaries silently vanished from
-        # every prompt while staying visible in /read_all.
-        patch_cap = len(patch_pool) if unlimited else _MAX_RENDERED_PATCH_SUMMARIES
-        for e in patch_pool[:patch_cap]:
-            sz = self._entry_size(e)
-            if patch_used + sz > patch_chars_budget:
-                continue
-            patch_used += sz
-            patch_kept.append(e)
-        pool = [e for e in pool if e.get("type") != "PATCH_SUMMARY"]
-
-        def _key(x: Dict[str, Any]):
-            demote = (self_policy in ("demote_current", "demote_thread")
-                      and self._matched_self(x, viewer_thread_id, viewer_delegation_id, self_policy))
-            base_prio = self._priority(x) + (1000 if demote else 0)
-            recency = -float(x.get("_last_ts", x.get("ts", 0.0)))
-            return (base_prio, recency)
-
-        PROTECTED_RESERVE_FRACTION = 0.35
-        reserve_chars = int(chars_budget * PROTECTED_RESERVE_FRACTION)
-
-        def _is_protected(e: Dict[str, Any]) -> bool:
-            t = e.get("type")
-            if t == "FAIL":
-                return True
-            if t == "OBSERVED" and self._is_concrete(str(e.get("content", ""))):
-                return True
-            return False
-
-        kept: List[Dict[str, Any]] = []
-        used = 0
-        kept_ids: set = set()
-        if reserve_chars > 0:
-            protected_pool = [
-                e for e in pool
-                if _is_protected(e)
-                and not (
-                    self_policy in ("demote_current", "demote_thread")
-                    and self._matched_self(e, viewer_thread_id, viewer_delegation_id, self_policy)
-                )
-            ]
-            protected_pool.sort(key=lambda x: -float(x.get("_last_ts", x.get("ts", 0.0))))
-            reserve_used = 0
-            for e in protected_pool:
-                sz = self._entry_size(e)
-                if reserve_used + sz > reserve_chars:
-                    continue
-                reserve_used += sz
-                kept.append(e)
-                kept_ids.add(id(e))
-            used = reserve_used
-
-        for e in sorted(pool, key=_key):
-            if id(e) in kept_ids:
-                continue
-            sz = self._entry_size(e)
-            if used + sz > chars_budget:
-                continue
-            used += sz
-            kept.append(e)
-            kept_ids.add(id(e))
-
-        kept.extend(claim_kept)
-        kept.extend(patch_kept)
-
-        if count_render:
-            for e in kept:
-                key = self._render_count_key(e)  # 
-                self._render_counts[key] = self._render_counts.get(key, 0) + 1
-
-        kept_ids = {id(e) for e in kept}
-        kept.sort(key=lambda e: e["ts"])
-        stats = self._build_stats(
-            entries=entries,
-            deduped=deduped,
-            kept=kept,
-            kept_ids=kept_ids,
-            used_chars=used,
-            chars_budget=chars_budget,
-            window_tokens=window_tokens,
-            viewer_thread_id=viewer_thread_id,
-            viewer_delegation_id=viewer_delegation_id,
-            claim_used_chars=claim_used,
-            claim_chars_budget=claim_chars_budget,
-            deduped_pre_expiry=deduped_pre_expiry,
-            self_excluded=self_excluded,
-            patch_used_chars=patch_used,
-            patch_chars_budget=patch_chars_budget,
-        )
-        return kept, stats
-
-    def _type_counts(self, entries: List[Dict[str, Any]], raw_dups: bool = False) -> Dict[str, int]:
-        counts = {t: 0 for t in VALID_TYPES}
-        for e in entries:
-            t = e.get("type")
-            if t in counts:
-                counts[t] += int(e.get("_dup", 1)) if raw_dups else 1
+    def _type_counts(self, entries: List[Dict[str, Any]]) -> Dict[str, int]:
+        counts = {kind: 0 for kind in VALID_TYPES}
+        for entry in entries:
+            kind = entry.get("type")
+            if kind in counts:
+                counts[kind] += 1
         return counts
 
-    def _build_stats(
-        self,
-        entries: List[Dict[str, Any]],
-        deduped: List[Dict[str, Any]],
-        kept: List[Dict[str, Any]],
-        kept_ids: set,
-        used_chars: int,
-        chars_budget: int,
-        window_tokens: int,
-        viewer_thread_id: Optional[int],
-        viewer_delegation_id: Optional[int] = None,
-        claim_used_chars: int = 0,
-        claim_chars_budget: int = 0,
-        deduped_pre_expiry: Optional[List[Dict[str, Any]]] = None,
-        self_excluded: Optional[List[Dict[str, Any]]] = None,
-        patch_used_chars: int = 0,
-        patch_chars_budget: int = 0,
-    ) -> Dict[str, Any]:
-        if deduped_pre_expiry is None:
-            deduped_pre_expiry = deduped
-        if self_excluded is None:
-            self_excluded = []
-        self_excluded_ids = {id(e) for e in self_excluded}
-        # Only budget/window omissions are "dropped". Entries intentionally
-        # hidden by viewer self-policy are tracked separately so they do not
-        # create false overflow in ImplementerAgent render stats.
-        dropped_unique = [
-            e for e in deduped
-            if id(e) not in kept_ids and id(e) not in self_excluded_ids
-        ]
-        dropped_raw_count = sum(int(e.get("_dup", 1)) for e in dropped_unique)
-        stats: Dict[str, Any] = {
-            "task_id": self.task_id,
-            "window_tokens": int(window_tokens),
-            "budget_chars": chars_budget,
-            "claim_budget_chars": int(claim_chars_budget),
-            "patch_summary_budget_chars": int(patch_chars_budget),
-            "durable_rendered_chars_estimate": int(used_chars),
-            "claim_rendered_chars_estimate": int(claim_used_chars),
-            "patch_summary_rendered_chars_estimate": int(patch_used_chars),
-            # Headline is the FULL prompt footprint: durable + claim + patch.
-            "rendered_chars_estimate": int(used_chars) + int(claim_used_chars) + int(patch_used_chars),
-            "stored_entries": len(entries),
-            # Dedupe-collapse view (legacy semantics, expiry-agnostic):
-            "unique_entries": len(deduped_pre_expiry),
-            "duplicates_suppressed": max(0, len(entries) - len(deduped_pre_expiry)),
-            "stored_by_type": self._type_counts(entries),
-            "unique_by_type": self._type_counts(deduped_pre_expiry),
-            # Post-expiry view (what selection actually operates on):
-            "live_unique_entries": len(deduped),
-            "live_unique_by_type": self._type_counts(deduped),
-            "expired_claims_excluded": max(0, len(deduped_pre_expiry) - len(deduped)),
-            "self_excluded_entries": len(self_excluded),
-            "self_excluded_by_type": self._type_counts(self_excluded),
-            "rendered_entries": len(kept),
-            "dropped_unique_entries": len(dropped_unique),
-            "dropped_raw_entries": dropped_raw_count,
-            "overflow": bool(dropped_unique),
-            "rendered_by_type": self._type_counts(kept),
-            "dropped_unique_by_type": self._type_counts(dropped_unique),
-            "dropped_raw_by_type": self._type_counts(dropped_unique, raw_dups=True),
-        }
-        if viewer_thread_id is not None:
-            stats["viewer_thread_id"] = viewer_thread_id
-            stats["viewer_self_entries_rendered"] = sum(
-                1 for e in kept if e.get("thread_id") == viewer_thread_id
-            )
-            # Precise (use _matched_self, the same logic the self_policy applies):
-            # same_thread: any delegation on the viewer thread, exclusively;
-            # current_self: exclusively the viewer's CURRENT delegation.
-            same_thread = lambda e: self._matched_self(  # noqa: E731
-                e, viewer_thread_id, viewer_delegation_id, "demote_thread")
-            current_self = lambda e: self._matched_self(  # noqa: E731
-                e, viewer_thread_id, viewer_delegation_id, "demote_current")
-            stats["viewer_same_thread_entries_rendered"] = sum(1 for e in kept if same_thread(e))
-            stats["viewer_current_self_entries_rendered"] = sum(1 for e in kept if current_self(e))
-            stats["viewer_same_thread_entries_excluded"] = sum(1 for e in self_excluded if same_thread(e))
-            stats["viewer_current_self_entries_excluded"] = sum(1 for e in self_excluded if current_self(e))
-            stats["viewer_current_self_entries_dropped"] = sum(1 for e in dropped_unique if current_self(e))
-        return stats
 
-    async def read(
-        self,
-        window_tokens: int = 500,
-        viewer_thread_id: Optional[int] = None,
-        viewer_delegation_id: Optional[int] = None,
-        self_policy: str = "include",
-    ) -> List[Dict[str, Any]]:
-        """Return a DEDUPED, PRIORITY-SELECTED view that fits window_tokens.
-
-        Deterministic (no LLM summarizer). Steps:
-          1) collapse exact (type, normalized-content) duplicates (12-14% of entries),
-             counting repeats so they don't consume budget;
-          2) fill the budget in PRIORITY order — FACT / concrete-OBSERVED > FAIL >
-             OBSERVED > TRIED — newest-first within each priority, so durable evidence
-             survives and low-value TRIED chatter is dropped first.
-        Returned in chronological order. Storage (_entries) stays append-only; this
-        only changes the rendered selection.
-        """
+    async def read(self) -> List[Dict[str, Any]]:
+        """Return the complete live board after deduplication and claim expiry."""
         async with self._lock:
             snap = list(self._entries)
-        entries, _ = self._select_entries(
-            snap, window_tokens=window_tokens,
-            viewer_thread_id=viewer_thread_id,
-            viewer_delegation_id=viewer_delegation_id,
-            self_policy=self_policy,
-        )
-        return entries
-
-    async def read_with_stats(
-        self,
-        window_tokens: int = 500,
-        viewer_thread_id: Optional[int] = None,
-        viewer_delegation_id: Optional[int] = None,
-        self_policy: str = "include",
-    ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
-        """Return selected entries plus render/overflow/dedupe stats."""
-        async with self._lock:
-            snap = list(self._entries)
-        return self._select_entries(
-            snap,
-            window_tokens=window_tokens,
-            viewer_thread_id=viewer_thread_id,
-            viewer_delegation_id=viewer_delegation_id,
-            self_policy=self_policy,
-        )
+        return self._select_entries(snap)
 
     async def read_all(self) -> List[Dict[str, Any]]:
         """Return all entries (no windowing). For diagnostics / end-of-task."""
         async with self._lock:
             return list(self._entries)
 
-    async def get_stats(self, window_tokens: Optional[int] = None) -> Dict[str, Any]:
-        """Return storage stats, optionally including current render-selection stats."""
-        async with self._lock:
-            snap = list(self._entries)
-        if window_tokens is None:
-            deduped = self._dedupe_entries(snap)
-            return {
-                "task_id": self.task_id,
-                "stored_entries": len(snap),
-                "unique_entries": len(deduped),
-                "duplicates_suppressed": max(0, len(snap) - len(deduped)),
-                "stored_by_type": self._type_counts(snap),
-                "unique_by_type": self._type_counts(deduped),
-            }
-        # get_stats is a DIAGNOSTIC; passing count_render=False
-        # so end-of-task stats logging doesn't inflate _render_counts (the
-        # orchestrator currently calls get_stats twice per task before writing
-        # the lifecycle summary — ~10% overcount in the ).
-        _, stats = self._select_entries(snap, window_tokens=window_tokens, count_render=False)
-        return stats
 
-    def _entry_size(self, entry: Dict[str, Any]) -> int:
-        dup = int(entry.get("_dup", 1))
-        suffix_len = len(f" (x{dup})") if dup > 1 else 0
-        suffix_len += len(self._patch_status_suffix(entry))
-        return _FORMAT_OVERHEAD_CHARS + len(entry["content"]) + suffix_len
 
     def format_entry_line(self, e: Dict[str, Any], now_ts: float | None = None) -> str:
         """Render ONE entry exactly as it appears inside format_for_prompt.
@@ -1188,329 +566,6 @@ class SharedLessons:
                 parts.append(self.format_entry_line(e))
         return "\n".join(parts)
 
-    def _patch_task_text(self, entry: Dict[str, Any]) -> str:
-        task = _compact_text(entry.get("task", ""), 240)
-        return task or "(delegated task unavailable)"
-
-    def _patch_summary_overview_line(self, index: int, entry: Dict[str, Any]) -> str:
-        rel_min = _rel_min(float(entry.get("ts", 0.0)) - self._start_time)
-        did = entry.get("delegation_id")
-        return (
-            f"[{index}] [t{entry.get('thread_id')}/d{did} +{rel_min:.1f}m] "
-            f"Task: {self._patch_task_text(entry)}\n"
-            f"    PATCH_SUMMARY: {entry.get('content', '')}{self._patch_status_suffix(entry)}"
-        )
-
-    def _important_failures_for_selective_unfold(
-        self,
-        entries: List[Dict[str, Any]],
-    ) -> List[Dict[str, Any]]:
-        failures = [e for e in entries if e.get("type") == "FAIL"]
-        failures.sort(
-            key=lambda e: float(e.get("_last_ts", e.get("ts", 0.0))),
-            reverse=True,
-        )
-        kept = failures[:_MAX_SELECTIVE_UNFOLDED_FAILURES]
-        kept.sort(key=lambda e: float(e.get("_last_ts", e.get("ts", 0.0))))
-        return kept
-
-    def _format_selective_failure(self, entry: Dict[str, Any]) -> str:
-        rel_min = _rel_min(float(entry.get("ts", 0.0)) - self._start_time)
-        did = entry.get("delegation_id")
-        return (
-            f"[t{entry.get('thread_id')}/d{did}/FAIL +{rel_min:.1f}m] "
-            f"{entry.get('content', '')}"
-        )
-
-    async def render_patch_selective_unfold(self) -> str:
-        """Render patch summaries plus the most recent FAIL details.
-
-        This path is used only by shared_lessons_render_mode=
-        "patch_selective_unfold". It intentionally does not change the legacy
-        render() or render_peer_digest() behavior.
-        """
-        async with self._lock:
-            snap = list(self._entries)
-        return self.render_patch_selective_unfold_from(snap)
-
-    def render_patch_selective_unfold_from(
-        self, snap: List[Dict[str, Any]]
-    ) -> str:
-        """Snapshot-taking seam for the above.
-
-        Local addition (not upstream): the multi-board /snapshot endpoint copies
-        every board's entries under one critical section and renders afterwards,
-        so it needs a render that accepts a snapshot instead of taking the lock
-        itself. Body below is upstream's verbatim.
-        """
-        now_ts = time.time()
-        entries = [
-            e for e in self._dedupe_entries(snap)
-            if not self._is_expired_claim(e, now_ts)
-        ]
-        patches = [e for e in entries if e.get("type") == "PATCH_SUMMARY"]
-        patches.sort(key=lambda e: float(e.get("ts", 0.0)))
-        failures = self._important_failures_for_selective_unfold(entries)
-
-        if not patches and not failures:
-            return "(no shared lessons yet)"
-
-        patch_lines = [
-            self._patch_summary_overview_line(i, e)
-            for i, e in enumerate(patches)
-        ]
-        failure_lines = [self._format_selective_failure(e) for e in failures]
-        parts: List[str] = []
-        if patch_lines:
-            parts.append(
-                "[Patch summaries - candidate fixes proposed by solver threads]"
-            )
-            parts.extend(patch_lines)
-
-        if failure_lines:
-            if parts:
-                parts.append("")
-            parts.append("[Recent failure details - reusable dead ends to avoid]")
-            parts.extend(failure_lines)
-
-        return "\n".join(parts)
-
-    def _has_peer_writer(self, entry: Dict[str, Any], viewer_thread_id: Optional[int]) -> bool:
-        """True if the selected/deduped entry contains information from a peer thread."""
-        if viewer_thread_id is None:
-            return True
-        tids = entry.get("_thread_ids") or [entry.get("thread_id")]
-        return any(tid != viewer_thread_id for tid in tids)
-
-    def _is_invalidated_patch_warning(self, entry: Dict[str, Any]) -> bool:
-        return (
-            entry.get("type") == "PATCH_SUMMARY"
-            and bool(entry.get("_invalidated_by_fail"))
-            and not entry.get("_finalized")
-        )
-
-    def _peer_digest_render_type(self, entry: Dict[str, Any]) -> str:
-        if self._is_invalidated_patch_warning(entry):
-            return "FAIL"
-        return str(entry.get("type", ""))
-
-    def _peer_digest_render_content(self, entry: Dict[str, Any]) -> str:
-        content = str(entry.get("content", ""))
-        if not self._is_invalidated_patch_warning(entry):
-            return content
-        files = _parse_patch_summary_field(content, "files") or "unknown"
-        idea = _parse_patch_summary_field(content, "idea")
-        if not idea:
-            idea = content
-        idea = " ".join(str(idea).split())
-        if len(idea) > MAX_CONTENT_CHARS:
-            idea = idea[:MAX_CONTENT_CHARS].rstrip()
-        reason = str(entry.get("_invalidated_by_fail", "")).strip()
-        parts = [
-            f"invalidated peer patch: files={files}",
-            f"rejected_idea={idea}",
-        ]
-        if reason:
-            parts.append(f"failed={reason}")
-        return " | ".join(parts)
-
-    def _peer_digest_entry_size(self, entry: Dict[str, Any]) -> int:
-        dup = int(entry.get("_dup", 1))
-        suffix_len = len(f" (x{dup})") if dup > 1 else 0
-        suffix_len += len(self._patch_status_suffix(entry))
-        return (
-            _FORMAT_OVERHEAD_CHARS
-            + len(self._peer_digest_render_content(entry))
-            + suffix_len
-        )
-
-    def _peer_digest_priority(
-        self,
-        entry: Dict[str, Any],
-        allowed_types: Optional[Tuple[str, ...]] = None,
-    ) -> int:
-        """Priority for compact cross-thread digest rendering.
-
-        This intentionally keeps only high-signal notes: candidate patches,
-        reusable failures, concrete observations, and concrete facts. It drops
-        CLAIM and TRIED because this digest is meant to transfer useful
-        knowledge, not narrate another thread's action stream.
-        """
-        t = entry.get("type")
-        if self._is_invalidated_patch_warning(entry):
-            if allowed_types is not None and not (
-                "PATCH_SUMMARY" in allowed_types or "FAIL" in allowed_types
-            ):
-                return 99
-            return 1
-        if allowed_types is not None and t not in allowed_types:
-            return 99
-        content = str(entry.get("content", ""))
-        low = content.strip().lower()
-        if low in _NONE_TOKENS:
-            return 99
-        if t == "PATCH_SUMMARY":
-            return 0 if (entry.get("_finalized") or entry.get("_verified_checkpoint")) else 99
-        if t == "FAIL":
-            return 1
-        if t == "OBSERVED" and self._is_concrete(str(entry.get("content", ""))):
-            return 2
-        if t == "FACT":
-            if any(h in low for h in _PEER_DIGEST_SPECULATIVE_HINTS):
-                return 99
-            if self._is_concrete(content):
-                return 3
-        return 99
-
-    def format_peer_digest_for_prompt(
-        self,
-        entries: List[Dict[str, Any]],
-        viewer_thread_id: Optional[int] = None,
-    ) -> str:
-        """Render a compact, high-signal digest of peer-thread lessons."""
-        if not entries:
-            return "(no peer shared lessons yet)"
-        parts = ["[Peer shared lessons - only high-signal notes from other threads]"]
-        for e in entries:
-            rel_min = _rel_min(e["ts"] - self._start_time)
-            tids = e.get("_thread_ids") or [e.get("thread_id")]
-            peer_tids = [tid for tid in tids if viewer_thread_id is None or tid != viewer_thread_id]
-            tid_text = ",".join(f"t{tid}" for tid in peer_tids) or f"t{e.get('thread_id')}"
-            dup = e.get("_dup", 1)
-            suffix = f" (x{dup})" if dup > 1 else ""
-            suffix += self._patch_status_suffix(e)
-            render_type = self._peer_digest_render_type(e)
-            content = self._peer_digest_render_content(e)
-            parts.append(f"[{tid_text}/{render_type} +{rel_min:.1f}m] {content}{suffix}")
-        return "\n".join(parts)
-
-    async def render_peer_digest(
-        self,
-        window_tokens: int = 500,
-        viewer_thread_id: Optional[int] = None,
-        allowed_types: Optional[Tuple[str, ...]] = None,
-        fail_requires_finalized_patch: bool = False,
-        patch_requires_no_fail: bool = False,
-    ) -> str:
-        """Render compact peer-only knowledge instead of the full raw blackboard.
-
-        Unlike `render(..., self_policy=exclude_thread)`, this does not simply
-        replay every peer note. It first dedupes, keeps only notes with at least
-        one peer writer, drops low-signal action narration, and then fits the
-        remaining entries into the normal token budget by utility priority.
-        """
-        async with self._lock:
-            snap = list(self._entries)
-        return self.render_peer_digest_from(
-            snap,
-            window_tokens=window_tokens,
-            viewer_thread_id=viewer_thread_id,
-            allowed_types=allowed_types,
-            fail_requires_finalized_patch=fail_requires_finalized_patch,
-            patch_requires_no_fail=patch_requires_no_fail,
-        )
-
-    def render_peer_digest_from(
-        self,
-        snap: List[Dict[str, Any]],
-        window_tokens: int = 500,
-        viewer_thread_id: Optional[int] = None,
-        allowed_types: Optional[Tuple[str, ...]] = None,
-        fail_requires_finalized_patch: bool = False,
-        patch_requires_no_fail: bool = False,
-    ) -> str:
-        """Snapshot-taking seam for the above (local addition; body verbatim)."""
-        now_ts = time.time()
-        finalized_patch_keys = set()
-        if fail_requires_finalized_patch:
-            finalized_patch_keys = {
-                (e.get("thread_id"), e.get("delegation_id"))
-                for e in snap
-                if e.get("type") == "PATCH_SUMMARY"
-                and e.get("_finalized")
-            }
-        candidates = [
-            e for e in self._dedupe_entries(snap)
-            if not self._is_expired_claim(e, now_ts)
-            and self._has_peer_writer(e, viewer_thread_id)
-            and self._peer_digest_priority(e, allowed_types=allowed_types) < 99
-            and (
-                e.get("type") != "PATCH_SUMMARY"
-                or not patch_requires_no_fail
-                or self._patch_failure_count(e) == 0
-            )
-            and (
-                e.get("type") != "FAIL"
-                or not fail_requires_finalized_patch
-                or e.get("_grounded_patch_fail")
-                or (e.get("thread_id"), e.get("delegation_id")) in finalized_patch_keys
-            )
-        ]
-        candidates.sort(
-            key=lambda e: (
-                self._peer_digest_priority(e, allowed_types=allowed_types),
-                self._patch_failure_count(e) if e.get("type") == "PATCH_SUMMARY" else 0,
-                -float(e.get("_last_ts", e.get("ts", 0.0))),
-            )
-        )
-        budget = max(window_tokens, 0) * _CHARS_PER_TOKEN
-        kept: List[Dict[str, Any]] = []
-        used = 0
-        for e in candidates:
-            if len(kept) >= _MAX_PEER_DIGEST_ENTRIES:
-                break
-            render_type = self._peer_digest_render_type(e)
-            type_count = sum(
-                1 for kept_e in kept
-                if self._peer_digest_render_type(kept_e) == render_type
-            )
-            if type_count >= _MAX_PEER_DIGEST_BY_TYPE.get(render_type, _MAX_PEER_DIGEST_ENTRIES):
-                continue
-            sz = self._peer_digest_entry_size(e)
-            if used + sz > budget:
-                continue
-            used += sz
-            kept.append(e)
-        for e in kept:
-            key = self._render_count_key(e)
-            self._render_counts[key] = self._render_counts.get(key, 0) + 1
-        kept.sort(key=lambda e: e["ts"])
-        return self.format_peer_digest_for_prompt(kept, viewer_thread_id=viewer_thread_id)
-
-    async def render(
-        self,
-        window_tokens: int = 500,
-        viewer_thread_id: Optional[int] = None,
-        viewer_delegation_id: Optional[int] = None,
-        self_policy: str = "include",
-    ) -> str:
-        """Convenience: read(window) + format."""
-        entries = await self.read(
-            window_tokens=window_tokens,
-            viewer_thread_id=viewer_thread_id,
-            viewer_delegation_id=viewer_delegation_id,
-            self_policy=self_policy,
-        )
-        return self.format_for_prompt(entries)
-
-    async def render_with_stats(
-        self,
-        window_tokens: int = 500,
-        viewer_thread_id: Optional[int] = None,
-        viewer_delegation_id: Optional[int] = None,
-        self_policy: str = "include",
-    ) -> Tuple[str, Dict[str, Any]]:
-        """Render prompt text plus measurement stats. `render()` remains str-only."""
-        entries, stats = await self.read_with_stats(
-            window_tokens=window_tokens,
-            viewer_thread_id=viewer_thread_id,
-            viewer_delegation_id=viewer_delegation_id,
-            self_policy=self_policy,
-        )
-        rendered = self.format_for_prompt(entries)
-        stats = dict(stats)
-        stats["rendered_chars_actual"] = len(rendered)
-        return rendered, stats
 
     async def write_lifecycle_summary(self, out_path: Path) -> None:
         """dump a per-task lesson-lifecycle summary to `out_path`.

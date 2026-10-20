@@ -1,16 +1,8 @@
 #!/usr/bin/env python3
-"""pbench_action_mix.py — where does each arm's effort actually go?
+"""pbench_action_mix.py — classify Copilot tool calls by the work they perform.
 
-Classifies every tool call in a run into a small, comparable taxonomy. The
-point of the exercise is that a raw tool histogram is not comparable across
-arms: `Bash` is 67.5% of the claude arm and 23.1% of the copilot arm, and it
-carries git, compiles, test runs and file reads indiscriminately. Two arms can
-look completely different while doing the same work, or identical while doing
-different work, until the shell bucket is opened.
-
-Handles both transcript formats:
-  claude   home/.claude/projects/*/*.jsonl   assistant.message.content[tool_use]
-  copilot  **/events.jsonl                   assistant.message.data.toolRequests
+Reads **/events.jsonl, including assistant.message.data.toolRequests.
+Shell calls are classified by their commands rather than grouped together.
 
 Usage:
   sudo python3 scripts/pbench_action_mix.py <task-dir> [<task-dir> ...]
@@ -141,19 +133,6 @@ TOOL_RULES: list[tuple[str, tuple[str, ...]]] = [
     ("read code",     ("read", "view", "grep", "glob", "rg", "search", "ls")),
 ]
 
-# `Write` is ambiguous: claude uses it for source files, but the name also
-# appears inside mcp__board__board_write. TOOL_RULES is scanned in order and
-# coord entries are matched on their full distinctive suffix, so board_write
-# never reaches the "write code" rule -- except that "write_file" is checked
-# first and is unique to file writes. Guard the bare claude `Write` separately.
-EXACT: dict[str, str] = {
-    "write": "write code",
-    "edit": "write code",
-    "read": "read code",
-    "bash": "shell",
-    "todowrite": "planning",
-}
-
 
 def classify(name: str, args: dict) -> str:
     n = (name or "").lower()
@@ -196,29 +175,9 @@ def classify(name: str, args: dict) -> str:
     for label, keys in TOOL_RULES:
         if any(k in n for k in keys):
             return label
-    if base in EXACT:
-        return EXACT[base]
+    if base == "write":
+        return "write code"
     return "other"
-
-
-def walk_claude(root: Path):
-    # <layout>/<agent>/...: agents/, or hermes/ in trajectories archived before the rename.
-    for f in (f for layout in ("agents", "hermes")
-              for f in root.glob(f"{layout}/*/home/.claude/projects/*/*.jsonl")):
-        try:
-            text = f.read_text(errors="replace")
-        except (PermissionError, OSError):
-            continue
-        for line in text.splitlines():
-            try:
-                o = json.loads(line)
-            except Exception:
-                continue
-            if not isinstance(o, dict) or o.get("type") != "assistant":
-                continue
-            for b in (o.get("message") or {}).get("content") or []:
-                if isinstance(b, dict) and b.get("type") == "tool_use":
-                    yield b.get("name", "?"), (b.get("input") or {})
 
 
 def walk_copilot(root: Path):
@@ -239,7 +198,7 @@ def walk_copilot(root: Path):
                     yield t.get("name", "?"), (t.get("arguments") or {})
 
 
-def column_labels(names: list[str], width: int = 26) -> list[str]:
+def column_labels(names: list[str]) -> list[str]:
     """Header labels: unique, at most `width` characters.
 
     Neither end of a trajectory name tells columns apart on its own (see
@@ -251,6 +210,7 @@ def column_labels(names: list[str], width: int = 26) -> list[str]:
             return s
         head = (w - 1) // 2
         return s[:head] + "…" + s[len(s) - (w - 1 - head):]
+    width = 26
     labels = [cut(Path(n).name, width) for n in names]
     if len(set(labels)) < len(labels):
         labels = [f"{i}:" + cut(Path(n).name, width - len(f"{i}:"))
@@ -260,7 +220,7 @@ def column_labels(names: list[str], width: int = 26) -> list[str]:
 
 ORDER = ["write code", "probe/scaffold", "build", "test", "run artifact", "read code",
          "vcs/git", "coord: read", "coord: write", "planning",
-         "shell: other", "shell", "other"]
+         "shell: other", "other"]
 
 
 def main(argv: list[str]) -> int:
@@ -270,8 +230,6 @@ def main(argv: list[str]) -> int:
         if not root.is_dir():
             root = Path(d)
         c: Counter = Counter()
-        for name, args in walk_claude(root):
-            c[classify(name, args)] += 1
         for name, args in walk_copilot(root):
             c[classify(name, args)] += 1
         # Key on the WHOLE path. Any fixed slice of the name collides: a task's

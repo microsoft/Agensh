@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """omcgitea secret-service.
 
-Tiny stdlib HTTP server that serves per-agent Gitea tokens to mini-router
-sidecars. Reads/writes /data/tokens/agent-<name>.token (mode 0600). Auth
+Tiny stdlib HTTP server that serves per-agent tokens to mini-router
+sidecars from the read-only /data/tokens mount. Auth
 is a shared header secret; only reachable on the docker network.
 """
 from __future__ import annotations
@@ -10,7 +10,6 @@ from __future__ import annotations
 import os
 import re
 import sys
-import tempfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 AUTH = os.environ.get("SECRET_SERVICE_INTERNAL_AUTH", "")
@@ -41,13 +40,13 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt: str, *args) -> None:
         sys.stderr.write("[secret-service] " + (fmt % args) + "\n")
 
-    def _send(self, code: int, body: bytes = b"", ctype: str = "text/plain") -> None:
+    def _send(self, code: int, body: bytes) -> None:
         self.send_response(code)
-        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Type", "text/plain")
         self.send_header("Content-Length", str(len(body)))
         if code >= 400:
-            # Rejected POST bodies may still be unread. Do not parse their
-            # token bytes as a second request and include them in error logs.
+            # End rejected requests without parsing trailing bytes as a new
+            # request and including them in error logs.
             self.close_connection = True
             self.send_header("Connection", "close")
         self.end_headers()
@@ -63,7 +62,8 @@ class Handler(BaseHTTPRequestHandler):
             return False
         return True
 
-    def _parse_token_path(self, prefix: str) -> str | None:
+    def _parse_token_path(self) -> str | None:
+        prefix = "/tokens/"
         if not self.path.startswith(prefix):
             self._send(404, b"not found\n")
             return None
@@ -80,7 +80,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         if not self._check_auth():
             return
-        path = self._parse_token_path("/tokens/")
+        path = self._parse_token_path()
         if path is None:
             return
         if not os.path.isfile(path):
@@ -89,26 +89,6 @@ class Handler(BaseHTTPRequestHandler):
         with open(path, "rb") as f:
             self._send(200, f.read())
 
-    def do_POST(self) -> None:  # noqa: N802
-        if not self._check_auth():
-            return
-        path = self._parse_token_path("/tokens/")
-        if path is None:
-            return
-        n = int(self.headers.get("Content-Length", "0") or "0")
-        body = self.rfile.read(n) if n > 0 else b""
-        os.makedirs(TOKENS_DIR, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(prefix=".token-", dir=TOKENS_DIR)
-        try:
-            with os.fdopen(fd, "wb") as stream:
-                stream.write(body)
-            os.replace(tmp, path)
-        finally:
-            try:
-                os.unlink(tmp)
-            except FileNotFoundError:
-                pass
-        self._send(204)
 
 
 def main() -> None:

@@ -1,5 +1,4 @@
-# board-service dependencies. Kept minimal — port DeLM's shared_lessons.py
-# verbatim + a thin FastAPI wrapper + aiomysql for the WAL.
+# Shared board HTTP service and MySQL persistence.
 fastapi==0.141.1
 starlette==1.6.0
 uvicorn[standard]==0.32.0

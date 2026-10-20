@@ -1,12 +1,12 @@
-# omcgitea — ProgramBench fleet Makefile
+# Agensh — single-node ProgramBench fleet Makefile
 #
-# Every compose target runs the pbench stack for PROFILE=pbench-* with sudo
+# Every compose target runs PROFILE=pbench-single-node-* with sudo
 # (the dev box has docker.sock owned by root:docker; the user is not in the
 # docker group). Override SUDO= to skip sudo.
 
 SHELL := /bin/bash
 
-# Profile selector. Each pbench-* profile has its own .env.<profile>, data
+# Profile selector. Each pbench-single-node-* profile has its own .env.<profile>, data
 # dir (${DATA_ROOT}/<profile>, default .claude-team-data/<profile>), compose
 # project name (omcgitea-<profile>) and host ports. There is no default: the
 # only stack this repo runs is the pbench one, and a mistyped or missing
@@ -16,8 +16,8 @@ ifneq (,$(PROFILE))
 ifneq (1,$(words $(PROFILE)))
 $(error PROFILE="$(PROFILE)" must be a single word)
 endif
-ifeq (,$(filter pbench-%,$(PROFILE)))
-$(error PROFILE=$(PROFILE) is not a pbench-* profile; use PROFILE=pbench-<mode>-<task>)
+ifeq (,$(filter pbench-single-node-%,$(PROFILE)))
+$(error PROFILE=$(PROFILE) is not a single-node profile; use PROFILE=pbench-single-node-<task>)
 endif
 endif
 ENV_FILE := .env.$(PROFILE)
@@ -62,7 +62,7 @@ COMPOSE ?= env -u ANTHROPIC_BASE_URL -u ANTHROPIC_MODEL -u ANTHROPIC_API_KEY \
             --profile $(PROFILE)
 
 
-.PHONY: help up down logs ps build pull rebuild clean wipe pbench-single-agent \
+.PHONY: help up down logs ps build pull rebuild clean wipe \
         bootstrap-rerun reset-tokens check-env require-profile prep-mm-dirs render-pbench-base compose-services
 
 help:
@@ -142,13 +142,3 @@ bootstrap-rerun: render-pbench-base ## Re-run bootstrap (idempotent)
 
 reset-tokens: require-profile ## Wipe tokens but keep gitea data (forces token rotation)
 	$(SUDO) rm -rf $(DATA_DIR)/tokens
-
-# ---------------------------------------------------------------------------
-# ProgramBench single-agent baseline: one Copilot CLI agent (BYOK, native ACP)
-# in a standalone container (no forge/chat), with the team runs' anti-cheat
-# (no internet for agents, binary 0111, non-root agent). The team runs are
-# launched by scripts/launch_single_node.sh / launch_multi_node.sh.
-# See scripts/launch_single_agent.sh.
-# ---------------------------------------------------------------------------
-pbench-single-agent: ## Run a ProgramBench task with a single Copilot ACP agent: make pbench-single-agent TASK=<id> HOURS=<h> [OUT_DIR=...]
-	TASK="$(TASK)" HOURS="$(HOURS)" OUT_DIR="$(OUT_DIR)" ./scripts/launch_single_agent.sh

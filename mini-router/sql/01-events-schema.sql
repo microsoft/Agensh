@@ -10,7 +10,6 @@ CREATE TABLE IF NOT EXISTS events (
   attempts INT NOT NULL DEFAULT 0,
   created_at BIGINT NOT NULL,
   sent_at BIGINT NULL,
-  acked_at BIGINT NULL,
   last_error TEXT NULL,
   batch_id CHAR(36) NULL,
   next_retry_at BIGINT NULL,

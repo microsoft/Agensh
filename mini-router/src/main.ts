@@ -18,15 +18,10 @@ import { ACPSocketChannel } from "./acp_socket_channel.ts";
 import { GiteaListener } from "./listeners/gitea/listener.ts";
 import { GiteaFormAuth } from "./gitea_form_auth.ts";
 import { MattermostListener } from "./listeners/mattermost/listener.ts";
-import {
-  createAcpSessionStore,
-  parseAcpSessionNamespace,
-  type AcpSessionNamespace,
-} from "./session_namespace.ts";
 import { BoardClient, parseBoardIds } from "./board_client.ts";
-import { StepLoop } from "./step_loop.ts";
-import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { createServer } from "node:http";
 import { readFileSync } from "node:fs";
+import { sleep } from "./runtime.ts";
 
 interface Env {
   agent: string;
@@ -36,17 +31,15 @@ interface Env {
   secretServiceUrl: string;
   secretAuth: string;
   acpSocketPath: string;
-  sessionNamespace: AcpSessionNamespace;
-  giteaPasswordFile?: string;
-  metricsPort: number;
+  giteaPasswordFile: string;
+  listenPort: number;
   retrySweepMs: number;
   // mattermost:
   mattermostHost?: string;
   mattermostHostHeader?: string;
-  // DeLM shared context (optional; absent → all board behavior disabled):
+  // Shared context (optional; absent → all board behavior disabled):
   boardServiceUrl?: string;
   boardIds: string[];
-  boardWindowTokens?: number;
 }
 
 function readEnv(): Env {
@@ -59,23 +52,19 @@ function readEnv(): Env {
     secretServiceUrl: required("SECRET_SERVICE_URL"),
     secretAuth: required("SECRET_SERVICE_INTERNAL_AUTH"),
     acpSocketPath: process.env.ACP_SOCKET_PATH ?? "/var/run/acp/agent.sock",
-    sessionNamespace: parseAcpSessionNamespace(process.env.ACP_SESSION_NAMESPACE),
     giteaPasswordFile:
       process.env.GITEA_PASSWORD_FILE ?? `/run/omcgitea/tokens/agent-${agent}.password`,
-    metricsPort: Number(process.env.METRICS_PORT ?? "8645"),
+    listenPort: Number(process.env.MINI_ROUTER_PORT ?? "8645"),
     // This poll is the ONLY thing that acts on next_retry_at, so the effective
     // retry delay is max(RETRY_BACKOFF_MS rung, this interval).
     retrySweepMs: Number(process.env.RETRY_SWEEP_MS ?? "30000"),
     // mattermost is optional — if MATTERMOST_HOST is unset, listener won't start.
     ...(process.env.MATTERMOST_HOST ? { mattermostHost: process.env.MATTERMOST_HOST } : {}),
     ...(process.env.MATTERMOST_HOST_HEADER ? { mattermostHostHeader: process.env.MATTERMOST_HOST_HEADER } : {}),
-    // DeLM shared context — optional. BOARD_SERVICE_URL unset →
+    // Shared context — optional. BOARD_SERVICE_URL unset →
     // BoardClient.enabled is false and dispatch carries no board at all.
     ...(process.env.BOARD_SERVICE_URL ? { boardServiceUrl: process.env.BOARD_SERVICE_URL } : {}),
     boardIds: parseBoardIds(process.env.BOARD_IDS),
-    ...(process.env.BOARD_WINDOW_TOKENS
-      ? { boardWindowTokens: Number(process.env.BOARD_WINDOW_TOKENS) }
-      : {}),
   };
 }
 
@@ -105,18 +94,6 @@ function readPassword(file: string): string {
   }
 }
 
-interface Metrics {
-  events_pending: number;
-  events_failed: number;
-  events_sent: number;
-  events_retrying: number;
-  sse_connected: 0 | 1;
-  sse_last_frame_age_seconds: number;
-  retry_attempts_total: number;
-  acp_reconnects_total: number;
-  start_time_seconds: number;
-}
-
 async function main(): Promise<void> {
   const env = readEnv();
   const log = (lvl: string, msg: string, extra?: unknown) => {
@@ -131,7 +108,7 @@ async function main(): Promise<void> {
   log("info", `token fetched len=${token.length}`);
 
   // Step 2: MySQL
-  const store = new EventStore({ pool: { uri: env.mysqlDsn } });
+  const store = new EventStore(env.mysqlDsn);
   await store.ensureSchema();
   const recovered = await store.recoverSendingToPending(env.agent);
   if (recovered > 0) log("warn", `recovered ${recovered} stuck 'sending' rows → pending`);
@@ -151,62 +128,45 @@ async function main(): Promise<void> {
   // Default 0 (disabled). Set MINI_ROUTER_STUCK_MS=1200000 (20min) in
   // compose env for agents that should auto-recover.
   const stuckMs = Number(process.env.MINI_ROUTER_STUCK_MS ?? "0") || undefined;
-  // Read here (not at the dispatcher) because the channel needs to know
-  // whether to open a fresh ACP session per prompt.
-  const boardMode = (process.env.BOARD_MODE ?? "batch").toLowerCase();
   const channel = new ACPSocketChannel({
     socketPath: env.acpSocketPath,
     cwd: "/work",
     onLog: (lvl, msg, err) => log(`acp.${lvl}`, msg, err),
-    sessionStore: createAcpSessionStore(
-      store,
-      env.agent,
-      env.sessionNamespace,
-    ),
+    sessionStore: {
+      get: () => store.getKv(env.agent, "acp_session_id:copilot"),
+      set: (sessionId) => store.setKv(env.agent, "acp_session_id:copilot", sessionId),
+    },
     stuckMs,
-    freshSessionPerPrompt: boardMode === "steploop",
   });
 
   // Step 4: dispatcher (onLog DEFAULTS to console.error)
-  let retryAttemptsTotal = 0;
-  // DeLM shared context: forced read (board spliced into every prompt) +
+  // Shared context: forced read (board spliced into every prompt) +
   // forced write (nudge when a turn publishes nothing). Disabled unless
   // BOARD_SERVICE_URL and BOARD_IDS are both set.
   const board = new BoardClient({
     ...(env.boardServiceUrl ? { baseUrl: env.boardServiceUrl } : {}),
     agent: env.agent,
     boardIds: env.boardIds,
-    ...(process.env.BOARD_QUEUE_ID ? { queueId: process.env.BOARD_QUEUE_ID } : {}),
-    ...(env.boardWindowTokens ? { windowTokens: env.boardWindowTokens } : {}),
-    ...(process.env.BOARD_RENDER_MODE ? { renderMode: process.env.BOARD_RENDER_MODE } : {}),
-    // The render-mode matrix is role-dependent. Anything that leads — the
-    // director, a team lead, a DeLM planner — reads as a planner; everyone
-    // else is an implementer. Overridable with BOARD_ROLE.
-    role:
-      process.env.BOARD_ROLE ??
-      (/(^|-)(director|lead|planner)(-|$)/.test(env.agent) ? "planner" : "implementer"),
     log: (lvl, msg, err) => log(lvl, `[board] ${msg}`, err),
   });
   if (board.enabled) {
     log(
       "info",
-      `shared context ON: url=${env.boardServiceUrl} boards=${env.boardIds.join(",")}` +
-        ` mode=${process.env.BOARD_RENDER_MODE ?? "(service default)"}`,
+      `shared context ON: url=${env.boardServiceUrl} boards=${env.boardIds.join(",")}`,
     );
   }
 
   const dispatcher = new Dispatcher({
     agent: env.agent,
+    groupMessageDirectory: "/opt/data/home/group-messages",
     state: store,
     channel,
     board,
-    // Off by default; set PBENCH_REINJECT_AFTER_COMPACTION=1 to re-enable.
-    reinjectAfterCompaction: process.env.PBENCH_REINJECT_AFTER_COMPACTION === "1",
     onLog: (e) => log(e.level, e.msg, e.err),
   });
 
   // Step 5: GiteaListener (PAT for REST + form-cookie for SSE)
-  const password = readPassword(env.giteaPasswordFile!);
+  const password = readPassword(env.giteaPasswordFile);
   const auth = new GiteaFormAuth({
     baseUrl: env.giteaHost,
     username: env.agent,
@@ -216,7 +176,7 @@ async function main(): Promise<void> {
   const ctrl = new AbortController();
   const listener = new GiteaListener({
     agent: env.agent,
-    state: store as unknown as never, // structural compat (state has same async signatures)
+    state: store,
     baseUrl: env.giteaHost,
     token,
     auth,
@@ -229,61 +189,12 @@ async function main(): Promise<void> {
 
   // Step 6: kick off all loops
   const tasks: Promise<void>[] = [];
-  // BOARD_MODE selects how the agent is driven:
-  //   batch    (default) — copilot owns its session; the board rides along with
-  //                        each dispatched UEM batch. Keeps prompt caching.
-  //   steploop           — the router owns the loop DeLM-style: one freshly
-  //                        built prompt per step against a fresh session, with
-  //                        the board spliced in every time. Costs caching.
-  // Anything else falls back to batch, so a typo cannot silently disable the
-  // agent.
-  if (boardMode === "steploop") {
-    // `||`, not `??`: a key that is set but empty (compose's `${X:-}`) must
-    // mean the default, not an empty task or a 0-step budget.
-    const task = process.env.STEP_LOOP_TASK
-      || "Work on the task described in /work (see AGENTS.md and the seeded README).";
-    const maxSteps = Number(process.env.STEP_LOOP_MAX_STEPS || "50");
-    const hours = Number(process.env.STEP_LOOP_HOURS ?? "0");
-    // STEP_LOOP_HOURS is the same wall-clock HOURS the pbench launcher gives
-    // the runner. If the step loop exited before the runner's own deadline,
-    // main.ts's Promise.race would see a primary loop resolve, log "this is
-    // fatal" and process.exit(1); the container restarts under
-    // `restart: unless-stopped`, re-arms a fresh full budget, and the agent's
-    // step history is gone.
-    const deadlineMs = hours > 0 ? Date.now() + hours * 3600_000 : undefined;
-    log("info", `BOARD_MODE=steploop maxSteps=${maxSteps}${hours ? ` hours=${hours}` : ""}`);
-    const loop = new StepLoop({
-      agent: env.agent,
-      channel,
-      board,
-      task,
-      ...(process.env.BOARD_QUEUE_ID ? { queueId: process.env.BOARD_QUEUE_ID } : {}),
-      maxSteps,
-      ...(deadlineMs ? { deadlineMs } : {}),
-      noProgressLimit: Number(process.env.STEP_LOOP_NO_PROGRESS_LIMIT || "8"),
-      strategyPrior: (process.env.STEP_LOOP_STRATEGY_PRIOR ?? "1") !== "0",
-      // Only set where the router can actually see the agent's workspace (the
-      // DeLM profiles share /work as a host bind mount). Unset elsewhere, and
-      // the checkpoints stay silent rather than guessing.
-      ...(process.env.STEP_LOOP_WORKSPACE
-        ? { workspacePath: process.env.STEP_LOOP_WORKSPACE }
-        : {}),
-      log: (lvl, msg, err) => log(lvl, `[steploop] ${msg}`, err),
-    });
-    tasks.push(
-      loop.run(ctrl.signal)
-        .then((r) => log("info", `[steploop] finished after ${r.steps} step(s): ${r.reason}`))
-        .catch((e) => log("error", "steploop exited", e)),
-    );
-  } else {
-    tasks.push(dispatcher.runForever().catch((e) => log("error", "dispatcher exited", e)));
-  }
+  tasks.push(dispatcher.runForever().catch((e) => log("error", "dispatcher exited", e)));
   tasks.push(
     listener.runPolling({ signal: ctrl.signal, onError: (e) => log("error", "listener err", e) })
       .catch((e) => log("error", "listener exited", e)),
   );
-  tasks.push(retrySweeperLoop(env.agent, store, dispatcher, env.retrySweepMs, ctrl.signal, log,
-    () => retryAttemptsTotal++).catch((e) => log("error", "retry sweeper exited", e)));
+  tasks.push(retrySweeperLoop(env.agent, store, dispatcher, env.retrySweepMs, ctrl.signal, log).catch((e) => log("error", "retry sweeper exited", e)));
 
   // Step 6b: mattermost listener (optional — only if MATTERMOST_HOST set)
   let mmListener: MattermostListener | null = null;
@@ -312,21 +223,7 @@ async function main(): Promise<void> {
     }
   }
 
-  // Merge notices are not delivered. On the fast queue they arrive ~50 times
-  // per agent-hour and do not earn it: the notice's PR number rarely appears in
-  // the agent's next tool calls, and against a gap-matched control the only
-  // measurable effect is git churn (more fetch/merge and push) with no change
-  // in editing.
-  //
-  // With branch protection on, `main` cannot take a broken merge, so an agent
-  // that never hears about a merge is not building on a broken tree -- it
-  // re-syncs at step 6 of the work cycle anyway.
-  //
-  // board-service keeps its poller, the `merges` table and GET /merges?since=
-  // as the analytic record of what landed; nothing consumes them for delivery.
-  // The fast queue carries DMs and new board entries.
-
-  // Step 7: HTTP server (/healthz /metrics)
+  // Step 7: HTTP server (/healthz)
   const server = createServer(async (req, res) => {
     try {
       if (req.url === "/healthz") {
@@ -336,13 +233,6 @@ async function main(): Promise<void> {
         res.end(JSON.stringify({ agent: env.agent, sse_connected: ok }));
         return;
       }
-      if (req.url === "/metrics") {
-        const m = await collectMetrics(env, store, listener, retryAttemptsTotal);
-        res.statusCode = 200;
-        res.setHeader("content-type", "text/plain; version=0.0.4");
-        res.end(renderMetrics(env.agent, m));
-        return;
-      }
       res.statusCode = 404;
       res.end("not found");
     } catch (e) {
@@ -350,8 +240,8 @@ async function main(): Promise<void> {
       res.end(String((e as Error).message));
     }
   });
-  await new Promise<void>((resolve) => server.listen(env.metricsPort, "0.0.0.0", () => resolve()));
-  log("info", `http listening on :${env.metricsPort}`);
+  await new Promise<void>((resolve) => server.listen(env.listenPort, "0.0.0.0", () => resolve()));
+  log("info", `http listening on :${env.listenPort}`);
 
   // Step 8: process-level safety net
   process.on("uncaughtException", (e) => {
@@ -381,100 +271,19 @@ async function retrySweeperLoop(
   intervalMs: number,
   signal: AbortSignal,
   log: (lvl: string, msg: string, extra?: unknown) => void,
-  onAttempt: () => void,
 ): Promise<void> {
   while (!signal.aborted) {
     try {
       const claimed = await store.claimRetryReady(agent);
       if (claimed.length > 0) {
         log("info", `retry sweep: ${claimed.length} events`);
-        onAttempt();
         await dispatcher.dispatchSpecific(claimed);
       }
     } catch (e) {
       log("error", "retry sweep failed", e);
     }
-    await sleepWithSignal(intervalMs, signal);
+    await sleep(intervalMs, signal);
   }
-}
-
-function sleepWithSignal(ms: number, signal: AbortSignal): Promise<void> {
-  // Track and remove the abort listener on the timeout path too: a
-  // `{once:true}` listener only auto-removes on abort, and retrySweeperLoop
-  // calls this every 30s, so a long-running router would accumulate
-  // thousands of listeners (MaxListenersExceededWarning).
-  return new Promise((resolve) => {
-    const onAbort = () => {
-      clearTimeout(t);
-      signal.removeEventListener("abort", onAbort);
-      resolve();
-    };
-    const t = setTimeout(() => {
-      signal.removeEventListener("abort", onAbort);
-      resolve();
-    }, ms);
-    signal.addEventListener("abort", onAbort, { once: true });
-  });
-}
-
-async function collectMetrics(
-  env: Env,
-  store: EventStore,
-  listener: GiteaListener,
-  retryAttempts: number,
-): Promise<Metrics> {
-  // counts via state-aggregation queries
-  const pool = (store as unknown as { pool: { query: (sql: string, p: unknown[]) => Promise<[Array<{ state: string; n: number }>, unknown]> } }).pool;
-  let counts: Record<string, number> = {};
-  try {
-    const [rows] = await pool.query(
-      `SELECT state, COUNT(*) AS n FROM events WHERE agent = ? GROUP BY state`,
-      [env.agent],
-    );
-    for (const r of rows) counts[r.state] = Number(r.n);
-  } catch { /* */ }
-  const sse = listener.sse;
-  const lastFrameAt = sse?.lastFrameAt ?? 0;
-  const ageSec = lastFrameAt > 0 ? (Date.now() - lastFrameAt) / 1000 : -1;
-  return {
-    events_pending: counts.pending ?? 0,
-    events_failed: counts.failed ?? 0,
-    events_sent: counts.sent ?? 0,
-    events_retrying: counts.retrying ?? 0,
-    sse_connected: sse?.connected ? 1 : 0,
-    sse_last_frame_age_seconds: ageSec,
-    retry_attempts_total: retryAttempts,
-    acp_reconnects_total: 0,
-    start_time_seconds: 0,
-  };
-}
-
-function renderMetrics(agent: string, m: Metrics): string {
-  const l = `agent="${agent}"`;
-  return [
-    `# HELP mini_router_events_pending Pending events for this agent`,
-    `# TYPE mini_router_events_pending gauge`,
-    `mini_router_events_pending{${l}} ${m.events_pending}`,
-    `# HELP mini_router_events_failed Failed events for this agent`,
-    `# TYPE mini_router_events_failed gauge`,
-    `mini_router_events_failed{${l}} ${m.events_failed}`,
-    `# HELP mini_router_events_sent Sent events`,
-    `# TYPE mini_router_events_sent gauge`,
-    `mini_router_events_sent{${l}} ${m.events_sent}`,
-    `# HELP mini_router_events_retrying Retrying events`,
-    `# TYPE mini_router_events_retrying gauge`,
-    `mini_router_events_retrying{${l}} ${m.events_retrying}`,
-    `# HELP mini_router_sse_connected 1 if SSE has an open connection`,
-    `# TYPE mini_router_sse_connected gauge`,
-    `mini_router_sse_connected{${l}} ${m.sse_connected}`,
-    `# HELP mini_router_sse_last_frame_age_seconds Seconds since last SSE frame`,
-    `# TYPE mini_router_sse_last_frame_age_seconds gauge`,
-    `mini_router_sse_last_frame_age_seconds{${l}} ${m.sse_last_frame_age_seconds}`,
-    `# HELP mini_router_retry_attempts_total Cumulative retry sweep attempts`,
-    `# TYPE mini_router_retry_attempts_total counter`,
-    `mini_router_retry_attempts_total{${l}} ${m.retry_attempts_total}`,
-    ``,
-  ].join("\n");
 }
 
 main().catch((e) => {

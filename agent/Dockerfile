@@ -16,7 +16,7 @@
 # legitimately ships Node keeps its own, untouched, on $PATH.
 #
 # Build:
-#   sudo docker build -f docker/agent/Dockerfile \
+#   sudo docker build -f agent/Dockerfile \
 #     --build-arg TASK_IMAGE=programbench/<task>:task_cleanroom_v6 \
 #     -t omcgitea-agent-<task>:pbench .           # context = repo root
 
@@ -24,9 +24,7 @@ ARG TASK_IMAGE
 ARG AGENT_BASE_IMAGE=omcgitea-agent-base:pbench
 ARG NODE_IMAGE=node:22.14.0-bookworm-slim
 
-# Stage A: the gitea-mcp binary and claude-agent-acp, taken from the agent base
-# image (docker/agent-base), which already holds them: docker.gitea.com is
-# unreachable from this host.
+# Stage A: the unmodified Gitea MCP binary, cached in a small artifact image.
 FROM ${AGENT_BASE_IMAGE} AS mcp_src
 
 # Stage B: a Node runtime we relocate under /opt/agentrt (never onto $PATH).
@@ -58,8 +56,10 @@ RUN chmod +x /usr/local/bin/gitea-mcp
 
 # mattermost half. uv is fetched to /root/.local; /root stays 0711 so an ACP
 # child on a non-root uid can traverse to the venv shebang.
+# Match the main experiment's cached image rather than adding tools on rebuild.
+ARG MATTERMOST_MCP_VERSION=0.5.1
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh \
-    && /root/.local/bin/uv tool install --no-cache mcp-server-mattermost \
+    && /root/.local/bin/uv tool install --no-cache "mcp-server-mattermost==${MATTERMOST_MCP_VERSION}" \
     && cp /root/.local/bin/mcp-server-mattermost /usr/local/bin/mcp-server-mattermost \
     && chmod 0711 /root
 
@@ -89,44 +89,19 @@ RUN entry="$(/opt/agentrt/bin/node -e "console.log(require.resolve('@github/copi
 # mcp-board: the shared-context board client. Baked in rather than
 # bind-mounted — the bind mount is why the board MCP silently failed to
 # register for an entire round when the baked mcp.json.tmpl predated it.
-COPY mcp-board/ /opt/mcp-board/
+COPY board-service/mcp.cjs /opt/mcp-board.cjs
 # The prompts the entrypoint reads, config templates and entrypoint, current
 # at build time. The launcher prompts in prompts/ are sent from the host.
-COPY prompts/team/agents.md       /opt/omcgitea/prompts/agents.md
-COPY prompts/team/pbench-brief.md /opt/omcgitea/prompts/pbench-brief.md
-COPY docker/agent/config/         /opt/omcgitea/config/
-COPY docker/agent/entrypoint.sh   /opt/omcgitea/entrypoint.sh
-COPY docker/agent/acp-bridge.py   /opt/omcgitea/acp-bridge.py
+COPY prompts/agents.md       /opt/omcgitea/prompts/agents.md
+COPY prompts/pbench-brief.md /opt/omcgitea/prompts/pbench-brief.md
+COPY agent/config/         /opt/omcgitea/config/
+COPY agent/entrypoint.sh   /opt/omcgitea/entrypoint.sh
+COPY agent/acp-bridge.py   /opt/omcgitea/acp-bridge.py
+COPY agent/archive.py      /opt/omcgitea/archive.py
 RUN chmod +x /opt/omcgitea/entrypoint.sh /opt/omcgitea/acp-bridge.py
 
-# Point the MCP template at the private Node, and drop playwright (no chromium
-# here). Fail loudly if the board entry is missing — a silently absent board
-# server goes unnoticed for a whole run.
-RUN python3 -c "\
-import json, pathlib; \
-p = pathlib.Path('/opt/omcgitea/config/mcp.json.tmpl'); \
-d = json.loads(p.read_text()); \
-s = d['mcpServers']; \
-s.pop('playwright', None); \
-assert 'board' in s, 'mcp.json.tmpl has no board server'; \
-s['board']['command'] = '/opt/agentrt/bin/node'; \
-p.write_text(json.dumps(d, indent=2) + '\n')"
-
-# @agentclientprotocol/claude-agent-acp for AGENT_KIND=claude. Copied from the
-# agent base image rather than re-installed, so the adapter is the same
-# in every task image and no npm reaches the network.
-# NODE_BIN points the entrypoint at our PRIVATE node: putting it on PATH would
-# shadow whatever node the task cleanroom ships, and the grader builds in that
-# same cleanroom. Same reason copilot gets a wrapper instead of a symlink.
-COPY --from=mcp_src /opt/claude-agent-acp/ /opt/claude-agent-acp/
-RUN test -f /opt/claude-agent-acp/dist/index.js \
-    && /opt/agentrt/bin/node -e "require('/opt/claude-agent-acp/dist/index.js')" --help >/dev/null 2>&1 || true
-
-# AGENT_KIND defaults to copilot; a profile sets AGENT_KIND=claude for the
-# claude path. Both adapters are present either way.
 ENV AGENT_HOME=/opt/data \
     AGENT_KIND=copilot \
     COPILOT_BIN=/usr/local/bin/copilot-wrapped \
-    NODE_BIN=/opt/agentrt/bin/node \
     AGENT_NODE=/opt/agentrt/bin/node
 ENTRYPOINT ["/opt/omcgitea/entrypoint.sh"]

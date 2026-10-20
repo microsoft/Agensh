@@ -24,38 +24,8 @@ export interface MattermostListenerOptions {
   hostHeader?: string;
   /** Wake hook for the dispatcher. */
   onIngest?: (insertedCount: number) => void;
-  /** Inject `now()` for tests (default: Date.now). */
-  now?: () => number;
-  /** Inject ws for tests (rare — usually use a real fake server). */
-  ws?: MattermostWS;
-  /** Heartbeat tuning passed through to MattermostWS. */
-  heartbeatTimeoutMs?: number;
-  /** Backoff tuning. */
-  initialBackoffMs?: number;
-  maxBackoffMs?: number;
   /** Errors callback. */
   onError?: (e: unknown) => void;
-  /** This agent's mattermost user id, so catch-up can drop its own posts.
-   *  Optional: the websocket path filters on sender_name, which REST lacks. */
-  selfUserId?: string;
-  /** Ping cadence passed through to MattermostWS. */
-  pingIntervalMs?: number;
-  /** How far back catch-up looks on the first poll (ms). Default 10 min. */
-  catchupLookbackMs?: number;
-  /**
-   * Max random delay before a catch-up poll (ms). Default 30_000.
-   *
-   * Every agent reconnects at roughly the same moment (a mattermost restart, a
-   * ramp, a network blip), so an un-jittered catch-up is a thundering herd
-   * against mattermost's REST API: at 256 agents the routers fail with
-   * UND_ERR_CONNECT_TIMEOUT and agents are left with zero events. Spreading the
-   * polls over a window is what makes the recovery path survivable at scale.
-   */
-  catchupJitterMs?: number;
-  /** Per-request timeout for catch-up HTTP calls (ms). Default 15_000. */
-  catchupRequestTimeoutMs?: number;
-  /** Inject fetch for tests. */
-  fetchImpl?: typeof fetch;
 }
 
 export class MattermostListener {
@@ -71,15 +41,11 @@ export class MattermostListener {
   private polling = false;
 
   constructor(private opts: MattermostListenerOptions) {
-    this.ws = opts.ws ?? new MattermostWS({
+    this.ws = new MattermostWS({
       baseUrl: opts.baseUrl,
       token: opts.token,
       ...(opts.hostHeader ? { hostHeader: opts.hostHeader } : {}),
-      ...(opts.heartbeatTimeoutMs !== undefined ? { heartbeatTimeoutMs: opts.heartbeatTimeoutMs } : {}),
-      ...(opts.initialBackoffMs !== undefined ? { initialBackoffMs: opts.initialBackoffMs } : {}),
-      ...(opts.maxBackoffMs !== undefined ? { maxBackoffMs: opts.maxBackoffMs } : {}),
-      ...(opts.pingIntervalMs !== undefined ? { pingIntervalMs: opts.pingIntervalMs } : {}),
-      onEvent: (ev) => this.handleEvent(ev),
+      onEvent: (ev) => { void this.ingestEvent(ev); },
       // Every (re)connect drains the gap. Mattermost's websocket does not
       // replay, so this is the only thing that makes a dropped socket
       // recoverable rather than a permanently missed wake.
@@ -104,13 +70,12 @@ export class MattermostListener {
    * store's (dedup_key, agent) unique key collapses any overlap. Returns the
    * number of rows actually inserted.
    */
-  /** Jittered, non-overlapping catch-up. See catchupJitterMs. */
+  /** Spread reconnect catch-up over 30 seconds and keep polls serial. */
   private async scheduleCatchup(): Promise<void> {
     if (this.polling) return;
     this.polling = true;
     try {
-      const jitter = this.opts.catchupJitterMs ?? 30_000;
-      if (jitter > 0) await new Promise((r) => setTimeout(r, Math.random() * jitter));
+      await new Promise((r) => setTimeout(r, Math.random() * 30_000));
       await this.pollOnce();
     } catch (e) {
       this.opts.onError?.(e);
@@ -119,19 +84,17 @@ export class MattermostListener {
     }
   }
 
-  async pollOnce(): Promise<number> {
-    const doFetch = this.opts.fetchImpl ?? fetch;
+  async pollOnce(): Promise<void> {
     const base = this.opts.baseUrl.replace(/\/$/, "");
     const headers: Record<string, string> = { Authorization: `Bearer ${this.opts.token}` };
     if (this.opts.hostHeader) headers.Host = this.opts.hostHeader;
-    const reqTimeout = this.opts.catchupRequestTimeoutMs ?? 15_000;
     const getJson = async (path: string): Promise<unknown> => {
       // Bounded: an unbounded fetch against a saturated mattermost wedges the
       // poll, and `polling` would then block every later catch-up too.
       const ac = new AbortController();
-      const t = setTimeout(() => ac.abort(), reqTimeout);
+      const t = setTimeout(() => ac.abort(), 15_000);
       try {
-        const r = await doFetch(`${base}${path}`, { headers, signal: ac.signal });
+        const r = await fetch(`${base}${path}`, { headers, signal: ac.signal });
         if (!r.ok) throw new Error(`mattermost ${path} -> ${r.status}`);
         return await r.json();
       } finally {
@@ -141,7 +104,7 @@ export class MattermostListener {
 
     const since = this.cursor > 0
       ? this.cursor
-      : (this.opts.now ?? Date.now)() - (this.opts.catchupLookbackMs ?? 10 * 60_000);
+      : Date.now() - 10 * 60_000;
 
     // The websocket path filters an agent's own posts on sender_name; REST only
     // carries user_id, so catch-up needs the id or it would re-inject the
@@ -149,13 +112,12 @@ export class MattermostListener {
     // once, lazily, so callers need not wire it through.
     if (this.selfId === undefined) {
       try {
-        this.selfId = this.opts.selfUserId ?? str(await getJson("/api/v4/users/me"), "id") ?? null;
+        this.selfId = str(await getJson("/api/v4/users/me"), "id") ?? null;
       } catch {
         this.selfId = null; // fail open: better a duplicate than a lost wake
       }
     }
 
-    let inserted = 0;
     if (this.channelCache === null) {
       const acc: { id: string; name: string; display_name: string; type: string }[] = [];
       for (const team of asArray(await getJson("/api/v4/users/me/teams"))) {
@@ -198,37 +160,31 @@ export class MattermostListener {
             broadcast: { channel_id: chId },
             seq: 0,
           } as MattermostWsEvent;
-          if (await this.ingestEvent(ev)) inserted++;
+          await this.ingestEvent(ev);
         }
       }
     }
-    return inserted;
   }
 
-  private async handleEvent(ev: MattermostWsEvent): Promise<void> {
-    await this.ingestEvent(ev);
-  }
-
-  /** Shared by the websocket and catch-up paths. Returns true iff a row landed. */
-  private async ingestEvent(ev: MattermostWsEvent): Promise<boolean> {
+  /** Shared ingestion for websocket and catch-up posts. */
+  private async ingestEvent(ev: MattermostWsEvent): Promise<void> {
     // Skip non-content events (hello, status_change, typing, …).
     // We could whitelist later; for now accept post*, ignore others.
-    if (!isInterestingEvent(ev.event)) return false;
+    if (!isInterestingEvent(ev.event)) return;
     // An agent must never be notified of its own post: that spends the notice
     // budget injecting an agent's own words back into its context mid-turn,
     // and without this filter it is about half of every DM delivered.
-    if (isSelfAuthored(ev, this.opts.agent)) return false;
+    if (isSelfAuthored(ev, this.opts.agent)) return;
     // Membership churn is N^2 during startup and wakes the whole team at once.
-    if (isSystemPost(ev)) return false;
-    const observed = (this.opts.now ?? Date.now)();
+    if (isSystemPost(ev)) return;
+    const observed = Date.now();
     const uem = mattermostEventToUEM(ev, this.opts.agent, observed);
     try {
       const id = await this.opts.state.ingest(uem, observed);
-      if (id !== null) { this.opts.onIngest?.(1); return true; }
+      if (id !== null) this.opts.onIngest?.(1);
     } catch (e) {
       this.opts.onError?.(e);
     }
-    return false;
   }
 }
 

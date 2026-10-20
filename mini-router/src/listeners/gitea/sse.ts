@@ -4,8 +4,7 @@
  * Why push-only:
  *   PAT does not authorize /user/events (Gitea 1.22 rejects with
  *   `event: close, data: unauthorized`). Cookie auth is the only way.
- *   We use an injected UpstreamAuth so the same SSE driver works under
- *   form-cookie today and OIDC tomorrow without code change.
+ *   Form-session cookies authorize this connection.
  *
  *   There is no polling fallback: at N=300 agents a 5s polling floor
  *   adds 60 QPS of empty-response noise to Gitea. SSE is
@@ -20,7 +19,7 @@
  *   - On disconnect we reconnect with exponential backoff + jitter.
  *   - On `event: close, data: unauthorized` we invalidate the cached
  *     credentials and reconnect (forces fresh login on next attempt).
- *   - Watchdog: if no frame arrives within heartbeatTimeoutMs the
+ *   - Watchdog: if no frame arrives within 45 seconds the
  *     connection is presumed dead (NAT silent-close, mid-box reaped
  *     idle TCP, …) and we cancel the reader to force a reconnect.
  *     Gitea natively emits `notification-count` ~every 30s as a
@@ -30,50 +29,26 @@
  *   run(signal) — connects, parses SSE frames, calls onTrigger on
  *                 `notification-count`. Returns when the signal aborts.
  */
-import type { FetchLike } from "./fetcher.ts";
-import type { UpstreamAuth } from "../../upstream_auth.ts";
+import type { GiteaFormAuth } from "../../gitea_form_auth.ts";
+import { sleep } from "../../runtime.ts";
 
 export interface GiteaSSEOptions {
   baseUrl: string;
-  /** Per-user auth provider (cookie today, OIDC tomorrow). */
-  auth: UpstreamAuth;
+  /** Per-user Gitea form-session credentials. */
+  auth: GiteaFormAuth;
   /** Called when a notification-count event arrives. */
   onTrigger: () => void;
   /** Optional Host header (we go through nginx-edge in some setups). */
   hostHeader?: string;
-  /** Inject a fetch (tests). */
-  fetch?: FetchLike;
-  /** Inject a sleep (tests). Default: real setTimeout. */
-  sleep?: (ms: number) => Promise<void>;
-  /** First retry delay; doubles up to maxBackoffMs. Default 500ms. */
-  initialBackoffMs?: number;
-  /** Cap on backoff. Default 30s. */
-  maxBackoffMs?: number;
-  /** Watchdog: kill the connection if no frame within this many ms.
-   *  Default 45_000. Set to 0 to disable (tests). */
-  heartbeatTimeoutMs?: number;
   /** Optional log callback for visibility (errors only). */
   onError?: (e: unknown) => void;
-  /** Status callbacks for observability (metrics). */
-  onConnected?: () => void;
-  onDisconnected?: () => void;
 }
-
-/** Subset of fetch().body — undici returns ReadableStream<Uint8Array>. */
-type SSEResponse = {
-  ok: boolean;
-  status: number;
-  body?: ReadableStream<Uint8Array> | null;
-  text(): Promise<string>;
-};
 
 const TRIGGER_EVENT = "notification-count";
 const CLOSE_EVENT = "close";
 const UNAUTHORIZED_DATA = "unauthorized";
 
 export class GiteaSSE {
-  /** Number of (re)connects performed. Exposed for metrics. */
-  reconnects = 0;
   /** Whether the driver currently believes it has an open connection. */
   connected = false;
   /** Epoch-ms of last frame received (0 if none yet). */
@@ -82,11 +57,10 @@ export class GiteaSSE {
   constructor(private readonly opts: GiteaSSEOptions) {}
 
   async run(signal: AbortSignal): Promise<void> {
-    const sleep = this.opts.sleep ?? defaultSleep;
     // A reconnect gap is time the agent gets no issue/PR wakeups. Twin of the
     // Mattermost ws.ts backoff; the two halves of this recovery path must agree.
-    const initial = this.opts.initialBackoffMs ?? 500;
-    const cap = this.opts.maxBackoffMs ?? 30_000;
+    const initial = 500;
+    const cap = 30_000;
     let backoff = initial;
 
     while (!signal.aborted) {
@@ -105,7 +79,6 @@ export class GiteaSSE {
   }
 
   private async connectOnce(signal: AbortSignal): Promise<void> {
-    const f = this.opts.fetch ?? (globalThis.fetch as unknown as FetchLike);
     const url = `${this.opts.baseUrl.replace(/\/$/, "")}/user/events`;
 
     const creds = await this.opts.auth.ensureCredentials();
@@ -116,8 +89,7 @@ export class GiteaSSE {
     };
     if (this.opts.hostHeader) headers.Host = this.opts.hostHeader;
 
-    this.reconnects++;
-    const res = (await f(url, { headers, signal })) as unknown as SSEResponse;
+    const res = await fetch(url, { headers, signal });
     if (!res.ok || !res.body) {
       const body = await res.text().catch(() => "");
       // 401/403 → cached cookie is stale, force re-login next time.
@@ -130,7 +102,6 @@ export class GiteaSSE {
     }
 
     this.connected = true;
-    this.opts.onConnected?.();
     this.lastFrameAt = Date.now();
 
     const reader = res.body.getReader();
@@ -144,10 +115,8 @@ export class GiteaSSE {
     // returns" — without this watchdog the loop would hang forever.
     // A half-closed stream left undetected is time the agent receives no
     // Gitea wakeups at all.
-    const hbTimeout = this.opts.heartbeatTimeoutMs ?? 45_000;
-    let watchdog: ReturnType<typeof setInterval> | null = null;
-    if (hbTimeout > 0) {
-      watchdog = setInterval(() => {
+    const hbTimeout = 45_000;
+    const watchdog = setInterval(() => {
         if (Date.now() - this.lastFrameAt > hbTimeout) {
           this.opts.onError?.(
             new Error(
@@ -159,8 +128,7 @@ export class GiteaSSE {
             /* best-effort */
           });
         }
-      }, Math.max(1000, Math.floor(hbTimeout / 4)));
-    }
+    }, Math.max(1000, Math.floor(hbTimeout / 4)));
 
     let unauthorized = false;
     try {
@@ -192,14 +160,13 @@ export class GiteaSSE {
         }
       }
     } finally {
-      if (watchdog) clearInterval(watchdog);
+      clearInterval(watchdog);
       try {
         reader.releaseLock();
       } catch {
         /* best-effort */
       }
       this.connected = false;
-      this.opts.onDisconnected?.();
       if (unauthorized) {
         // Treat unauthorized close as an error path so backoff applies
         // and we don't tight-loop the auth flow.
@@ -239,8 +206,4 @@ function findFrameEnd(buf: string): number {
 
 function frameDelimLen(buf: string, idx: number): number {
   return buf.startsWith("\r\n\r\n", idx) ? 4 : 2;
-}
-
-function defaultSleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }

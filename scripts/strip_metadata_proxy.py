@@ -1,16 +1,13 @@
 #!/usr/bin/env python3
-"""Strip-metadata proxy for upstream Claude-API compatible backends that
-reject requests carrying Claude Code's metadata.user_id (e.g. some
-GitHub Copilot wrappers return 403 + GitHub ToS message).
+"""LLM egress proxy for native Copilot Responses traffic.
 
-Listens on 127.0.0.1:4180 by default. Forwards any /v1/* request to
-UPSTREAM with the JSON body's `metadata` field removed.
-
-Run: python3 strip_metadata_proxy.py
+Forwards requests, strips unsupported metadata and deployment-bound encrypted
+reasoning, and absorbs transient upstream errors. The external endpoint is
+provided by the single-node Compose profile.
 """
 import json, os, sys, time, http.server, urllib.request, urllib.error
 
-# The LLM endpoint to forward to. Required: compose and gen-k8s always set it.
+# The LLM endpoint to forward to. Required: the Compose profile sets it.
 UPSTREAM = os.environ.get("UPSTREAM", "").strip()
 if not UPSTREAM:
     sys.exit("FATAL: UPSTREAM is not set (the LLM endpoint to forward to)")
@@ -30,13 +27,6 @@ LISTEN_HOST = os.environ.get("LISTEN_HOST", "127.0.0.1")
 # When UPSTREAM_AUTH_TOKEN is unset, the proxy is header-transparent.
 UPSTREAM_AUTH_TOKEN = os.environ.get("UPSTREAM_AUTH_TOKEN", "").strip()
 UPSTREAM_AUTH_STYLE = os.environ.get("UPSTREAM_AUTH_STYLE", "bearer").strip().lower()
-# Optional path override: when set, the proxy uses this literal path (query
-# string included) for every proxied request, ignoring the inbound self.path.
-# Purpose: Azure AI Foundry's OpenAI-compatible endpoint lives at
-# `/models/chat/completions?api-version=2024-05-01-preview` while Copilot CLI
-# sends `/chat/completions`. This lets a single env var reshape the target URL
-# without touching Copilot or the SDK. When unset, self.path is used verbatim.
-UPSTREAM_PATH_OVERRIDE = os.environ.get("UPSTREAM_PATH_OVERRIDE", "").strip()
 # Hop-by-hop headers describe one connection, not the message, so they stop here
 # in both directions. The body is re-framed with a fresh Content-Length each way:
 # a Transfer-Encoding: chunked forwarded next to it makes the receiver parse the
@@ -55,8 +45,6 @@ def _timed_out(e):
 class Handler(http.server.BaseHTTPRequestHandler):
     def do_POST(self):    self._proxy()
     def do_GET(self):     self._proxy()
-    def do_PUT(self):     self._proxy()
-    def do_DELETE(self):  self._proxy()
     def log_message(self, fmt, *args):
         # Silence stdlib per-request access log — the default writes partial
         # lines that interleave badly under ThreadingHTTPServer. _proxy emits
@@ -104,16 +92,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         else:
             body = self.rfile.read(length) if length else b""
         ct = self.headers.get("Content-Type", "")
-        # Normalise JSON body:
-        #   1. Drop `metadata` at the top level (original purpose — some
-        #      Copilot-wrapping upstreams 403 on Claude Code's metadata.user_id).
-        #   2. Drop `refusal` inside every `messages[*]` — OpenAI JS SDK emits
-        #      `refusal: null` on assistant turns, but Fireworks-hosted GLM
-        #      (Azure AI Foundry `services.ai.azure.com/models`) rejects it as
-        #      `Extra inputs are not permitted, field: 'messages[N].refusal'`.
-        #      That single 400 poisons multi-turn history, so strip surgically
-        #      at the proxy rather than teach Copilot / the OpenAI SDK about
-        #      Fireworks's stricter schema.
+        # Remove metadata and encrypted reasoning that the gateway cannot replay.
         if body and "json" in ct.lower():
             try:
                 d = json.loads(body)
@@ -122,12 +101,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     if "metadata" in d:
                         d.pop("metadata", None)
                         mutated = True
-                    msgs = d.get("messages")
-                    if isinstance(msgs, list):
-                        for m in msgs:
-                            if isinstance(m, dict) and "refusal" in m:
-                                m.pop("refusal", None)
-                                mutated = True
                     #   3. Responses API: drop encrypted reasoning items.
                     #      Copilot runs the conversation client-side (store:false) but asks
                     #      for include:["reasoning.encrypted_content"] and replays those
@@ -139,7 +112,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     #      every turn self-contained.
                     #      Cost: the model cannot reuse prior reasoning; the message history
                     #      still carries the conversation.
-                    if "/responses" in self.path and isinstance(d, dict):
+                    if "/responses" in self.path:
                         inc = d.get("include")
                         if isinstance(inc, list):
                             keep = [x for x in inc if "encrypted_content" not in str(x)]
@@ -158,12 +131,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                                 mutated = True
                 if mutated:
                     body = json.dumps(d).encode()
-                    self.headers.replace_header("Content-Length", str(len(body))) \
-                        if "Content-Length" in self.headers else self.headers.add_header("Content-Length", str(len(body)))
             except Exception as e:
                 print(f"[proxy {rid}] json parse skip: {e}", flush=True)
 
-        url = UPSTREAM.rstrip("/") + (UPSTREAM_PATH_OVERRIDE or self.path)
+        url = UPSTREAM.rstrip("/") + self.path
         out_headers = {k: v for k, v in self.headers.items()
                        if k.lower() not in HOP_BY_HOP and k.lower() != "host"}
         out_headers["Content-Length"] = str(len(body))
@@ -276,12 +247,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             print(f"[proxy {rid}] CLIENT GONE before the response was written: {e}",
                   flush=True)
 
-class ThreadingServer(http.server.ThreadingHTTPServer):
-    daemon_threads = True
-
 if __name__ == "__main__":
     addr = (LISTEN_HOST, LISTEN_PORT)
     auth_note = f" +auth-inject({UPSTREAM_AUTH_STYLE})" if UPSTREAM_AUTH_TOKEN else ""
-    path_note = f" path-override={UPSTREAM_PATH_OVERRIDE}" if UPSTREAM_PATH_OVERRIDE else ""
-    print(f"strip-metadata proxy: listening on http://{addr[0]}:{addr[1]} -> {UPSTREAM}{auth_note}{path_note}")
-    ThreadingServer(addr, Handler).serve_forever()
+    print(f"strip-metadata proxy: listening on http://{addr[0]}:{addr[1]} -> {UPSTREAM}{auth_note}")
+    http.server.ThreadingHTTPServer(addr, Handler).serve_forever()

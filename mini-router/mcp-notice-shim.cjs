@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 /**
  * mcp-notice-shim — a transparent stdio proxy that appends priority notices
- * (merge notices, DMs) to MCP tool results.
+ * (peer board entries and DMs) to MCP tool results.
  *
  * WHY THIS EXISTS
- * A worker learns that `main` moved, or that a peer messaged it, only at the
- * next turn boundary -- by which point it has moved on. Agents post direct
+ * A worker otherwise learns of peer findings or messages only at the next
+ * turn boundary. Agents post direct
  * messages far more often than they read a DM channel: the messages arrive and
  * nobody looks.
  *
@@ -18,7 +18,7 @@
  * WHY A SHIM RATHER THAN THE BOARD SERVER
  * board is only ~15% of tool calls; gitea (~24%) + board + mattermost (~6%) is
  * ~45%, which is the difference between several tool calls between drains and
- * almost none. gitea/mattermost/playwright are upstream
+ * almost none. Gitea and Mattermost MCP servers are upstream
  * binaries behind the CLAUDE.md veto line, so this PROXIES them -- spawning the
  * server as a child and forwarding JSON-RPC verbatim -- which is the sidecar
  * workaround CLAUDE.md prescribes. No upstream file is touched.
@@ -40,7 +40,7 @@
  * Fails open by construction: any error fetching or appending notices returns
  * the upstream result unmodified. A broken notice queue must never break gitea.
  *
- * Usage: node index.js -- <upstream-cmd> [args...]
+ * Usage: node mcp-notice-shim.cjs -- <upstream-cmd> [args...]
  * Env:   BOARD_SERVICE_URL, AGENT_NAME
  */
 "use strict";
@@ -54,7 +54,7 @@ const AGENT = process.env.AGENT_NAME || "";
 
 const sep = process.argv.indexOf("--");
 if (sep < 0 || sep === process.argv.length - 1) {
-    process.stderr.write("mcp-notice-shim: usage: node index.js -- <upstream-cmd> [args...]\n");
+    process.stderr.write("mcp-notice-shim: usage: node mcp-notice-shim.cjs -- <upstream-cmd> [args...]\n");
     process.exit(2);
 }
 const argv = process.argv.slice(sep + 1);

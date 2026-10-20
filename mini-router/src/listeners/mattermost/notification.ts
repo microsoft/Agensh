@@ -75,9 +75,6 @@ export interface MattermostReaction {
  * receiving agent's own outgoing message. It renders, delivers and reconciles
  * exactly like a real notice, so nothing fails and the waste is invisible.
  *
- * The merge listener filters the same way (merges/listener.ts: `merged_by ===
- * agent`).
- *
  * Fails OPEN: an unidentifiable sender is delivered. Echoing a message back is
  * cheap; dropping a real peer DM is not.
  */
@@ -267,7 +264,7 @@ const CHANNEL_SUMMARY_MAX = 200;
  * Collapse to ONE line, optionally clipping.
  *
  * The single-line part is not optional for either kind: mcp-notice-shim joins
- * notices with "\n" (src/index.js:138), so an embedded newline would split one
+ * notices with "\n" in mcp-notice-shim.cjs, so an embedded newline would split one
  * message into what look like several independent notices.
  *
  * `max === undefined` means no clip.

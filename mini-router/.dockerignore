@@ -1,0 +1,5 @@
+node_modules
+dist
+sql
+*.log
+mcp-notice-shim.cjs

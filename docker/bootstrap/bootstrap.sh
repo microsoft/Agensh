@@ -7,11 +7,9 @@
 #   GITEA_HOST                http://gitea:3000
 #   GITEA_ADMIN_USER          chairman
 #   GITEA_ADMIN_PASSWORD      <required>
-#   GITEA_ADMIN_EMAIL         chairman@local
 #   AGENTS                    "agent1,agent2"           (comma-separated)
 #   REPOS                     "test-sandbox"            (comma-separated, owned by admin)
 #   BOOTSTRAP_DATA_DIR        /data                     (where tokens/ secrets/ live)
-#   REQUIRED_APPROVALS        1                         (branch protection on main)
 #
 # Outputs (disk under $BOOTSTRAP_DATA_DIR/tokens/):
 #   admin.token
@@ -20,24 +18,19 @@
 #
 # Outputs (Gitea):
 #   - chairman admin user
-#   - agent-<name> users (write on each repo, in approvals_whitelist)
+#   - agent-<name> users (write on each repo through the coders team)
 #   - chairman/<repo> repos (auto-init=true, default branch main)
-#   - branch protection on main (required_approvals = REQUIRED_APPROVALS, approvals_whitelist=agents)
+#   - main protected against direct agent pushes; PRs need no approvals or CI gate
 
 set -euo pipefail
 
 : "${GITEA_HOST:=http://gitea:3000}"
 : "${GITEA_ADMIN_USER:=chairman}"
 : "${GITEA_ADMIN_PASSWORD:?GITEA_ADMIN_PASSWORD required}"
-: "${GITEA_ADMIN_EMAIL:=chairman@omcgitea.local}"
 : "${GITEA_ORG:=omcgitea}"
 : "${AGENTS:=agent1,agent2}"
 : "${REPOS:=test-sandbox}"
 : "${BOOTSTRAP_DATA_DIR:=/data}"
-: "${REQUIRED_APPROVALS:=1}"
-# TEAMCONFIG. Format: lead=<a>;reviewer=<a,b>;coder=<c,d,...>
-# Drives org team membership only — md files do NOT contain role/roster info.
-: "${ROLES:=}"
 
 TOKENS_DIR="$BOOTSTRAP_DATA_DIR/tokens"
 DONE_MARK="$TOKENS_DIR/.bootstrap-done"
@@ -52,13 +45,8 @@ if [ -f "$DONE_MARK" ] && [ "${PBENCH_BOOTSTRAP_FORCE:-0}" != "1" ]; then
     log "Already done (mark=$DONE_MARK), exit 0"
     exit 0
 fi
-# PBENCH_BOOTSTRAP_FORCE=1 ignores the marker. It exists for the k8s path, where
-# "has bootstrap run" is already recorded by the Job's completion status and
-# scripts/pbench_k8s_up.sh deletes the old Job before applying. Two sources of
-# truth for the same fact, and the file one wins: a redeploy carrying a real fix
-# short-circuits to "Already done" and changes nothing, while the Job reports
-# success. Under compose the marker stays authoritative (the container restarts
-# in place); `make bootstrap-rerun` still clears it.
+# The marker makes restarts idempotent. make bootstrap-rerun clears it;
+# PBENCH_BOOTSTRAP_FORCE=1 explicitly requests re-provisioning instead.
 [ "${PBENCH_BOOTSTRAP_FORCE:-0}" = "1" ] && [ -f "$DONE_MARK" ] && \
     log "PBENCH_BOOTSTRAP_FORCE=1 — ignoring $DONE_MARK and re-provisioning"
 
@@ -81,32 +69,6 @@ done
 # ------------------------------------------------------------------
 # Helpers
 # ------------------------------------------------------------------
-api_admin() {
-    # api_admin METHOD PATH [data]
-    local m="$1" p="$2" d="${3:-}"
-    if [ -n "$d" ]; then
-        curl -fsS -u "${GITEA_ADMIN_USER}:${GITEA_ADMIN_PASSWORD}" \
-            -H "Content-Type: application/json" \
-            -X "$m" "${GITEA_HOST}${p}" -d "$d"
-    else
-        curl -fsS -u "${GITEA_ADMIN_USER}:${GITEA_ADMIN_PASSWORD}" \
-            -X "$m" "${GITEA_HOST}${p}"
-    fi
-}
-
-api_admin_status() {
-    # api_admin_status METHOD PATH [data]  -> prints HTTP status code only
-    local m="$1" p="$2" d="${3:-}"
-    if [ -n "$d" ]; then
-        curl -s -o /dev/null -w "%{http_code}" -u "${GITEA_ADMIN_USER}:${GITEA_ADMIN_PASSWORD}" \
-            -H "Content-Type: application/json" \
-            -X "$m" "${GITEA_HOST}${p}" -d "$d"
-    else
-        curl -s -o /dev/null -w "%{http_code}" -u "${GITEA_ADMIN_USER}:${GITEA_ADMIN_PASSWORD}" \
-            -X "$m" "${GITEA_HOST}${p}"
-    fi
-}
-
 # ------------------------------------------------------------------
 # 2. Ensure admin user exists
 #    (gitea container is started with INSTALL_LOCK=true; admin must
@@ -211,42 +173,6 @@ api_token_status() {
 IFS=',' read -r -a AGENT_LIST <<<"$AGENTS"
 IFS=',' read -r -a REPO_LIST <<<"$REPOS"
 
-# ------------------------------------------------------------------
-# 4a. Parse ROLES → LEAD_LIST / REVIEWER_LIST / CODER_LIST.
-# Default fallback (when ROLES unset): first agent=lead, second=reviewer, rest=coder.
-# ------------------------------------------------------------------
-LEAD_LIST=(); REVIEWER_LIST=(); CODER_LIST=(); DIRECTOR_LIST=()
-if [ -n "$ROLES" ]; then
-    IFS=';' read -r -a _BUCKETS <<<"$ROLES"
-    for _b in "${_BUCKETS[@]}"; do
-        _key="${_b%%=*}"
-        _val="${_b#*=}"
-        IFS=',' read -r -a _members <<<"$_val"
-        case "$_key" in
-            lead)     LEAD_LIST=("${_members[@]}") ;;
-            reviewer) REVIEWER_LIST=("${_members[@]}") ;;
-            coder)    CODER_LIST=("${_members[@]}") ;;
-            director) DIRECTOR_LIST=("${_members[@]}") ;;
-        esac
-    done
-fi
-if [ "${#LEAD_LIST[@]}" -eq 0 ] && [ "${#REVIEWER_LIST[@]}" -eq 0 ] && [ "${#CODER_LIST[@]}" -eq 0 ]; then
-    [ "${#AGENT_LIST[@]}" -ge 1 ] && LEAD_LIST=("${AGENT_LIST[0]}")
-    [ "${#AGENT_LIST[@]}" -ge 2 ] && REVIEWER_LIST=("${AGENT_LIST[1]}")
-    [ "${#AGENT_LIST[@]}" -ge 3 ] && CODER_LIST=("${AGENT_LIST[@]:2}")
-fi
-log "Roles: director=[${DIRECTOR_LIST[*]}] lead=[${LEAD_LIST[*]}] reviewer=[${REVIEWER_LIST[*]}] coder=[${CODER_LIST[*]}]"
-
-# Build a single-line CSV per role (diagnostics only — bootstrap writes no
-# roles.env; an agent introspects its role via the Gitea team API).
-_csv() { local IFS=,; echo "$*"; }
-LEAD_CSV=$(_csv "${LEAD_LIST[@]}")
-REVIEWER_CSV=$(_csv "${REVIEWER_LIST[@]}")
-CODER_CSV=$(_csv "${CODER_LIST[@]}")
-log "Role CSVs (informational): lead=${LEAD_CSV} reviewer=${REVIEWER_CSV} coder=${CODER_CSV}"
-# Remove any stale roles.env a reused tokens dir still carries.
-rm -f "$TOKENS_DIR/roles.env" 2>/dev/null || true
-
 ensure_user() {
     local name="$1"
     local password="$2"
@@ -276,7 +202,7 @@ ensure_user() {
     # truth: the callers below basic-auth as the agent with it, and mini-router
     # reads it for mattermost form auth. Without this line the two can diverge
     # and nothing says so -- lose the tokens dir while gitea keeps its users
-    # (a wiped volume, a fresh k8s namespace over an old gitea disk) and
+    # (a wiped profile volume over an old Gitea data directory) and
     # bootstrap generates a NEW random password, stores it, never tells gitea,
     # then dies at get_or_create_token's basic auth with a bare
     # `curl: (22) ... 401` naming neither the user nor the call.
@@ -312,7 +238,7 @@ done
 rm -f "$TOKENS_DIR"/webhook-*.secret 2>/dev/null || true
 
 # ------------------------------------------------------------------
-# 4b. Ensure org `omcgitea` + leads/reviewers/coders teams + members.
+# 4b. Ensure the experiment organization and peer-coder team.
 # ------------------------------------------------------------------
 ensure_org() {
     local code
@@ -366,8 +292,7 @@ ensure_team_member() {
 }
 
 ensure_team_membership_strict() {
-    # Make sure each role team contains exactly the configured set —
-    # remove members not in ROLES so role changes propagate cleanly.
+    # Keep the coders team equal to the configured worker roster.
     local team_name="$1"; shift
     local want=("$@")
     local id
@@ -389,17 +314,11 @@ ensure_team_membership_strict() {
 }
 
 ensure_org
-ensure_team "leads" "admin"
-ensure_team "reviewers" "write"
 ensure_team "coders" "write"
-ensure_team "directors" "admin"
-ensure_team_membership_strict "leads"     "${LEAD_LIST[@]}"
-ensure_team_membership_strict "reviewers" "${REVIEWER_LIST[@]}"
-ensure_team_membership_strict "coders"    "${CODER_LIST[@]}"
-ensure_team_membership_strict "directors" "${DIRECTOR_LIST[@]}"
+ensure_team_membership_strict "coders" "${AGENT_LIST[@]}"
 
 # ------------------------------------------------------------------
-# 5. Create repos under the omcgitea org. Team `leads/reviewers/coders`
+# 5. Create repos under the experiment organization. The coders team
 # already cover all member access (includes_all_repositories=true).
 # ------------------------------------------------------------------
 ensure_repo() {
@@ -410,96 +329,40 @@ ensure_repo() {
         log "Repo ${GITEA_ORG}/${repo} exists"
         return 0
     fi
-    # Optional one-time migration: if a legacy chairman/<repo> exists,
-    # transfer it into the org. Otherwise create fresh.
-    local legacy_code
-    legacy_code=$(api_token_status GET "/api/v1/repos/${GITEA_ADMIN_USER}/${repo}")
-    if [ "$legacy_code" = "200" ]; then
-        local tbody
-        tbody=$(jq -nc --arg n "$GITEA_ORG" '{new_owner:$n}')
-        api_token POST "/api/v1/repos/${GITEA_ADMIN_USER}/${repo}/transfer" "$tbody" >/dev/null
-        log "Repo transferred ${GITEA_ADMIN_USER}/${repo} → ${GITEA_ORG}/${repo}"
-        return 0
-    fi
     local body
     body=$(jq -nc --arg n "$repo" \
-        '{name:$n, private:false, auto_init:true, default_branch:"main", description:"omcgitea test sandbox — written to by e2e tests"}')
+        '{name:$n, private:false, auto_init:true, default_branch:"main", description:"ProgramBench agent collaboration repository"}')
     api_token POST "/api/v1/orgs/${GITEA_ORG}/repos" "$body" >/dev/null
     log "Repo ${GITEA_ORG}/${repo} created"
 }
 
 ensure_branch_protection() {
     local repo="$1"
-    # Branch protection uses team whitelists, not user lists.
-    # require_code_owner_review=true so changes touching paths in
-    # CODEOWNERS (e.g. .team/*) require the listed owner's approval.
-    #
-    # REQUIRED_APPROVALS=0 selects the test-gate topology: there is no
-    # review stage, so CI is the only gate. Every OTHER review-derived blocker
-    # has to come off with it, or a merge stalls forever waiting on a review
-    # that no agent is ever going to perform:
-    #   block_on_official_review_requests — a stray request_review blocks merge
-    #   require_code_owner_review         — CODEOWNERS approval nobody will give
-    #   block_on_rejected_reviews         — a stale REJECT can never be cleared
-    # block_on_outdated_branch: ON by default (otherwise stale branches can
-    # silently merge over each other and corrupt shared files), switchable via
-    # PBENCH_BLOCK_OUTDATED.
-    #
-    # What it costs with 16 peers merging continuously: `main` moves between
-    # opening a PR and merging it, so most merges return HTTP 405 "not
-    # mergeable". The team misdiagnoses it as an authorship rule -- "PR creator
-    # cannot merge own PR", "reciprocal peer merge required" -- and rarely
-    # reaches for gitea's actual remedy, update_branch.
-    #
-    # Note what it does NOT protect against being lost: git still refuses
-    # TEXTUAL conflicts either way. What only this setting prevents is a
-    # semantic conflict -- two branches editing different regions of one file,
-    # auto-merging cleanly, producing an incoherent result. That is a real risk
-    # on a task with a large shared core.
-    local rev_blockers=true
-    if [ "$REQUIRED_APPROVALS" = "0" ]; then rev_blockers=false; fi
-    local block_outdated=true
-    if [ "${PBENCH_BLOCK_OUTDATED:-1}" != "1" ]; then block_outdated=false; fi
-    # There is no lead role: every agent is a peer coder who picks its own
-    # area, so no one publishes a shared suite to main and nothing needs a
-    # whitelist beyond the admin. No lead-tests context is required.
-    local checks='["closes-issue-check / check (pull_request)"]'
-    # PBENCH_CI_GATE=0: no workflows are seeded, so no context can ever report.
-    # enable_status_check MUST go false with them -- leaving it true with any
-    # context listed parks every PR at "pending" permanently.
-    local status_gate=true
-    if [ "${PBENCH_CI_GATE:-1}" != "1" ]; then
-        status_gate=false
-        checks='[]'
-    fi
+    # Preserve the main experiment: agents merge PRs as peers, direct pushes
+    # to main are restricted to the admin, and approvals/status gates are off.
     local body
     body=$(jq -nc --arg b "main" \
         --arg admin "$GITEA_ADMIN_USER" \
-        --argjson revb "$rev_blockers" \
-        --argjson outdated "$block_outdated" \
-        --argjson checks "$checks" \
-        --argjson gate "$status_gate" \
-        --argjson appr "$REQUIRED_APPROVALS" \
         '{branch_name:$b,
           enable_push:true,
           enable_push_whitelist:true,
           push_whitelist_usernames:[$admin],
           push_whitelist_teams:[],
           push_whitelist_deploy_keys:false,
-          required_approvals:$appr,
+          required_approvals:0,
           enable_approvals_whitelist:true,
           approvals_whitelist_username:[],
-          approvals_whitelist_teams:["reviewers"],
+          approvals_whitelist_teams:[],
           enable_merge_whitelist:true,
           merge_whitelist_usernames:[],
-          merge_whitelist_teams:["directors","reviewers","coders"],
-          dismiss_stale_approvals:$revb,
-          block_on_rejected_reviews:$revb,
-          block_on_official_review_requests:$revb,
-          block_on_outdated_branch:$outdated,
-          require_code_owner_review:$revb,
-          enable_status_check:$gate,
-          status_check_contexts:$checks}')
+          merge_whitelist_teams:["coders"],
+          dismiss_stale_approvals:false,
+          block_on_rejected_reviews:false,
+          block_on_official_review_requests:false,
+          block_on_outdated_branch:false,
+          require_code_owner_review:false,
+          enable_status_check:false,
+          status_check_contexts:[]}')
     local code
     code=$(api_token_status GET "/api/v1/repos/${GITEA_ORG}/${repo}/branch_protections/main")
     if [ "$code" = "200" ]; then
@@ -539,51 +402,6 @@ ensure_codeowners() {
     fi
 }
 
-ensure_closes_workflow() {
-    local repo="$1"
-    local path=".gitea/workflows/closes-check.yml"
-    local cur_sha
-    cur_sha=$(api_token GET "/api/v1/repos/${GITEA_ORG}/${repo}/contents/${path}" 2>/dev/null \
-        | jq -r '.sha // empty' || true)
-    local content_b64
-    content_b64=$(base64 -w0 <<'YML'
-name: closes-issue-check
-on:
-  pull_request:
-    types: [opened, edited, synchronize, reopened]
-jobs:
-  check:
-    runs-on: ubuntu-latest
-    steps:
-        - name: ensure PR body links its sub-issue
-          env:
-            BODY: ${{ github.event.pull_request.body }}
-          # Accept Refs as well as Closes. Workers open one PR per behaviour,
-          # not per assignment, so most PRs are a partial slice of their
-          # sub-issue -- requiring "Closes" on every one made gitea close the
-          # issue on the FIRST slice, and the lead reads a closed sub-issue as
-          # "this worker is free" and hands out the next area. Refs links
-          # without closing; Closes goes on the slice that finishes the goal.
-          run: |
-            echo "$BODY" | grep -Eqi '(closes|refs)[[:space:]]+#[0-9]+' \
-              || { echo "PR body needs 'Closes #<n>' (finishes the sub-issue) or 'Refs #<n>' (partial slice)"; exit 1; }
-YML
-)
-    local body
-    if [ -n "$cur_sha" ]; then
-        body=$(jq -nc --arg c "$content_b64" --arg s "$cur_sha" --arg m "bootstrap: ensure closes-issue-check workflow" \
-            '{message:$m, content:$c, sha:$s, branch:"main"}')
-        api_token PUT "/api/v1/repos/${GITEA_ORG}/${repo}/contents/${path}" "$body" >/dev/null
-        log "closes-check.yml updated on ${GITEA_ORG}/${repo}"
-    else
-        body=$(jq -nc --arg c "$content_b64" --arg m "bootstrap: add closes-issue-check workflow" \
-            '{message:$m, content:$c, branch:"main"}')
-        api_token POST "/api/v1/repos/${GITEA_ORG}/${repo}/contents/${path}" "$body" >/dev/null
-        log "closes-check.yml created on ${GITEA_ORG}/${repo}"
-    fi
-}
-
-
 ensure_agent_unwatched() {
     local repo="$1" agent="$2"
     local pwfile="$TOKENS_DIR/agent-${agent}.token"
@@ -608,17 +426,6 @@ ensure_agent_unwatched() {
 for repo in "${REPO_LIST[@]}"; do
     ensure_repo "$repo"
     ensure_codeowners "$repo"
-    # PBENCH_CI_GATE=0 removes the gate ENTIRELY: no workflows seeded, and
-    # ensure_branch_protection drops status checks to match. Both halves must
-    # move together -- a required context whose job never runs sits at "pending"
-    # forever and pending blocks merge, so seeding neither workflow while still
-    # requiring their contexts would deadlock every PR in the run and score
-    # 0.00% without a single error line.
-    if [ "${PBENCH_CI_GATE:-1}" = "1" ]; then
-        ensure_closes_workflow "$repo"
-    else
-        log "PBENCH_CI_GATE=0 — skipping closes-issue-check workflow on ${GITEA_ORG}/${repo}"
-    fi
     ensure_branch_protection "$repo"
     for agent in "${AGENT_LIST[@]}"; do
         ensure_agent_unwatched "$repo" "$agent"

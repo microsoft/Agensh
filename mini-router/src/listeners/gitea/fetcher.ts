@@ -6,9 +6,7 @@
  * not replay events on reconnect (no Last-Event-ID semantics). SSE only
  * compresses our latency; correctness rests on the cursor-driven pull.
  *
- * This module is deliberately I/O-only and stateless: it takes a
- * `fetch`-like injectable and returns a parsed page. The cursor lives
- * in `RouterState`.
+ * This module returns a parsed page. The cursor lives in EventStore.
  *
  * Auth (Gitea quirk, 1.22.6):
  *   `/api/v1/notifications` is gated by Gitea's `reqToken` middleware
@@ -21,8 +19,7 @@
  *   So router must carry both:
  *     - PAT here (REST pull)
  *     - cookie session in the SSE driver
- *   The `UpstreamAuth` abstraction therefore covers SSE only; this
- *   module deliberately stays on the simpler `token: string` field.
+ *   Form-session authentication covers SSE; this module uses the PAT directly.
  *
  * Cursor semantics: we use `since=<RFC3339 timestamp>` and remember the
  * max(updated_at) of the last seen page. Gitea returns notifications
@@ -30,17 +27,7 @@
  * larger than the page size, we walk pages.
  */
 
-export interface FetchLike {
-  (
-    input: string,
-    init?: { headers?: Record<string, string>; signal?: AbortSignal },
-  ): Promise<{
-    ok: boolean;
-    status: number;
-    text(): Promise<string>;
-    json(): Promise<unknown>;
-  }>;
-}
+export const NOTIFICATION_PAGE_SIZE = 50;
 
 export interface NotificationsPage {
   items: GiteaNotificationRaw[];
@@ -74,13 +61,8 @@ export interface FetchOptions {
   token: string;
   /** ISO timestamp; pass null on first run to get all unread. */
   since: string | null;
-  /** Include read notifications? Default false (unread only). */
-  all?: boolean;
-  /** Page size (Gitea max ~50). */
-  limit?: number;
   /** 1-based page number; omitted = the first page. */
   page?: number;
-  fetch?: FetchLike;
   /** Optional Host header override (we go through nginx-edge). */
   hostHeader?: string;
 }
@@ -91,18 +73,15 @@ export interface FetchOptions {
  *
  * Notes on Gitea API:
  *   - `since`: only notifications updated_at >= since
- *   - `all=true`: include already-read; default unread-only
  *   - response is a JSON array (not paginated wrapper); pagination via
  *     `page` + `limit` query params + `Link` header
  */
 export async function fetchNotificationsPage(
   opts: FetchOptions,
 ): Promise<NotificationsPage> {
-  const f = opts.fetch ?? (globalThis.fetch as FetchLike);
   const params = new URLSearchParams();
   if (opts.since) params.set("since", opts.since);
-  if (opts.all) params.set("all", "true");
-  params.set("limit", String(opts.limit ?? 50));
+  params.set("limit", String(NOTIFICATION_PAGE_SIZE));
   if (opts.page !== undefined && opts.page > 1) params.set("page", String(opts.page));
 
   const url = `${opts.baseUrl.replace(/\/$/, "")}/api/v1/notifications?${params.toString()}`;
@@ -112,7 +91,7 @@ export async function fetchNotificationsPage(
   };
   if (opts.hostHeader) headers.Host = opts.hostHeader;
 
-  const res = await f(url, { headers });
+  const res = await fetch(url, { headers });
   if (!res.ok) {
     const body = await res.text().catch(() => "");
     throw new Error(

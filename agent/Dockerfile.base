@@ -1,0 +1,7 @@
+# Artifact image for the upstream Gitea MCP binary. Nothing runs this image;
+# agent/Dockerfile copies its binary into each task cleanroom.
+# Build: sudo docker build -f agent/Dockerfile.base -t omcgitea-agent-base:pbench agent/
+ARG GITEA_MCP_SERVER_IMAGE=docker.gitea.com/gitea-mcp-server:latest
+FROM ${GITEA_MCP_SERVER_IMAGE} AS mcp_src
+FROM scratch
+COPY --from=mcp_src --chmod=755 /app/gitea-mcp /usr/local/bin/gitea-mcp

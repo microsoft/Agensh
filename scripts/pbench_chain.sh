@@ -32,7 +32,6 @@ if [ -z "${DATA_ROOT:-}" ] && [ -f "$ENV_FILE" ]; then
 fi
 DATA_ROOT="${DATA_ROOT:-$ROOT/.claude-team-data}"
 DATA_DIR="$DATA_ROOT/$PROFILE"
-RUN_SCRIPT="${RUN_SCRIPT:-./scripts/pbench_run.sh}"
 
 mkdir -p "$TRAJ_ROOT" "$ROOT/out"
 touch "$SUMMARY"
@@ -143,6 +142,7 @@ wait_for_docker() {
 # snapshot and clean. Eval happens in the eval phase.
 salvage_interrupted() {
     if [ ! -d "$DATA_DIR" ]; then return 0; fi
+    sudo -n python3 "$ROOT/agent/archive.py" check "$DATA_DIR" || return 1
     local current
     current=$(ls "$OUT_ROOT" 2>/dev/null | grep '__' | grep -vE '\.archived$|\.aborted$|\.interrupted$' | head -1)
     if [ -z "$current" ]; then
@@ -158,7 +158,7 @@ salvage_interrupted() {
     done
     if ! curl -fsS "http://localhost:${EDGE_HTTP_PORT}/api/v1/version" >/dev/null 2>&1; then
         log "gitea not reachable — starting stack for salvage"
-        (cd "$ROOT" && make up PROFILE="$PROFILE") >>"$LOG" 2>&1 || log "WARN: make up failed during salvage"
+        (cd "$ROOT" && make up PROFILE="$PROFILE" SERVICES="mysql gitea nginx-edge") >>"$LOG" 2>&1 || log "WARN: make up failed during salvage"
         sleep 30
     fi
     sudo rm -f "$OUT_ROOT/$current/submission.tar.gz" "$OUT_ROOT/$current/export.log"
@@ -171,7 +171,7 @@ salvage_interrupted() {
         log "WARN: salvage export failed, submission.tar.gz will be empty"
         echo "salvage export failed" > "$OUT_ROOT/$current/export.log" || true
     fi
-    snapshot_run_and_clean "$current"
+    snapshot_run_and_clean "$current" || return 1
     log "salvage complete for $current (eval deferred to Phase 2)"
 }
 
@@ -181,20 +181,22 @@ snapshot_run_and_clean() {
     local task="$1"
     local dst="$TRAJ_ROOT/${task}.${SUFFIX}"
     log "snapshotting $task -> $dst"
-    sudo mkdir -p "$dst"
+    sudo mkdir -p "$dst" || return 1
     if [ -d "$DATA_DIR" ]; then
         sudo cp -a "$DATA_DIR/." "$dst/data-root/" \
             && log "copied DATA_ROOT -> $dst/data-root/" \
-            || log "WARN: DATA_ROOT copy failed"
+            || { log "ERROR: DATA_ROOT copy failed; refusing cleanup"; return 1; }
     else
         log "WARN: $DATA_DIR missing, nothing to snapshot from data-root"
     fi
     if [ -d "$OUT_ROOT/$task" ]; then
         sudo cp -a "$OUT_ROOT/$task/." "$dst/out/" \
             && log "copied out/$task -> $dst/out/" \
-            || log "WARN: out/$task copy failed"
+            || { log "ERROR: out/$task copy failed; refusing cleanup"; return 1; }
     fi
     sudo chown -R "$(id -u):$(id -g)" "$dst" 2>/dev/null || true
+    sudo -n python3 "$ROOT/agent/archive.py" check "$DATA_DIR" || return 1
+    sudo -n python3 "$ROOT/agent/archive.py" check "$dst/data-root" || return 1
     log "make clean PROFILE=$PROFILE (out/$task preserved for Phase 2 eval)"
     (cd "$ROOT" && make clean PROFILE="$PROFILE") >>"$LOG" 2>&1 \
         || log "WARN: make clean returned non-zero"
@@ -220,7 +222,7 @@ eval_and_archive() {
           PROGRAMBENCH_DOCKER_EXECUTABLE="$DOCKER_SUDO_SHIM" \
           TMPDIR="$pbench_tmp" \
           PATH="$HOME/.local/bin:$PATH" \
-          uv run programbench eval "$OUT_ROOT" --filter "$task" ) >>"$LOG" 2>&1 \
+          uv run programbench eval "$OUT_ROOT" --filter "$task" --image-tag task_cleanroom_v6 ) >>"$LOG" 2>&1 \
             || log "WARN: eval $task returned non-zero"
     else
         log "FATAL eval $task: uv not on PATH"
@@ -282,8 +284,7 @@ launch_task() {
         PROGRAMBENCH_REPO="$PB_REPO" \
         PATH="$HOME/.local/bin:$PATH" \
         SKIP_EVAL=1 \
-        ${WORK_HOST_PATH:+WORK_HOST_PATH="$WORK_HOST_PATH"} \
-        "$RUN_SCRIPT" \
+        "$ROOT/scripts/pbench_run.sh" \
         > "$run_log" 2>&1
       echo $? > "$rcfile"
     } &
@@ -316,10 +317,12 @@ log "=== chain start (${#TASKS[@]} tasks x ${HOURS:-6}h; profile=$PROFILE; suffi
 PHASE="${PHASE:-both}"
 
 wait_for_docker || exit 1
-allocate_ports || exit 1
 # Salvage belongs to the run half: in an eval-only pass it would restart the
 # stack and re-export over the submission taken at the budget boundary.
-[ "$PHASE" = "eval" ] || salvage_interrupted
+if [ "$PHASE" != "eval" ]; then
+    allocate_ports || exit 1
+    salvage_interrupted
+fi
 
 # --- Phase 1: RUN, eval deferred ---------------------------------------------
 if [ "$PHASE" = "both" ] || [ "$PHASE" = "run" ]; then

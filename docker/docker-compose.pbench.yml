@@ -1,6 +1,6 @@
 # docker-compose.pbench.yml — ProgramBench egress-lock overlay.
 #
-# The Makefile layers it on every PROFILE=pbench-* stack. It adds two things
+# The Makefile layers it on every PROFILE=pbench-single-node-* stack. It adds two things
 # on top of the rendered base
 # (docker/_gen-prod.<profile>.yml from tools/gen-compose-prod.py):
 #
@@ -40,8 +40,8 @@ networks:
   # restarts dockerd — which kills every live stack mid-run. Only repo-owned
   # configuration is durable on this host, so the subnets live here.
   #
-  # 10.176.0.0/16 is free on this host: it routes 10.50.x and 10.217.24.0/21,
-  # k8s defaults its service CIDR to 10.96.0.0/12, and kind uses 10.244.0.0/16.
+  # Generated profiles use 10.216.x ranges; check for conflicts with host routes
+  # when deploying on another machine.
   # Concurrent stacks set these per profile (see scripts/pbench_gen_env.sh); the
   # fallbacks let an unparameterised single-profile run come up unchanged.
   default:
@@ -109,11 +109,6 @@ services:
       # "api-key" sends `api-key: …` (Azure AI Foundry `services.ai.azure.com`
       # /models endpoint expects this).
       UPSTREAM_AUTH_STYLE: "${UPSTREAM_AUTH_STYLE:-bearer}"
-      # Optional path override: literal path (query included) forwarded to
-      # UPSTREAM for every request instead of the inbound self.path. Used to
-      # retarget Copilot's `/chat/completions` at Azure AI Foundry's
-      # `/models/chat/completions?api-version=2024-05-01-preview`.
-      UPSTREAM_PATH_OVERRIDE: "${UPSTREAM_PATH_OVERRIDE:-}"
       # Absorb transient gateway 5xx here rather than letting them kill an
       # agent turn. The agent SDK gives up after 5 tries in SIX SECONDS total,
       # and a dead turn leaves an event-driven agent idle until something else

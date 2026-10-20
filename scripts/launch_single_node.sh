@@ -27,6 +27,7 @@ TASKS="${TASKS:-jgm__pandoc.5caad90 gromacs__gromacs.665ea4c universal-ctags__ct
 HOURS="${HOURS:-6}"
 WORKERS="${WORKERS:-8}"
 source "$ROOT/scripts/lib_launch.sh"
+source "$ROOT/scripts/lib_pbench_images.sh"
 mkdir -p "$TRAJ_ROOT" "$ROOT/out"
 
 pv() { awk -F= -v k="$2" '$1==k{print substr($0, length(k) + 2); exit}' "$ROOT/.env.$1"; }
@@ -45,6 +46,10 @@ for task in $TASKS; do
     p="$(task_profile "$task")"
     [ -f "$ROOT/.env.$p" ] || { log "FATAL: .env.$p missing — run scripts/pbench_gen_env.sh"; fail=1; continue; }
 
+    o="$(pv "$p" PBENCH_ORCHESTRATOR)"
+    [ "${o:-compose}" = "compose" ] || { log "FATAL: .env.$p supports single-node Compose only"; fail=1; }
+    [ "${PBENCH_ORCHESTRATOR:-compose}" = "compose" ] || { log "FATAL: PBENCH_ORCHESTRATOR supports single-node Compose only"; fail=1; }
+
     img="omcgitea-agent-$(short "$task"):pbench"
     sudo docker image inspect "$img" >/dev/null 2>&1 || { log "FATAL: image missing: $img"; fail=1; }
     got="$(pv "$p" AGENT_IMAGE)"
@@ -56,8 +61,6 @@ for task in $TASKS; do
     [ "$k" = "copilot" ] || { log "FATAL: .env.$p AGENT_KIND=$k expected copilot"; fail=1; }
     m="$(pv "$p" ANTHROPIC_MODEL)"
     [ "$m" = "gpt-5.6-sol" ] || { log "FATAL: .env.$p ANTHROPIC_MODEL=$m expected gpt-5.6-sol"; fail=1; }
-    o="$(pv "$p" UPSTREAM_PATH_OVERRIDE)"
-    [ -z "$o" ] || { log "FATAL: .env.$p UPSTREAM_PATH_OVERRIDE='$o' must be empty on the responses transport"; fail=1; }
     # The responses transport is what makes the bare model id reachable at all.
     w="$(pv "$p" COPILOT_PROVIDER_WIRE_API)"
     [ "$w" = "responses" ] || { log "FATAL: .env.$p COPILOT_PROVIDER_WIRE_API='$w' expected responses"; fail=1; }
@@ -83,14 +86,9 @@ n=ipaddress.ip_network('$sn'); need=2*int('${WORKERS:-0}' or 0)+8
 sys.exit(0 if n.num_addresses-2 >= need else 1)
 " 2>/dev/null || { log "FATAL: .env.$p PBENCH_SUBNET_DEFAULT=$sn too small for $WORKERS workers (need $((2*WORKERS+8)) IPs)"; fail=1; }
 
-    # Nothing else turns the merge poller on: empty means it disables itself.
-    mw="$(pv "$p" MERGE_WATCH_REPO)"
-    [ "$mw" = "pbench/main" ] || { log "FATAL: .env.$p MERGE_WATCH_REPO='$mw' expected pbench/main — merge notices would be off"; fail=1; }
-    # Absent, the overlay defaults the CI gate to on.
-    cg="$(pv "$p" PBENCH_CI_GATE)"
-    [ "$cg" = "0" ] || { log "FATAL: .env.$p PBENCH_CI_GATE='$cg' expected 0 — the CI gate would still be on"; fail=1; }
 
-    ci="programbench/${task/__/_1776_}:task_cleanroom_v6"
+    cleanroom_tag="$(pbench_cleanroom_tag "$ROOT/.env.$p")" || { fail=1; continue; }
+    ci="${PROGRAMBENCH_DOCKER_ORG:-programbench}/${task/__/_1776_}:$cleanroom_tag"
     sudo docker image inspect "$ci" >/dev/null 2>&1 || { log "FATAL: cleanroom missing: $ci"; fail=1; }
 
     # A non-empty data dir makes the runner die, and an unfinished task dir makes
@@ -127,17 +125,17 @@ stale_img omcgitea-board:local board-service/ \
     "$BS/Dockerfile" "$BS/requirements.txt" "$BS"/*.py || fail=1
 stale_img omcgitea-mini-router:local mini-router/ \
     "$MR/Dockerfile" "$MR/package.json" "$MR/package-lock.json" "$MR/tsconfig.json" \
-    "$MR/src" "$MR/sql" || fail=1
+    "$MR/src" || fail=1
 
 # The agent image bakes the entrypoint, and the entrypoint decides which paths
 # the prompt and config mounts must cover: an image built before a path moved
 # ignores every one of them. Compare the baked copy with this checkout's.
 for task in $TASKS; do
     p="$(task_profile "$task")"; img="$(pv "$p" AGENT_IMAGE 2>/dev/null)"
-    if image_file_matches "$img" /opt/omcgitea/entrypoint.sh "$ROOT/docker/agent/entrypoint.sh"; then
-        log "image OK: $img bakes this checkout's docker/agent/entrypoint.sh"
+    if image_file_matches "$img" /opt/omcgitea/entrypoint.sh "$ROOT/agent/entrypoint.sh"; then
+        log "image OK: $img bakes this checkout's agent/entrypoint.sh"
     else
-        log "FATAL: ${img:-$p has no AGENT_IMAGE, which} does not bake this checkout's docker/agent/entrypoint.sh -- rebuild it: TASKS=$task bash scripts/pbench_build_pertask_images.sh"
+        log "FATAL: ${img:-$p has no AGENT_IMAGE, which} does not bake this checkout's agent/entrypoint.sh -- rebuild it: TASKS=$task bash scripts/pbench_build_pertask_images.sh"
         fail=1
     fi
 done
@@ -191,19 +189,19 @@ done
 # --- prompt delivery ---------------------------------------------------------
 # Prompts are baked into the image at build time; tools/gen-compose-prod.py
 # shadows them with read-only host mounts, so the repo file is what runs.
-# Check that the file every agent reads, prompts/team/agents.md, reaches the
+# Check that the file every agent reads, prompts/agents.md, reaches the
 # container.
 first_p="$(task_profile "${TASKS%% *}")"
-PSRC="$ROOT/prompts/team/agents.md"
+PSRC="$ROOT/prompts/agents.md"
 want=$(wc -c < "$PSRC" 2>/dev/null)
 img="$(pv "$first_p" AGENT_IMAGE 2>/dev/null)"
 got=$(sudo docker run --rm --network none -v "$PSRC:/opt/omcgitea/prompts/agents.md:ro" \
       --entrypoint sh "$img" -c \
       "wc -c < /opt/omcgitea/prompts/agents.md" 2>/dev/null | tr -d ' ')
 if [ -n "$want" ] && [ "$got" = "$want" ]; then
-    log "prompt OK: prompts/team/agents.md = $want bytes (host file reaches the container)"
+    log "prompt OK: prompts/agents.md = $want bytes (host file reaches the container)"
 else
-    log "FATAL: prompts/team/agents.md reads '$got' bytes in-container, host has $want -- the mount is not effective"
+    log "FATAL: prompts/agents.md reads '$got' bytes in-container, host has $want -- the mount is not effective"
     fail=1
 fi
 
@@ -236,15 +234,7 @@ for task in $TASKS; do
         log "FATAL: $p renders $na agent services / $nl AGENTS names, expected $WORKERS each"
         fail=1
     fi
-    grep -q 'MERGE_WATCH_REPO: pbench/main' <<<"$rendered" \
-        && log "poller OK: $p renders MERGE_WATCH_REPO=pbench/main into board-service" \
-        || { log "FATAL: $p board-service renders WITHOUT MERGE_WATCH_REPO — merge notices would be off"; fail=1; }
-    grep -qE 'PBENCH_CI_GATE: *"?0"?' <<<"$rendered" \
-        && log "gate OK: $p renders PBENCH_CI_GATE=0 into bootstrap" \
-        || { log "FATAL: $p bootstrap renders WITHOUT PBENCH_CI_GATE=0 — the gate stays on"; fail=1; }
-    grep -q '/run/omcgitea/tokens' <<<"$rendered" \
-        && log "poller OK: $p mounts the token dir into board-service" \
-        || { log "FATAL: $p board-service has no token mount — poller would sit at token=unset"; fail=1; }
+
 done
 
 [ "$fail" = "0" ] || { log "preflight FAILED — nothing launched"; exit 1; }

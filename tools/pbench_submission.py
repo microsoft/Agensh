@@ -4,7 +4,7 @@
 ProgramBench's I/O contract (measured from ProgramBench/src/programbench/eval/eval.py
 + container.py):
 
-  INPUT  (seed): the cleanroom image `programbench/<task>:task_cleanroom`
+  INPUT  (seed): the cleanroom image `programbench/<task>:task_cleanroom_v6`
                  has under /workspace the reference binary (0111) + docs + compile.sh template.
                  The agent team must, in its own Gitea repo, rebuild the codebase based on these materials.
 
@@ -19,7 +19,7 @@ ProgramBench's I/O contract (measured from ProgramBench/src/programbench/eval/ev
 
 Two subcommands:
   export  --from-dir <repo> | --from-gitea <url> --task <id> --out-dir <run>
-  seed    --image <task_cleanroom_img> --into <gitea_repo_path>   (placeholder, see below)
+  seed    --image <task_cleanroom_img> --into <gitea_repo_path>   (reference binary is separated from the repository)
 
 This tool only does pure git/tar/docker moving, with no network side effects (unless explicit --from-gitea
 clone or seed exporting from image).
@@ -32,6 +32,7 @@ import subprocess
 import sys
 import tempfile
 import urllib.parse
+import uuid
 from pathlib import Path
 
 
@@ -70,7 +71,7 @@ DOCKER = os.environ.get("PBENCH_DOCKER", "docker").split()
 BANNED_ROOT_ENTRIES = ("executable",)
 
 # Last-resort build script, staged when a team wrote source but never produced
-# a compile.sh. Same script the DeLM path stages into /work.
+# a compile.sh.
 #
 # The alternative — refusing to export — is strictly worse: a team that wrote
 # sources but no root compile.sh would make the exporter abort and the caller
@@ -201,53 +202,10 @@ def export_from_dir(repo_dir: Path, task: str, out_dir: Path) -> Path:
     return dest
 
 
-def export_from_workdir(work_dir: Path, task: str, out_dir: Path) -> Path:
-    """tar the contents of a plain (non-git) directory as the submission.
-
-    Used by the DeLM baseline path where agents write source files directly to
-    a shared /work bind-mount instead of committing to a Gitea repo. Excludes
-    common junk (.git, target/, __pycache__, node_modules, *.o, *.pyc) and
-    requires compile.sh at the root.
-    """
-    work_dir = work_dir.resolve()
-    if not work_dir.exists():
-        sys.exit(f"[export] {work_dir} does not exist")
-    # No hard exit on a missing compile.sh: _ensure_compile_sh() below stages a
-    # default so the team's sources still get a build attempt. Bailing here
-    # would ship an empty tarball and destroy the evidence — the same failure
-    # already fixed on the gitea path.
-    if not (work_dir / "compile.sh").exists():
-        print(f"[export] WARNING: {work_dir}/compile.sh missing; a default will be staged")
-
-    dest_dir = out_dir / task
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    dest = dest_dir / "submission.tar.gz"
-
-    # Use tar with --transform to flatten "./x" → "x" and exclude build junk.
-    _run(
-        [
-            "tar", "-C", str(work_dir), "--exclude=.git", "--exclude=target",
-            "--exclude=__pycache__", "--exclude=node_modules",
-            "--exclude=*.o", "--exclude=*.pyc",
-            "-czf", str(dest), ".",
-        ]
-    )
-    _strip_banned(dest)
-    _ensure_compile_sh(dest)
-
-    listing = subprocess.run(
-        ["tar", "-tzf", str(dest)], capture_output=True, text=True, check=True
-    ).stdout.splitlines()
-    roots = {p.lstrip("./").split("/", 1)[0] for p in listing if p.strip()}
-    print(f"[export] wrote {dest} ({dest.stat().st_size} bytes); "
-          f"root entries: {sorted(roots)[:12]}")
-    return dest
-
-
 def export_from_gitea(url: str, task: str, out_dir: Path, ref: str = "HEAD") -> Path:
     """Clone a Gitea repo (shallow) then export its HEAD as a submission.
 
-    Used by `make pbench` after the agent team finishes: the team's repo lives
+    Used by the runner after the agent team finishes: the team's repo lives
     in Gitea, we clone it to a temp dir and archive it. The clone URL may embed
     credentials (http://user:token@host/...); we don't log it.
 
@@ -286,8 +244,9 @@ def seed_from_image(image: str, into_dir: Path, bin_out: Path | None = None) -> 
     """
     into_dir.mkdir(parents=True, exist_ok=True)
     # Create a throwaway container and tar /workspace out of it.
+    container_name = f"omcgitea-pbench-seed-{uuid.uuid4().hex}"
     cid = subprocess.run(
-        [*DOCKER, "create", image], capture_output=True, text=True, check=True
+        [*DOCKER, "create", "--name", container_name, image], capture_output=True, text=True, check=True
     ).stdout.strip()
     try:
         tar_proc = subprocess.Popen(
@@ -298,7 +257,7 @@ def seed_from_image(image: str, into_dir: Path, bin_out: Path | None = None) -> 
         if tar_proc.wait() != 0:
             sys.exit(f"[seed] docker cp from {image} failed")
     finally:
-        subprocess.run([*DOCKER, "rm", "-f", cid], capture_output=True)
+        subprocess.run([*DOCKER, "rm", "-f", container_name], capture_output=True)
 
     # --- anti-cheat: pull the reference binary OUT of the repo tree ---------
     exe = into_dir / "executable"
@@ -333,14 +292,12 @@ def main(argv=None):
     src = ex.add_mutually_exclusive_group(required=True)
     src.add_argument("--from-dir", type=Path, help="local git working tree")
     src.add_argument("--from-gitea", help="Gitea clone URL (may embed creds)")
-    src.add_argument("--from-workdir", type=Path,
-                     help="plain (non-git) directory; tar it directly (DeLM baseline path)")
     ex.add_argument("--task", required=True, help="ProgramBench task/instance id")
     ex.add_argument("--out-dir", type=Path, required=True, help="run output dir")
     ex.add_argument("--ref", default="HEAD", help="branch/ref to export (gitea)")
 
     sd = sub.add_parser("seed", help="cleanroom image /workspace → local dir")
-    sd.add_argument("--image", required=True, help="task_cleanroom docker image")
+    sd.add_argument("--image", required=True, help="task_cleanroom_v6 Docker image or resolved image ID")
     sd.add_argument("--into", type=Path, required=True, help="dir to populate")
     sd.add_argument("--bin-out", type=Path, default=None,
                     help="where to move the reference binary (default: <into>/../bin/executable)")
@@ -349,8 +306,6 @@ def main(argv=None):
     if args.cmd == "export":
         if args.from_dir:
             export_from_dir(args.from_dir, args.task, args.out_dir)
-        elif args.from_workdir:
-            export_from_workdir(args.from_workdir, args.task, args.out_dir)
         else:
             export_from_gitea(args.from_gitea, args.task, args.out_dir, args.ref)
     elif args.cmd == "seed":

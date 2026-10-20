@@ -27,8 +27,6 @@ from __future__ import annotations
 
 from typing import Any, Callable, List, Tuple
 
-__all__ = ["QueryError", "parse", "count_terms", "compile_sql", "parse_type_list"]
-
 _SPECIAL = "|&()"
 
 
@@ -140,16 +138,15 @@ def count_terms(node: Any) -> int:
     return sum(count_terms(c) for c in node[1])
 
 
-def compile_sql(node: Any, lit: Callable[[str], str],
-                col: str = "content") -> Tuple[str, List[Any]]:
+def compile_sql(node: Any, lit: Callable[[str], str]) -> Tuple[str, List[Any]]:
     """-> (sql_fragment, params). `lit` wraps a term as a LIKE pattern."""
     if node[0] == "term":
-        return f"{col} LIKE %s ESCAPE '\\\\'", [lit(node[1])]
+        return "content LIKE %s ESCAPE '\\\\'", [lit(node[1])]
     joiner = " AND " if node[0] == "and" else " OR "
     frags: List[str] = []
     params: List[Any] = []
     for child in node[1]:
-        f, p = compile_sql(child, lit, col)
+        f, p = compile_sql(child, lit)
         frags.append(f)
         params.extend(p)
     return "(" + joiner.join(frags) + ")", params

@@ -1,5 +1,5 @@
 /**
- * Gitea form-login UpstreamAuth implementation.
+ * Per-agent Gitea form-session authentication.
  *
  * Gitea's `/user/events` SSE endpoint rejects PAT (`Authorization: token
  * <pat>`) with `event: close, data: unauthorized` (Gitea 1.22.6). The
@@ -22,69 +22,33 @@
  * but we treat it as 6h to be safe — re-login is cheap (2 round trips)
  * and we'd rather refresh too eagerly than serve stale cookies.
  *
- * IAM future: when Gitea is fronted by OIDC, /user/login is usually
- * disabled or 302's to the IdP. We'll add OidcAuth as a sibling impl;
- * the SSE driver and fetcher stay untouched.
  */
-import type { FetchLike } from "./listeners/gitea/fetcher.ts";
-import type { UpstreamAuth, UpstreamCredentials } from "./upstream_auth.ts";
+interface GiteaCredentials {
+  headers: Record<string, string>;
+  expiresAt: number;
+}
 
 export interface GiteaFormAuthOptions {
   baseUrl: string;
   username: string;
   password: string;
-  fetch?: FormFetchLike;
   /** Optional Host header (we go through nginx-edge in some setups). */
   hostHeader?: string;
-  /** Cached cookie validity in ms. Default 6h. */
-  sessionTtlMs?: number;
-  now?: () => number;
-  /** Lock the auth out after this many consecutive login failures.
-   *  Default 5. Prevents reconnect storms when creds are wrong / IAM is
-   *  down. */
-  maxConsecutiveFailures?: number;
-  /** Duration of the lockout window once the breaker trips. Default 60s. */
-  lockMs?: number;
 }
 
 /**
- * Thrown by ensureCredentials() while the breaker is open. SSE driver
- * (and any other consumer) should treat this as "back off; do not
- * reconnect immediately" rather than a normal connect failure.
+ * Thrown while the login circuit breaker is open; the SSE reconnect loop backs off.
  */
-export class AuthLockedError extends Error {
+class AuthLockedError extends Error {
   constructor(
-    public readonly remainingMs: number,
-    public readonly lastError: string,
+    remainingMs: number,
+    lastError: string,
   ) {
     super(
       `auth locked for ${Math.ceil(remainingMs / 1000)}s (last error: ${lastError})`,
     );
     this.name = "AuthLockedError";
   }
-}
-
-/**
- * Form-login needs response headers (multiple Set-Cookie lines) and a
- * 303 status without auto-following — neither is exposed by the
- * pull-fetcher's FetchLike. We define a richer fetch shim here.
- */
-export interface FormFetchLike {
-  (
-    input: string,
-    init?: {
-      method?: string;
-      headers?: Record<string, string>;
-      body?: string;
-      redirect?: "manual" | "follow";
-      signal?: AbortSignal;
-    },
-  ): Promise<{
-    ok: boolean;
-    status: number;
-    headers: { get(name: string): string | null };
-    text(): Promise<string>;
-  }>;
 }
 
 const SESSION_COOKIE = "i_like_gitea";
@@ -98,55 +62,29 @@ const DEFAULT_MAX_FAILURES = 5;
 // Gitea wake channel is hard down.
 const DEFAULT_LOCK_MS = 60 * 1000;
 
-interface ParsedCookies {
-  /** name → value */
-  values: Record<string, string>;
-}
-
-export class GiteaFormAuth implements UpstreamAuth {
-  private cached: UpstreamCredentials | null = null;
-  private inflight: Promise<UpstreamCredentials> | null = null;
-  private readonly fetch: FormFetchLike;
-  private readonly now: () => number;
+export class GiteaFormAuth {
+  private cached: GiteaCredentials | null = null;
+  private inflight: Promise<GiteaCredentials> | null = null;
   // Circuit breaker state. consecutiveFailures resets to 0 on any
   // successful login. lockedUntil is the timestamp until which we
   // refuse to even try (and immediately throw AuthLockedError).
   private _consecutiveFailures = 0;
-  private _totalFailures = 0;
   private lockedUntil = 0;
   private lastError = "";
-  private readonly maxFailures: number;
-  private readonly lockMs: number;
 
-  constructor(private readonly opts: GiteaFormAuthOptions) {
-    this.fetch =
-      opts.fetch ?? (globalThis.fetch as unknown as FormFetchLike);
-    this.now = opts.now ?? Date.now;
-    this.maxFailures = opts.maxConsecutiveFailures ?? DEFAULT_MAX_FAILURES;
-    this.lockMs = opts.lockMs ?? DEFAULT_LOCK_MS;
-  }
-
-  /** Number of consecutive login failures since the last success. */
-  get consecutiveFailures(): number {
-    return this._consecutiveFailures;
-  }
-
-  /** Cumulative login failures across the lifetime of this auth. */
-  get totalLoginFailures(): number {
-    return this._totalFailures;
-  }
+  constructor(private readonly opts: GiteaFormAuthOptions) {}
 
   /** True iff the breaker is currently open. */
   get locked(): boolean {
-    return this.lockedUntil > this.now();
+    return this.lockedUntil > Date.now();
   }
 
-  async ensureCredentials(): Promise<UpstreamCredentials> {
-    if (this.cached && this.cached.expiresAt > this.now()) return this.cached;
+  async ensureCredentials(): Promise<GiteaCredentials> {
+    if (this.cached && this.cached.expiresAt > Date.now()) return this.cached;
     // Breaker open? short-circuit without touching Gitea.
     if (this.locked) {
       throw new AuthLockedError(
-        this.lockedUntil - this.now(),
+        this.lockedUntil - Date.now(),
         this.lastError,
       );
     }
@@ -158,11 +96,10 @@ export class GiteaFormAuth implements UpstreamAuth {
         return c;
       })
       .catch((e) => {
-        this._totalFailures++;
         this._consecutiveFailures++;
         this.lastError = e instanceof Error ? e.message : String(e);
-        if (this._consecutiveFailures >= this.maxFailures) {
-          this.lockedUntil = this.now() + this.lockMs;
+        if (this._consecutiveFailures >= DEFAULT_MAX_FAILURES) {
+          this.lockedUntil = Date.now() + DEFAULT_LOCK_MS;
         }
         throw e;
       })
@@ -176,19 +113,13 @@ export class GiteaFormAuth implements UpstreamAuth {
     this.cached = null;
   }
 
-  /** Public so that adapters which translate UpstreamAuth → an external
-   *  fetcher can present credentials as a single Cookie header. */
-  static cookieHeader(creds: UpstreamCredentials): string | undefined {
-    return creds.headers.Cookie;
-  }
-
-  private async login(): Promise<UpstreamCredentials> {
+  private async login(): Promise<GiteaCredentials> {
     const base = this.opts.baseUrl.replace(/\/$/, "");
     const baseHeaders: Record<string, string> = {};
     if (this.opts.hostHeader) baseHeaders.Host = this.opts.hostHeader;
 
     // Step 1: GET /user/login → cookies (i_like_gitea + _csrf).
-    const r1 = await this.fetch(`${base}/user/login`, {
+    const r1 = await fetch(`${base}/user/login`, {
       method: "GET",
       headers: { ...baseHeaders, Accept: "text/html" },
     });
@@ -199,8 +130,8 @@ export class GiteaFormAuth implements UpstreamAuth {
       );
     }
     const c1 = parseSetCookies(r1.headers);
-    const sess1 = c1.values[SESSION_COOKIE];
-    const csrf = c1.values[CSRF_COOKIE];
+    const sess1 = c1[SESSION_COOKIE];
+    const csrf = c1[CSRF_COOKIE];
     if (!sess1 || !csrf) {
       throw new Error(
         `gitea login GET missing cookies (i_like_gitea=${!!sess1} _csrf=${!!csrf})`,
@@ -212,7 +143,7 @@ export class GiteaFormAuth implements UpstreamAuth {
     form.set("user_name", this.opts.username);
     form.set("password", this.opts.password);
     form.set("_csrf", csrf);
-    const r2 = await this.fetch(`${base}/user/login`, {
+    const r2 = await fetch(`${base}/user/login`, {
       method: "POST",
       redirect: "manual",
       headers: {
@@ -231,46 +162,24 @@ export class GiteaFormAuth implements UpstreamAuth {
       );
     }
     const c2 = parseSetCookies(r2.headers);
-    const sess2 = c2.values[SESSION_COOKIE];
+    const sess2 = c2[SESSION_COOKIE];
     if (!sess2) {
       throw new Error("gitea login POST missing i_like_gitea cookie");
     }
 
-    const ttl = this.opts.sessionTtlMs ?? DEFAULT_TTL_MS;
-    const creds: UpstreamCredentials = {
+    const creds: GiteaCredentials = {
       headers: { Cookie: `${SESSION_COOKIE}=${sess2}` },
-      expiresAt: this.now() + ttl,
+      expiresAt: Date.now() + DEFAULT_TTL_MS,
     };
     this.cached = creds;
     return creds;
   }
 }
 
-/**
- * Parse Set-Cookie headers from a response. Standard fetch
- * `headers.get('set-cookie')` only returns one value (joined or first),
- * but we need every cookie. WHATWG fetch exposes `headers.getSetCookie()`
- * (Node 18.14+); we feature-detect and fall back to a comma-split for
- * test stubs.
- *
- * Comma-splitting Set-Cookie is technically lossy because Expires=
- * contains a comma (`Wdy, DD Mon YYYY ...`), but Gitea's cookies don't
- * use Expires (they use Max-Age + HttpOnly + SameSite), so this is
- * safe for our specific upstream.
- */
-function parseSetCookies(headers: {
-  get(name: string): string | null;
-  getSetCookie?(): string[];
-}): ParsedCookies {
-  const lines: string[] = [];
-  if (typeof headers.getSetCookie === "function") {
-    lines.push(...headers.getSetCookie());
-  } else {
-    const raw = headers.get("set-cookie");
-    if (raw) lines.push(...raw.split(/, (?=[^ ;=]+=)/));
-  }
+/** Parse the native Node 20+ fetch response's separate Set-Cookie lines. */
+function parseSetCookies(headers: Headers): Record<string, string> {
   const values: Record<string, string> = {};
-  for (const line of lines) {
+  for (const line of headers.getSetCookie()) {
     const [pair] = line.split(";");
     if (!pair) continue;
     const eq = pair.indexOf("=");
@@ -279,5 +188,5 @@ function parseSetCookies(headers: {
     const value = pair.slice(eq + 1).trim();
     values[name] = value;
   }
-  return { values };
+  return values;
 }

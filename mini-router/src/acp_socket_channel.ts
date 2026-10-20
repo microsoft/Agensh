@@ -1,9 +1,9 @@
 /**
- * ACPSocketChannel — connects to a unix socket served by socat in the
+ * ACPSocketChannel — connects to a unix socket served by acp-bridge.py in the
  * agent container, from the mini-router sidecar.
  *
- * Each socket connection = a fresh `acp_adapter.entry` Python subprocess
- * (socat fork mode). We keep ONE long-lived connection per channel for
+ * Each socket connection spawns an unmodified Copilot ACP process. We keep
+ * one long-lived connection per channel for
  * cache reuse (session_id stable across prompts).
  *
  * Reconnect: prompt() detects dead connection → reconnects with backoff
@@ -12,9 +12,8 @@
  */
 import * as acp from "@agentclientprotocol/sdk";
 import { createConnection, type Socket } from "node:net";
-import { Duplex } from "node:stream";
 import type { UEM } from "./uem.ts";
-import { TurnObserver, type TurnSummary } from "./turn_observer.ts";
+import { errorMessage, sleep } from "./runtime.ts";
 
 // Exhausting this ladder throws `acp connect exhausted`, which markFailed()s
 // every row in the batch at once -- burning one of MAX_ATTEMPTS=5 for up to 32
@@ -25,19 +24,11 @@ export interface ACPSocketChannelOptions {
   socketPath: string;
   cwd: string;
   /** Optional: restore a sessionId across reconnects (cache continuity). */
-  sessionStore?: {
+  sessionStore: {
     get(): Promise<string | null>;
     set(sessionId: string): Promise<void>;
   };
   stuckMs?: number;
-  /** Step-loop mode: open a NEW ACP session for every prompt instead of
-   *  reusing one. Gives each step a clean slate like DeLM's stateless
-   *  per-step LLM call. Costs prompt-cache reuse. */
-  freshSessionPerPrompt?: boolean;
-  now?: () => number;
-  /** Render single UEM (defaults to the UEM block format in uem_render.ts). */
-  render?: (uem: UEM) => string;
-  renderBatch?: (uems: UEM[]) => string;
   /** Logger hook for connection drama (optional). */
   onLog?: (level: "info" | "warn" | "error", msg: string, err?: unknown) => void;
 }
@@ -47,7 +38,6 @@ export class ACPSocketChannel {
   private connection: acp.ClientSideConnection | null = null;
   private sessionId: string | null = null;
   private lastUpdateAt = 0;
-  private connectAttempts = 0;
   private connecting: Promise<void> | null = null;
   /** Set when the previous prompt was force-closed by stuck-timeout.
    *  Prepended to the next prompt text so the agent learns the prior
@@ -59,29 +49,6 @@ export class ACPSocketChannel {
    * null → prompt text is unchanged from the pre-board behavior.
    */
   private promptPrefix: string | null = null;
-  /**
-   * Set when the agent compacted its context during the turn in flight.
-   *
-   * claude-agent-acp announces it (dist/acp-agent.js:494) as a usage_update with
-   * `used: 0` — a normal update carries real usage, so zero is unambiguous — followed by an
-   * agent_message_chunk saying "Compacting completed.". We key on `used: 0` because the prose
-   * is upstream's and can change; the field is part of the protocol payload.
-   *
-   * Compaction folds the transcript into a summary MID-turn, which drops the shared-context
-   * board and whatever the batch that opened the turn said. The dispatcher reads this flag
-   * after the turn and puts both back. Take-once, so one compaction cannot re-fire forever.
-   */
-  private compacted = false;
-
-  /** True at most once per compaction; reading it clears it. */
-  takeCompacted(): boolean {
-    const was = this.compacted;
-    this.compacted = false;
-    return was;
-  }
-  /** Collects session/update payloads for the turn currently in flight.
-   *  Non-null only while a prompt is running in step-loop mode. */
-  private observer: TurnObserver | null = null;
   private readonly log: (lvl: "info" | "warn" | "error", msg: string, err?: unknown) => void;
 
   constructor(private readonly opts: ACPSocketChannelOptions) {
@@ -91,17 +58,12 @@ export class ACPSocketChannel {
     });
   }
 
-  async prompt(uem: UEM | UEM[] | unknown[]): Promise<{ stopReason: string }> {
+  async prompt(uem: unknown[]): Promise<{ stopReason: string }> {
     if (!this.connection || !this.sessionId) {
       await this.connectWithBackoff();
     }
-    const events = (Array.isArray(uem) ? uem : [uem]) as UEM[];
-    const renderBatch = this.opts.renderBatch ?? defaultRenderBatch;
-    const renderOne = this.opts.render;
-    let text =
-      renderOne && events.length === 1
-        ? renderOne(events[0]!)
-        : renderBatch(events);
+    const events = uem as UEM[];
+    let text = defaultRenderBatch(events);
 
     // If a previous turn was force-closed due to ACP silence,
     // prepend a system notice so the agent learns to use background
@@ -138,35 +100,10 @@ export class ACPSocketChannel {
     return this.sendText(text);
   }
 
-  /**
-   * Send one step's prompt against a FRESH session and return both the stop
-   * reason and a reconstruction of what the turn did. This is the step-loop
-   * primitive (variant 2): the caller supplies the entire prompt, so nothing
-   * carries over implicitly between steps.
-   */
-  async promptStep(text: string): Promise<{ stopReason: string; summary: TurnSummary }> {
-    if (this.opts.freshSessionPerPrompt) {
-      // Drop the session so connectWithBackoff opens a new one. The socket
-      // itself is reused; only the ACP session is fresh.
-      this.sessionId = null;
-    }
-    if (!this.connection || !this.sessionId) {
-      await this.connectWithBackoff();
-    }
-    const observer = new TurnObserver();
-    this.observer = observer;
-    try {
-      const res = await this.sendText(text);
-      return { stopReason: res.stopReason, summary: observer.summary() };
-    } finally {
-      this.observer = null;
-    }
-  }
-
   /** Shared prompt-send path: watchdog + error handling. */
   private async sendText(text: string): Promise<{ stopReason: string }> {
     try {
-      this.lastUpdateAt = (this.opts.now ?? Date.now)();
+      this.lastUpdateAt = Date.now();
       // Race conn.prompt against a silence-watchdog. The watchdog
       // checks `lastUpdateAt` (updated on every ACP RX in connectOnce); if
       // no RX for stuckMs, force-close the connection so prompt rejects.
@@ -205,7 +142,7 @@ export class ACPSocketChannel {
     let timer: NodeJS.Timeout | null = null;
     const promise = new Promise<never>((_, reject) => {
       const check = () => {
-        const now = (this.opts.now ?? Date.now)();
+        const now = Date.now();
         const silentFor = now - this.lastUpdateAt;
         if (silentFor >= stuckMs) {
           this.log(
@@ -253,17 +190,15 @@ export class ACPSocketChannel {
       for (let i = 0; i < RECONNECT_BACKOFF_MS.length; i++) {
         try {
           await this.connectOnce();
-          this.connectAttempts = 0;
           return;
         } catch (e) {
           lastErr = e;
-          this.connectAttempts++;
           const wait = RECONNECT_BACKOFF_MS[i]!;
           this.log("warn", `connect attempt ${i + 1} failed; sleeping ${wait}ms`, e);
           await sleep(wait);
         }
       }
-      throw new Error(`acp connect exhausted: ${errMsg(lastErr)}`);
+      throw new Error(`acp connect exhausted: ${errorMessage(lastErr)}`);
     })();
     try {
       await this.connecting;
@@ -346,18 +281,8 @@ export class ACPSocketChannel {
     const stream = acp.ndJsonStream(writable, readable);
 
     const conn = new acp.ClientSideConnection(
-      () => clientImpl((params?: unknown) => {
-        this.lastUpdateAt = (this.opts.now ?? Date.now)();
-        // Feed the in-flight turn observer, when one is collecting.
-        this.observer?.observe(params);
-        // Record a compaction. Only RECORD it: prompting from here would issue a second
-        // prompt against a session that already has one in flight, which dispatcher.ts
-        // documents as corrupting both turns. The dispatcher acts on it under its mutex.
-        const u = (params as { update?: { sessionUpdate?: string; used?: number } } | undefined)?.update;
-        if (u?.sessionUpdate === "usage_update" && u.used === 0) {
-          this.compacted = true;
-          this.log("info", "agent compacted its context; board + pending UEMs will be re-injected");
-        }
+      () => clientImpl(() => {
+        this.lastUpdateAt = Date.now();
       }),
       stream,
     );
@@ -389,9 +314,9 @@ export class ACPSocketChannel {
       );
       this.log("info", `connectOnce: initialize OK, opening session`);
 
-      const restoreId = (await this.opts.sessionStore?.get()) ?? null;
+      const restoreId = await this.opts.sessionStore.get();
       let sessionId: string | null = null;
-      if (restoreId && conn.loadSession) {
+      if (restoreId) {
         try {
           await conn.loadSession({
             cwd: this.opts.cwd,
@@ -411,7 +336,7 @@ export class ACPSocketChannel {
         const newId = ns.sessionId;
         if (!newId) throw new Error("acp newSession returned no sessionId");
         sessionId = newId;
-        await this.opts.sessionStore?.set(newId);
+        await this.opts.sessionStore.set(newId);
       }
       const finalId = sessionId!;
       this.sessionId = finalId;
@@ -423,7 +348,7 @@ export class ACPSocketChannel {
   }
 }
 
-function clientImpl(onSessionUpdate: (params?: unknown) => void): acp.Client {
+function clientImpl(onSessionUpdate: () => void): acp.Client {
   return {
     async requestPermission(params: acp.RequestPermissionRequest) {
       return {
@@ -436,32 +361,13 @@ function clientImpl(onSessionUpdate: (params?: unknown) => void): acp.Client {
         },
       };
     },
-    async sessionUpdate(params: unknown) {
-      // Payload forwarded so step-loop mode can rebuild an observation from
-      // the turn. Previously discarded, which is why the router could not
-      // tell what an agent had done.
-      onSessionUpdate(params);
+    async sessionUpdate(_params: unknown) {
+      onSessionUpdate();
     },
-    async writeTextFile(_params: unknown) {
-      throw new Error("sidecar does not provide writeTextFile");
-    },
-    async readTextFile(_params: unknown): Promise<{ content: string }> {
-      throw new Error("sidecar does not provide readTextFile");
-    },
-  } as unknown as acp.Client;
+  };
 }
 
-// UEM rendering lives in uem_render.ts so it can be unit-tested without the
-// ACP SDK, and so the run-clock rule sits next to the only code that formats
-// a timestamp for an agent. Re-exported here because
-// callers have always imported it from this module.
-import { defaultRenderUEM, defaultRenderBatch, runAge } from "./uem_render.ts";
-export { defaultRenderUEM, defaultRenderBatch, runAge };
-
-function errMsg(e: unknown): string {
-  if (e instanceof Error) return e.message;
-  try { return JSON.stringify(e); } catch { return String(e); }
-}
+import { defaultRenderBatch } from "./uem_render.ts";
 
 /** Reject if `p` has not settled within `ms`, so a dead peer cannot stall a caller forever. */
 function withTimeout<T>(p: Promise<T>, ms: number, msg: string): Promise<T> {
@@ -472,8 +378,4 @@ function withTimeout<T>(p: Promise<T>, ms: number, msg: string): Promise<T> {
       (e) => { clearTimeout(timer); reject(e); },
     );
   });
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((r) => setTimeout(r, ms));
 }

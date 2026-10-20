@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Generate the ProgramBench fleet base compose (infra + one agent and one
-mini-router sidecar per worker) for the 1-team shape the launchers run:
+mini-router sidecar per worker) for the single-node launcher's one-team shape:
 PBENCH_WORKERS_PER_TEAM peer coders named ${ORG_NAME}-worker<i>.
 There is no director, lead, reviewer or auditor.
 
@@ -16,17 +16,12 @@ board-service are emitted here; docker-compose.pbench.yml adds only the
 egress lock. There is no per-N overlay to keep in step with the worker count.
 """
 import os
-import sys
 
 # ---- TOPOLOGY (env-driven) ----------------------------------------------------
 #   PBENCH_WORKERS_PER_TEAM number of workers (default 16)
 WORKERS_PER_TEAM = int(os.environ.get("PBENCH_WORKERS_PER_TEAM") or 16)
 
-def agent_names():
-    """Return list of (short_name, role) for the configured topology."""
-    return [(f"worker{w}", "coder") for w in range(1, WORKERS_PER_TEAM + 1)]
-
-ALL_AGENTS = agent_names()
+ALL_AGENTS = [f"worker{w}" for w in range(1, WORKERS_PER_TEAM + 1)]
 
 # ---- TEMPLATE FRAGMENTS ----
 HEADER = '''# omcgitea — ProgramBench fleet base (1 instance/profile).
@@ -55,11 +50,11 @@ HEADER = '''# omcgitea — ProgramBench fleet base (1 instance/profile).
 name: omcgitea
 
 # ---------------------------------------------------------------------------
-# Anchors — shared by every worker agent and its sidecar. Claude remains the default;
-# AGENT_KIND=copilot and its five explicit capability/profile values are
-# opt-in deployment inputs read from .env.<profile>.
+# Shared worker and sidecar settings. Experiment profiles use native Copilot ACP.
 # ---------------------------------------------------------------------------
 x-agent: &agent-base
+  init: true
+  stop_grace_period: 10m
   # Everything ProgramBench runs lives under one ceiling; see docker/pbench.slice.
   # A cgroup v2 child cannot exceed its parent, so an agent cannot raise this.
   cgroup_parent: pbench.slice
@@ -79,7 +74,7 @@ x-agent: &agent-base
 x-agent-env: &agent-env-base
   GITEA_HOST: "http://gitea:3000"
   ANTHROPIC_BASE_URL: "${ANTHROPIC_BASE_URL:?ANTHROPIC_BASE_URL required}"
-  ANTHROPIC_MODEL: "${ANTHROPIC_MODEL:-claude-opus-4.8[1m]}"
+  ANTHROPIC_MODEL: "${ANTHROPIC_MODEL:-gpt-5.6-sol}"
   ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:?ANTHROPIC_API_KEY required}"
   # Fan-out ceiling for tests/run.sh. Agents commonly write JOBS=${JOBS:-$(nproc)}, and
   # nproc reports the HOST's core count (256) from inside an unlimited container -- and
@@ -89,7 +84,7 @@ x-agent-env: &agent-env-base
   # rewriting run.sh. 8 is where the suite saturates (-P 16 is barely faster than -P 8)
   # -- the work is spawn-bound, not CPU-bound.
   JOBS: "${JOBS:-8}"
-  AGENT_KIND: "${AGENT_KIND:-claude}"
+  AGENT_KIND: "${AGENT_KIND:-copilot}"
   COPILOT_PROVIDER_TYPE: "${COPILOT_PROVIDER_TYPE:-openai}"
   # Copilot CLI's transport selector and effort knob. Both are pass-through with
   # NO default, so a profile that sets neither keeps its exact chat behaviour.
@@ -103,18 +98,6 @@ x-agent-env: &agent-env-base
   COPILOT_PROVIDER_WIRE_API: "${COPILOT_PROVIDER_WIRE_API:-}"
   COPILOT_AGENT_REASONING_EFFORT: "${COPILOT_AGENT_REASONING_EFFORT:-}"
   COPILOT_PROVIDER_MAX_PROMPT_TOKENS: "${COPILOT_PROVIDER_MAX_PROMPT_TOKENS:-}"
-  # Where Copilot's SQLite session store goes. Empty default: $HOME/.copilot on
-  # the host bind mount, for every compose profile. The k8s profiles
-  # set it to local disk because $HOME there is the Azure Files share, which
-  # cannot serve the fcntl byte-range locks SQLite needs -- every turn dies
-  # `database is locked` before a model call, at 2/2 Running.
-  #
-  # Emitted HERE for the same reason as the two keys above: the profile setting
-  # it and the entrypoint honouring it are both useless if nothing forwards it.
-  COPILOT_STATE_DIR: "${COPILOT_STATE_DIR:-}"
-  ENABLE_TOOL_SEARCH: "${ENABLE_TOOL_SEARCH:-true}"
-  CLAUDE_CODE_ATTRIBUTION_HEADER: "0"
-  ENABLE_PROMPT_CACHING_1H: "1"
   GITEA_ORG: "${ORG_NAME:?ORG_NAME required}"
   MATTERMOST_HOST: "http://mattermost:8065"
   # pbench bin anti-reverse: acp-bridge.py spawns the ACP child as uid 10000,
@@ -124,25 +107,9 @@ x-agent-env: &agent-env-base
   ACP_CHILD_UID: "10000"
   ACP_CHILD_GID: "10000"
   PBENCH_WORKERS: "${PBENCH_WORKERS_PER_TEAM}"
-  PBENCH_BRIEF_ENABLE: "1"
   # Shared board: gives mcp.json.tmpl's `board` MCP server entry a live URL.
   BOARD_SERVICE_URL: "http://board-service:8660"
-  BOARD_QUEUE_ID: "pbench-top"
   BOARD_IDS: "pbench-top"
-  # AGENT_KIND=sim knobs. Empty on every other profile, and the sim treats
-  # empty as absent -- a bare "${VAR:-}" reaching
-  # Number() as "" would otherwise become 0 and give every agent a zero turn
-  # budget, i.e. a run where nothing happens and nothing errors.
-  PBENCH_SIM_TURNS: "${PBENCH_SIM_TURNS:-}"
-  PBENCH_SIM_THINK_MS: "${PBENCH_SIM_THINK_MS:-}"
-  PBENCH_SIM_SEED: "${PBENCH_SIM_SEED:-}"
-  # Per-agent request rate to each service, in requests per minute. Unset means
-  # unpaced. Set for scale tests, where the
-  # quantity under study is the AGGREGATE a single service sees: 1000 agents at
-  # PBENCH_SIM_GITEA_RPM=1 is ~17 req/s of mostly-writes against gitea.
-  PBENCH_SIM_GITEA_RPM: "${PBENCH_SIM_GITEA_RPM:-}"
-  PBENCH_SIM_MM_RPM: "${PBENCH_SIM_MM_RPM:-}"
-  PBENCH_SIM_BOARD_RPM: "${PBENCH_SIM_BOARD_RPM:-}"
 
 x-mini-router: &mini-router-base
   # Everything ProgramBench runs lives under one ceiling; see docker/pbench.slice.
@@ -161,8 +128,7 @@ x-mini-router-env: &mini-router-env-base
   SECRET_SERVICE_URL: "http://secret-service:8650"
   SECRET_SERVICE_INTERNAL_AUTH: "${SECRET_SERVICE_INTERNAL_AUTH}"
   ACP_SOCKET_PATH: "/var/run/acp/agent.sock"
-  ACP_SESSION_NAMESPACE: "${AGENT_KIND:-claude}"
-  METRICS_PORT: "8645"
+  MINI_ROUTER_PORT: "8645"
   MATTERMOST_HOST: "http://mattermost:8065"
   MINI_ROUTER_STUCK_MS: "${MINI_ROUTER_STUCK_MS:-1200000}"
   # Shared run-start anchor (epoch ms), published by the runner. Every event the
@@ -171,19 +137,10 @@ x-mini-router-env: &mini-router-env-base
   # sidecar's own process start, which drifts across the bring-up stagger and
   # across restarts.
   PBENCH_RUN_START_MS: "${PBENCH_RUN_START_MS:-}"
-  # DeLM shared context: forced read (board spliced into every prompt) +
+  # Shared context: forced read (board spliced into every prompt) +
   # forced write (nudge on a turn that published nothing).
   BOARD_SERVICE_URL: "http://board-service:8660"
   BOARD_IDS: "pbench-top"
-  BOARD_WINDOW_TOKENS: "${BOARD_WINDOW_TOKENS:-}"
-  BOARD_MODE: "${BOARD_MODE:-batch}"
-  BOARD_RENDER_MODE: "${BOARD_RENDER_MODE:-}"
-  BOARD_ROLE: "${BOARD_ROLE:-}"
-  STEP_LOOP_NO_PROGRESS_LIMIT: "${STEP_LOOP_NO_PROGRESS_LIMIT:-}"
-  STEP_LOOP_STRATEGY_PRIOR: "${STEP_LOOP_STRATEGY_PRIOR:-}"
-  STEP_LOOP_MAX_STEPS: "${STEP_LOOP_MAX_STEPS:-}"
-  STEP_LOOP_HOURS: "${STEP_LOOP_HOURS:-}"
-  STEP_LOOP_TASK: "${STEP_LOOP_TASK:-}"
 '''
 
 INFRA = '''
@@ -192,9 +149,7 @@ services:
     image: docker.gitea.com/gitea:1.22.6
     restart: unless-stopped
     cgroup_parent: pbench.slice
-    # Harmless on the sqlite default (mysql is up for the router either way) and
-    # required once GITEA_DB_TYPE=mysql: gitea exits rather than waits when its
-    # database refuses the first connection.
+    # Keep the experiment's startup order; routers and board share MySQL.
     depends_on:
       mysql: { condition: service_healthy }
     # Same 1024-fd default as mattermost, same failure shape: at 256 agents the
@@ -215,20 +170,8 @@ services:
       GITEA__service__AUTO_WATCH_NEW_REPOS: "false"
       GITEA__actions__ENABLED: "true"
       GITEA__actions__DEFAULT_ACTIONS_URL: "github"
-      # sqlite3 is a SINGLE-WRITER database and gitea is the write-heavy service
-      # here: every issue, comment, PR, review and merge is a write. At 1 request
-      # per minute per agent a 1000-agent stack is ~17 write-ish req/s against
-      # one lock, so the large topologies set GITEA_DB_TYPE=mysql and point at
-      # the mysql this stack already runs. Small stacks keep the sqlite3
-      # default so their results stay comparable with each other.
-      GITEA__database__DB_TYPE: "${GITEA_DB_TYPE:-sqlite3}"
-      GITEA__database__HOST: "${GITEA_DB_HOST:-mysql:3306}"
-      GITEA__database__NAME: "${GITEA_DB_NAME:-gitea}"
-      GITEA__database__USER: "${GITEA_DB_USER:-omcgitea}"
-      GITEA__database__PASSWD: "${MYSQL_PASSWORD}"
-      # Gitea's own pool. The default (0 = unlimited idle, 2 open) collapses to
-      # one connection under concurrency and serialises exactly what MySQL is
-      # here to parallelise.
+      # Preserve the main experiment's SQLite repository database and pool.
+      GITEA__database__DB_TYPE: "sqlite3"
       GITEA__database__MAX_OPEN_CONNS: "${GITEA_DB_MAX_OPEN:-100}"
       GITEA__database__MAX_IDLE_CONNS: "${GITEA_DB_MAX_IDLE:-20}"
       GITEA__database__CONN_MAX_LIFETIME: "${GITEA_DB_CONN_LIFETIME:-3600s}"
@@ -307,40 +250,16 @@ services:
       GITEA_HOST: "http://gitea:3000"
       GITEA_ADMIN_USER: "${GITEA_ADMIN_USER:-chairman}"
       GITEA_ADMIN_PASSWORD: "${GITEA_ADMIN_PASSWORD}"
-      GITEA_ADMIN_EMAIL: "chairman@${ORG_NAME}.local"
       # Bootstrap creates the Gitea org with this name. Without it the
       # bootstrap script falls back to its built-in default ("omcgitea")
       # and the org won't match the agents' GITEA_ORG env, breaking the
       # team API queries the agents do at runtime.
       GITEA_ORG: "${ORG_NAME:?ORG_NAME required}"
-      # AGENTS / ROLES derived from the generated worker list.
+      # All generated agents are peer coders.
       # ${ORG_NAME} prefixes every name so two instances on the same host
       # don't share Gitea users.
       AGENTS: "{AGENTS_CSV}"
-      ROLES:  "{ROLES_SPEC}"
       REPOS: "${REPOS:-main}"
-      # ---- test-gate topology switches -----------------------------------
-      # bootstrap.sh implements the topology but reads it from these env vars;
-      # unset, a stack comes up in the REVIEW configuration -- main protected
-      # with required_approvals=1 and push_whitelist=[chairman] -- where no PR
-      # can merge without an approval that no agent ever gives.
-      REQUIRED_APPROVALS: "0"          # no reviewer exists; also clears the
-                                       # review-derived merge blockers
-      # Drop the outdated-branch gate. With many peers merging continuously,
-      # `main` moves between opening a PR and merging it, so most merges return
-      # HTTP 405 "not mergeable" -- which a team misdiagnoses as an authorship
-      # rule.
-      #
-      # WHAT THIS GIVES UP: git still refuses TEXTUAL conflicts, but two
-      # branches editing different regions of one file can both auto-merge into
-      # something incoherent (the failure this gate guards against).
-      # Watch main for broken builds after merges; set back to "1" if that appears.
-      PBENCH_BLOCK_OUTDATED: "0"
-      # PBENCH_CI_GATE=0 removes the gate entirely: bootstrap seeds neither
-      # workflow AND drops enable_status_check, which must move together --
-      # a required context whose job never runs parks every PR at "pending"
-      # and would deadlock the run at 0.00% with no error line.
-      PBENCH_CI_GATE: "${PBENCH_CI_GATE:-1}"
       BOOTSTRAP_DATA_DIR: "/data"
       MATTERMOST_HOST: "http://mattermost:8065"
       MATTERMOST_ADMIN_USER: "${MATTERMOST_ADMIN_USER:-mmadmin}"
@@ -534,24 +453,7 @@ services:
     environment:
       MYSQL_DSN: "mysql://omcgitea:${MYSQL_PASSWORD}@mysql:3306/omcgitea"
       BOARD_LISTEN_PORT: "8660"
-      # Upstream's shared_lessons_render_mode + the feature flags that
-      # default OFF there but gate real behavior (patch latest-wins, the
-      # [status=final] lifecycle suffix). Overridable per run.
-      BOARD_RENDER_MODE: "${BOARD_RENDER_MODE:-full}"
-      BOARD_FEATURE_FLAGS_JSON: "${BOARD_FEATURE_FLAGS_JSON:-}"
-      BOARD_PATCH_CLEAN_DELAY_STEPS: "${BOARD_PATCH_CLEAN_DELAY_STEPS:-8}"
       BOARD_LIFECYCLE_DIR: "/data/lifecycle"
-      # Merge-notice poller. Gitea notifies only PR participants and never the
-      # merger, so every other worker keeps building
-      # against a main that has already moved. Polled here rather than in each
-      # router so the stack asks Gitea once instead of once per agent.
-      # The profile does not set GITEA_HOST, so an empty default here would
-      # silently disable the poller.
-      GITEA_HOST: "${GITEA_HOST:-http://gitea:3000}"
-      GITEA_TOKEN: "${BOARD_GITEA_TOKEN:-}"
-      GITEA_TOKEN_FILE: "${BOARD_GITEA_TOKEN_FILE:-/run/omcgitea/tokens/admin.token}"
-      MERGE_WATCH_REPO: "${MERGE_WATCH_REPO:-}"
-      MERGE_POLL_MS: "${MERGE_POLL_MS:-20000}"
       BOARD_MEMBERS_JSON: >-
         {"pbench-top":[
 {BOARD_MEMBERS}
@@ -560,9 +462,6 @@ services:
       # render_count per gist is the only direct evidence a note ever
       # reached another agent; keep it on the host so it survives teardown.
       - ${DATA_ROOT:-../.claude-team-data}/${PROFILE}/board-lifecycle:/data/lifecycle
-      # The merge poller reads Gitea with the admin token bootstrap already
-      # issues, rather than a secret pasted into the profile. Read-only mount.
-      - ${DATA_ROOT:-../.claude-team-data}/${PROFILE}/tokens:/run/omcgitea/tokens:ro
     healthcheck:
       test: ["CMD-SHELL", "python3 -c \\"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8660/healthz', timeout=2)\\""]
       interval: 10s
@@ -590,15 +489,16 @@ AGENT_BLOCK = '''
       # mount is /dev/null.
       - ${PBENCH_BIN:-/dev/null}:/opt/pbench/executable:ro
       # Prompt and config, mounted per-file over the baked image copies, so the
-      # prompt, the MCP server set (gitea, mattermost, playwright, board) and the
+      # prompt, the MCP servers (gitea, mattermost, board) and the
       # bridge follow the repo without an image rebuild.
-      - ../prompts/team/agents.md:/opt/omcgitea/prompts/agents.md:ro
-      - ../prompts/team/pbench-brief.md:/opt/omcgitea/prompts/pbench-brief.md:ro
-      - ./agent/config/settings.json.tmpl:/opt/omcgitea/config/settings.json.tmpl:ro
-      - ./agent/config/mcp.json.tmpl:/opt/omcgitea/config/mcp.json.tmpl:ro
-      - ../mcp-board:/opt/mcp-board:ro
-      - ../mcp-notice-shim:/opt/mcp-notice-shim:ro
-      - ./agent/acp-bridge.py:/opt/omcgitea/acp-bridge.py:ro
+      - ../prompts/agents.md:/opt/omcgitea/prompts/agents.md:ro
+      - ../prompts/pbench-brief.md:/opt/omcgitea/prompts/pbench-brief.md:ro
+      - ../agent/config/copilot-deny-tools.json:/opt/omcgitea/config/copilot-deny-tools.json:ro
+      - ../agent/config/mcp.json.tmpl:/opt/omcgitea/config/mcp.json.tmpl:ro
+      - ../board-service/mcp.cjs:/opt/mcp-board.cjs:ro
+      - ../mini-router/mcp-notice-shim.cjs:/opt/mcp-notice-shim.cjs:ro
+      - ../agent/acp-bridge.py:/opt/omcgitea/acp-bridge.py:ro
+      - ../agent/archive.py:/opt/omcgitea/archive.py:ro
 '''
 
 ROUTER_BLOCK = '''
@@ -617,6 +517,7 @@ ROUTER_BLOCK = '''
       GITEA_PASSWORD_FILE: "/run/omcgitea/tokens/agent-${ORG_NAME}-__SHORT__.password"
     volumes:
       - ${DATA_ROOT:-../.claude-team-data}/${PROFILE}/acp/${ORG_NAME}-__SHORT__:/var/run/acp:ro
+      - ${DATA_ROOT:-../.claude-team-data}/${PROFILE}/agents/${ORG_NAME}-__SHORT__/home/group-messages:/opt/data/home/group-messages
       - ${DATA_ROOT:-../.claude-team-data}/${PROFILE}/tokens/agent-${ORG_NAME}-__SHORT__.password:/run/omcgitea/tokens/agent-${ORG_NAME}-__SHORT__.password:ro
     expose: ["8645"]
     healthcheck:
@@ -627,24 +528,17 @@ ROUTER_BLOCK = '''
 '''
 
 def build():
-    agents_csv = ",".join(f"${{ORG_NAME}}-{s}" for s, _ in ALL_AGENTS)
-    by_role = {}
-    for short, role in ALL_AGENTS:
-        by_role.setdefault(role, []).append(f"${{ORG_NAME}}-{short}")
-    roles_spec = ";".join(
-        f"{role}=" + ",".join(names) for role, names in by_role.items()
-    )
-
+    agents_csv = ",".join(f"${{ORG_NAME}}-{s}" for s in ALL_AGENTS)
     out = []
     out.append(HEADER)
-    members = ",\n".join(f'          "${{ORG_NAME}}-{s}"' for s, _ in ALL_AGENTS)
-    out.append(INFRA.replace("{AGENTS_CSV}", agents_csv).replace("{ROLES_SPEC}", roles_spec)
+    members = ",\n".join(f'          "${{ORG_NAME}}-{s}"' for s in ALL_AGENTS)
+    out.append(INFRA.replace("{AGENTS_CSV}", agents_csv)
                .replace("{BOARD_MEMBERS}", members))
     out.append(f"\n  # === {len(ALL_AGENTS)} worker agents ===\n")
-    for short, _ in ALL_AGENTS:
+    for short in ALL_AGENTS:
         out.append(AGENT_BLOCK.replace("__SHORT__", short))
     out.append(f"\n  # === {len(ALL_AGENTS)} mini-router sidecars (1 per agent) ===\n")
-    for short, _ in ALL_AGENTS:
+    for short in ALL_AGENTS:
         out.append(ROUTER_BLOCK.replace("__SHORT__", short))
     return "".join(out)
 

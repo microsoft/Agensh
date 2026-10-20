@@ -4,7 +4,13 @@
       "type": "stdio",
       "timeout": "${MCP_TOOL_TIMEOUT_MS}",
       "command": "${AGENT_NODE}",
-      "args": ["/opt/mcp-notice-shim/src/index.js", "--", "/usr/local/bin/gitea-mcp", "-t", "stdio"],
+      "args": [
+        "/opt/mcp-notice-shim.cjs",
+        "--",
+        "/usr/local/bin/gitea-mcp",
+        "-t",
+        "stdio"
+      ],
       "env": {
         "BOARD_SERVICE_URL": "${BOARD_SERVICE_URL}",
         "AGENT_NAME": "${AGENT_NAME}",
@@ -17,7 +23,11 @@
       "type": "stdio",
       "timeout": "${MCP_TOOL_TIMEOUT_MS}",
       "command": "${AGENT_NODE}",
-      "args": ["/opt/mcp-notice-shim/src/index.js", "--", "/usr/local/bin/mcp-server-mattermost"],
+      "args": [
+        "/opt/mcp-notice-shim.cjs",
+        "--",
+        "/usr/local/bin/mcp-server-mattermost"
+      ],
       "env": {
         "BOARD_SERVICE_URL": "${BOARD_SERVICE_URL}",
         "AGENT_NAME": "${AGENT_NAME}",
@@ -28,23 +38,20 @@
         "MATTERMOST_VERIFY_SSL": "false"
       }
     },
-    "playwright": {
-      "type": "stdio",
-      "timeout": "${MCP_TOOL_TIMEOUT_MS}",
-      "command": "/usr/bin/npx",
-      "args": ["-y", "@playwright/mcp@latest", "--isolated", "--no-sandbox", "--headless", "--browser=chromium"],
-      "env": {}
-    },
     "board": {
       "type": "stdio",
       "timeout": "${MCP_TOOL_TIMEOUT_MS}",
       "command": "${AGENT_NODE}",
-      "args": ["/opt/mcp-notice-shim/src/index.js", "--", "${AGENT_NODE}", "/opt/mcp-board/src/index.js"],
+      "args": [
+        "/opt/mcp-notice-shim.cjs",
+        "--",
+        "${AGENT_NODE}",
+        "/opt/mcp-board.cjs"
+      ],
       "env": {
         "BOARD_SERVICE_URL": "${BOARD_SERVICE_URL}",
         "AGENT_NAME": "${AGENT_NAME}",
-        "BOARD_IDS": "${BOARD_IDS}",
-        "BOARD_QUEUE_ID": "${BOARD_QUEUE_ID}"
+        "BOARD_IDS": "${BOARD_IDS}"
       }
     }
   }

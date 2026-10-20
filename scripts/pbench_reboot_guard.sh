@@ -16,11 +16,11 @@
 # Gitea repos survive and a submission can still be exported afterwards, including one whose
 # export failed during the run.
 #
-# Install:  sudo cp docker/pbench-reboot-guard.service /etc/systemd/system/
-#           sudo systemctl daemon-reload && sudo systemctl enable pbench-reboot-guard.service
+# Install: see docker/pbench-reboot-guard.service and README.md; substitute the
+#          checkout's absolute path before installing the service.
 # Dry run:  PBENCH_GUARD_DRY_RUN=1 bash scripts/pbench_reboot_guard.sh
 set -u
-ROOT="${PBENCH_ROOT:-$HOME/agensteam}"
+ROOT="${PBENCH_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 LOG="${PBENCH_GUARD_LOG:-$ROOT/out/reboot-guard.log}"
 DRY="${PBENCH_GUARD_DRY_RUN:-0}"
 

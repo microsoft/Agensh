@@ -5,15 +5,8 @@
  * `events` rows for ALL agents; row-level isolation via `agent` column
  * means a sidecar only ever WHEREs `agent = $self`.
  */
-import { createPool, type Pool, type PoolOptions, type RowDataPacket, type ResultSetHeader } from "mysql2/promise";
-import { randomUUID } from "node:crypto";
-
-export type EventState =
-  | "pending"
-  | "sending"
-  | "sent"
-  | "failed"
-  | "retrying";
+import { createPool, type Pool, type RowDataPacket, type ResultSetHeader } from "mysql2/promise";
+import { GROUP_CHAT_SQL } from "./group_messages.ts";
 
 /**
  * UEM-shaped payload (kept structural to avoid pulling in router/src
@@ -28,18 +21,7 @@ export interface UEMLike {
 
 export interface EventRow {
   id: number;
-  dedup_key: string;
-  source: string;
-  agent: string;
   payload: UEMLike;
-  state: EventState;
-  attempts: number;
-  created_at: number;
-  sent_at: number | null;
-  acked_at: number | null;
-  last_error: string | null;
-  batch_id: string | null;
-  next_retry_at: number | null;
 }
 
 /** Backoff schedule, indexed by attempts-1 (1-based).
@@ -58,27 +40,14 @@ export const MARK_BATCH_SENT_SQL = `UPDATE events FORCE INDEX (ix_batch_state)
   SET state='sent', sent_at = ?
   WHERE batch_id = ? AND state = 'sending'`;
 
-export interface EventStoreOptions {
-  /** mysql2 pool config (uri or fields). */
-  pool: PoolOptions | { uri: string };
-  /** Optional: skip ensureSchema() — for prod where DBA owns DDL. */
-  skipSchema?: boolean;
-}
-
 export class EventStore {
   private pool: Pool;
-  private schemaReady = false;
 
-  constructor(opts: EventStoreOptions) {
-    this.pool = createPool(
-      "uri" in opts.pool
-        ? { uri: opts.pool.uri, connectionLimit: 4 }
-        : { ...opts.pool, connectionLimit: opts.pool.connectionLimit ?? 4 },
-    );
+  constructor(uri: string) {
+    this.pool = createPool({ uri, connectionLimit: 4 });
   }
 
   async ensureSchema(): Promise<void> {
-    if (this.schemaReady) return;
     const ddl = [
       `CREATE TABLE IF NOT EXISTS events (
          id BIGINT PRIMARY KEY AUTO_INCREMENT,
@@ -90,7 +59,6 @@ export class EventStore {
          attempts INT NOT NULL DEFAULT 0,
          created_at BIGINT NOT NULL,
          sent_at BIGINT NULL,
-         acked_at BIGINT NULL,
          last_error TEXT NULL,
          batch_id CHAR(36) NULL,
          next_retry_at BIGINT NULL,
@@ -105,11 +73,8 @@ export class EventStore {
          \`cursor\` VARCHAR(255) NOT NULL,
          PRIMARY KEY (agent, source)
        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
-      // Session persistence — small generic per-agent K/V store.
-      // ACP session IDs use `acp_session_id:<runtime>` so switching between
-      // Claude/Copilot/sim cannot overwrite another runtime's resumable
-      // session. Generic on purpose so future small bits of cross-restart
-      // state don't need new DDL.
+      // Persist the Copilot ACP session under acp_session_id:copilot so a
+      // router restart can restore the conversation.
       `CREATE TABLE IF NOT EXISTS agent_kv (
          agent VARCHAR(128) NOT NULL,
          k VARCHAR(128) NOT NULL,
@@ -165,7 +130,6 @@ export class EventStore {
         conn.release();
       }
     }
-    this.schemaReady = true;
   }
 
   /**
@@ -186,17 +150,18 @@ export class EventStore {
     return null;
   }
 
-  /** Oldest pending events for an agent in FIFO order. Never crosses agents. */
+  /** FIFO for other events, plus the complete file-backed group-chat backlog. */
   async nextPendingBatch(agent: string, limit: number): Promise<EventRow[]> {
     const cap = Math.max(1, Math.min(1000, Math.floor(limit)));
-    const [rows] = await this.pool.query<RowDataPacket[]>(
-      `SELECT * FROM events
-         WHERE agent = ? AND state = 'pending'
-         ORDER BY id ASC
-         LIMIT ${cap}`,
-      [agent],
-    );
-    return rows.map(toEventRow);
+    const [[rows], [messages]] = await Promise.all([
+      this.pool.query<RowDataPacket[]>(
+        `SELECT id, payload FROM events WHERE agent = ? AND state = 'pending' AND NOT ${GROUP_CHAT_SQL}
+           ORDER BY id ASC LIMIT ${cap}`, [agent]),
+      this.pool.query<RowDataPacket[]>(
+        `SELECT id, payload FROM events WHERE agent = ? AND state = 'pending' AND ${GROUP_CHAT_SQL}
+           ORDER BY id ASC`, [agent]),
+    ]);
+    return [...rows, ...messages].map(toEventRow).sort((a, b) => a.id - b.id);
   }
 
   /**
@@ -219,18 +184,17 @@ export class EventStore {
   }
 
   /** sending → sent; stamp sent_at. */
-  async markBatchSent(batchId: string, now: number = Date.now()): Promise<number> {
-    const [r] = await this.pool.query<ResultSetHeader>(
+  async markBatchSent(batchId: string, now: number = Date.now()): Promise<void> {
+    await this.pool.query(
       MARK_BATCH_SENT_SQL,
       [now, batchId],
     );
-    return r.affectedRows;
   }
 
   /**
    * Retire rows mcp-notice-shim already rendered into a tool result.
    *
-   * The shim appends pending dm/merge notices to an MCP tool result mid-turn
+   * The shim appends pending DM notices to an MCP tool result mid-turn
    * and reports what it showed into board-service's `shown` table. Those rows
    * are already in the agent's context, so re-delivering them at the turn
    * boundary would duplicate them. This is the only place that reconciles the
@@ -277,13 +241,12 @@ export class EventStore {
    * `attempts` is read fresh inside the UPDATE; if attempts+1 >= MAX_ATTEMPTS
    * the row becomes terminal (next_retry_at = NULL) and won't be reclaimed.
    *
-   * Returns the post-update {attempts, next_retry_at} for caller's metric/log.
    */
   async markFailed(
     id: number,
     err: string,
     now: number = Date.now(),
-  ): Promise<{ attempts: number; next_retry_at: number | null } | null> {
+  ): Promise<void> {
     // Read attempts then update — safer/clearer than encoding the backoff
     // table inside SQL CASE. There is no other writer to a single row's
     // attempts in normal operation; if there is, the worst case is a
@@ -292,7 +255,7 @@ export class EventStore {
       `SELECT attempts FROM events WHERE id = ?`,
       [id],
     );
-    if (rows.length === 0) return null;
+    if (rows.length === 0) return;
     // markBatchSending already did `attempts = attempts + 1` for this delivery.
     // Adding another here would burn two attempts per try: with MAX_ATTEMPTS=5
     // an event would die after three deliveries, not five.
@@ -314,7 +277,6 @@ export class EventStore {
        WHERE id = ? AND state = 'sending'`,
       [newAttempts, err, next, id],
     );
-    return { attempts: newAttempts, next_retry_at: next };
   }
 
   /**
@@ -337,18 +299,21 @@ export class EventStore {
     const conn = await this.pool.getConnection();
     try {
       await conn.beginTransaction();
-      const [picks] = await conn.query<RowDataPacket[]>(
+      const where = `agent = ? AND state IN ('failed','retrying')
+             AND attempts < ? AND next_retry_at IS NOT NULL AND next_retry_at <= ?`;
+      const params = [agent, MAX_ATTEMPTS, now];
+      const [others] = await conn.query<RowDataPacket[]>(
         `SELECT id FROM events
-           WHERE agent = ?
-             AND state IN ('failed','retrying')
-             AND attempts < ?
-             AND next_retry_at IS NOT NULL
-             AND next_retry_at <= ?
+           WHERE ${where} AND NOT ${GROUP_CHAT_SQL}
            ORDER BY next_retry_at ASC, id ASC
            LIMIT ${cap}
            FOR UPDATE`,
-        [agent, MAX_ATTEMPTS, now],
+        params,
       );
+      const [messages] = await conn.query<RowDataPacket[]>(
+        `SELECT id FROM events WHERE ${where} AND ${GROUP_CHAT_SQL} ORDER BY id ASC FOR UPDATE`, params,
+      );
+      const picks = [...others, ...messages];
       if (picks.length === 0) {
         await conn.commit();
         return [];
@@ -361,7 +326,7 @@ export class EventStore {
         ids,
       );
       const [rows] = await conn.query<RowDataPacket[]>(
-        `SELECT * FROM events WHERE id IN (${placeholders}) ORDER BY id ASC`,
+        `SELECT id, payload FROM events WHERE id IN (${placeholders}) ORDER BY id ASC`,
         ids,
       );
       await conn.commit();
@@ -405,9 +370,7 @@ export class EventStore {
 
   /**
    * Generic per-agent K/V. ACP session IDs are stored under
-   * `acp_session_id:<runtime>` so router/runtime restarts can call
-   * loadSession without cross-kind collisions. See session_namespace.ts,
-   * main.ts wiring, and acp_socket_channel.ts loadSession branch.
+   * `acp_session_id:copilot` so router restarts can restore the same ACP session.
    */
   async getKv(agent: string, key: string): Promise<string | null> {
     const [rows] = await this.pool.query<RowDataPacket[]>(
@@ -426,27 +389,8 @@ export class EventStore {
     );
   }
 
-  async deleteKv(agent: string, key: string): Promise<void> {
-    await this.pool.query("DELETE FROM agent_kv WHERE agent = ? AND k = ?", [agent, key]);
-  }
-
-  /** Test helper: fetch one row by id (cross-agent). */
-  async _getById(id: number): Promise<EventRow | null> {
-    const [rows] = await this.pool.query<RowDataPacket[]>(
-      `SELECT * FROM events WHERE id = ?`,
-      [id],
-    );
-    return rows.length === 0 ? null : toEventRow(rows[0]!);
-  }
-
-  async close(): Promise<void> {
-    await this.pool.end();
-  }
 }
 
-export function newBatchId(): string {
-  return randomUUID();
-}
 
 function toEventRow(r: RowDataPacket): EventRow {
   // mysql2 returns JSON columns as already-parsed objects.
@@ -456,17 +400,6 @@ function toEventRow(r: RowDataPacket): EventRow {
       : (r.payload as UEMLike);
   return {
     id: Number(r.id),
-    dedup_key: String(r.dedup_key),
-    source: String(r.source),
-    agent: String(r.agent),
     payload,
-    state: String(r.state) as EventState,
-    attempts: Number(r.attempts),
-    created_at: Number(r.created_at),
-    sent_at: r.sent_at == null ? null : Number(r.sent_at),
-    acked_at: r.acked_at == null ? null : Number(r.acked_at),
-    last_error: r.last_error == null ? null : String(r.last_error),
-    batch_id: r.batch_id == null ? null : String(r.batch_id),
-    next_retry_at: r.next_retry_at == null ? null : Number(r.next_retry_at),
   };
 }

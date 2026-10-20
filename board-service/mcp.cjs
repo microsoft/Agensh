@@ -28,7 +28,7 @@ const BOARD_IDS = (process.env.BOARD_IDS || "").split(",").map((s) => s.trim()).
 // Mirrors MAX_BOARD_ENTRIES in board-service/shared_lessons.py. Used ONLY to
 // state the bound in the tool description — the service is what enforces it,
 // so a drift here misinforms the agent but cannot change behaviour.
-const MAX_BOARD_ENTRIES = Number(process.env.BOARD_MAX_ENTRIES || 2000);
+const MAX_BOARD_ENTRIES = 2000;
 
 function log(...args) {
     // stderr only — stdout is reserved for JSON-RPC.
@@ -105,20 +105,9 @@ const TOOLS = [
             required: ["board_id"],
         },
         handler: async ({ board_id }) => {
-            // window_tokens=0 is the service's "unlimited" sentinel: it renders
-            // the whole board instead of a priority-selected slice.
-            //
-            // Never a finite default such as `window_tokens || 1000`. A
-            // 1000-token budget engages the _MAX_RENDERED_CLAIMS=6 /
-            // _MAX_RENDERED_PATCH_SUMMARIES=4 caps and the char budget, so a
-            // read of a ~12.7k-gist board returns a few dozen entries. An
-            // absent CLAIM then means "dropped by the window" just as often as
-            // "nobody claimed it", which is exactly the ambiguity the full
-            // board exists to remove. And `0 || 1000 === 1000`, so an agent
-            // could not opt out by asking for 0 either.
             const r = await httpRequest(
                 "GET",
-                `/board/${encodeURIComponent(board_id)}/read?viewer=${encodeURIComponent(AGENT)}&window_tokens=0`
+                `/board/${encodeURIComponent(board_id)}/read?viewer=${encodeURIComponent(AGENT)}`
             );
             if (r.status >= 400) throw new Error(`board_read ${r.status}: ${r.text}`);
             return r.json.rendered || "(no notes)";
@@ -149,7 +138,6 @@ const TOOLS = [
                         "Optional full text behind the gist. Not shown to peers by default; " +
                         "retrievable via board_unfold. No length cap.",
                 },
-                task_id: { type: "string", description: "Optional: free-form id linking related notes." },
                 delegation_id: {
                     type: "string",
                     description:
@@ -159,22 +147,16 @@ const TOOLS = [
                         "of peers reading a stale candidate, and a FAIL strikes your own patch " +
                         "summary. A fresh id per note silently disables both.",
                 },
-                task_instruction: {
-                    type: "string",
-                    description: "Optional: what you were asked to do; shown alongside PATCH_SUMMARYs.",
-                },
             },
             required: ["board_id", "type", "content"],
         },
-        handler: async ({ board_id, type, content, detail, task_id, delegation_id, task_instruction }) => {
+        handler: async ({ board_id, type, content, detail, delegation_id }) => {
             const r = await httpRequest("POST", `/board/${encodeURIComponent(board_id)}/note`, {
                 thread_id: AGENT,
                 type,
                 content,
                 detail: detail || null,
-                task_id: task_id || null,
                 delegation_id: delegation_id || null,
-                task_instruction: task_instruction || null,
             });
             if (r.status >= 500) throw new Error(`board_write ${r.status}: ${r.text}`);
             return JSON.stringify(r.json || { status: "error", detail: r.text });
@@ -215,7 +197,7 @@ const TOOLS = [
                     description:
                         "Optional filter on note type, '|' separated (a note has exactly one " +
                         "type, so these OR together). One or more of FACT, OBSERVED, FAIL, " +
-                        "PATCH_SUMMARY, CLAIM, TRIED. Omit to search all types. " +
+                        "PATCH_SUMMARY, CLAIM. Omit to search all types. " +
                         "e.g. \"FAIL|PATCH_SUMMARY\" to see only what was ruled out or fixed.",
                 },
             },
@@ -259,8 +241,6 @@ const TOOLS = [
             } else {
                 out += `\n\n${j.total} match${j.total === 1 ? "" : "es"} (complete).`;
             }
-            if (j.dropped_terms && j.dropped_terms.length)
-                out += `\n[too many terms; ignored: ${j.dropped_terms.join(", ")}]`;
             return out;
         },
     },
@@ -284,14 +264,7 @@ const TOOLS = [
         handler: async ({ board_id, labels }) => {
             const ls = (Array.isArray(labels) ? labels : [labels]).filter(Boolean);
             if (!ls.length) throw new Error("board_unfold: labels required");
-            // Always depth=raw. Agents only ever ask for raw and never address
-            // a sub-chunk. The summary hop (G->S) exists to avoid spending raw
-            // budget on a large unit, but stored details are tiny -- median
-            // ~190 chars, max ~1,250 (~314 tokens) on a 32-worker board -- so
-            // there is nothing to economise, and n_subchunks' floor of 3 would
-            // describe a 190-char detail as three ~63-char pieces.
-            // The endpoint still accepts depth for diagnostics.
-            const q = `labels=${encodeURIComponent(ls.join(","))}&depth=raw`;
+            const q = `labels=${encodeURIComponent(ls.join(","))}`;
             const r = await httpRequest(
                 "GET",
                 `/board/${encodeURIComponent(board_id)}/unfold?viewer=${encodeURIComponent(AGENT)}&${q}`

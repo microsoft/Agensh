@@ -39,29 +39,6 @@ export interface BoardClientOpts {
   agent: string;
   /** CSV of board ids this agent may access. First entry is the primary. */
   boardIds: string[];
-  /** Queue id rendered alongside the board (BOARD_QUEUE_ID). Optional. */
-  queueId?: string;
-  /**
-   * Token budget for the rendered block spliced into each prompt.
-   * 0 (the default) means UNLIMITED — ship the whole board.
-   */
-  windowTokens?: number;
-  /**
-   * Upstream's shared_lessons_render_mode (config.py:79). Selects WHAT the
-   * agent sees, not just how much: `full` is the raw board, the `*_digest`
-   * family strips low-signal narration and keeps only peer content, and the
-   * `*_local_only` family blinds planners entirely. Defaults to the
-   * board-service's own default when unset.
-   */
-  renderMode?: string;
-  /**
-   * "planner" or "implementer". The mode matrix is role-dependent — the same
-   * mode string shows a lead and a worker different things — so the router has
-   * to tell the service which side of it this agent is on.
-   */
-  role?: string;
-  /** Injected for tests. */
-  fetchImpl?: typeof fetch;
   log?: (level: "info" | "warn" | "error", msg: string, err?: unknown) => void;
 }
 
@@ -69,36 +46,13 @@ export class BoardClient {
   private readonly baseUrl?: string;
   private readonly agent: string;
   private readonly boardIds: string[];
-  private readonly queueId: string;
-  private readonly windowTokens: number;
-  private readonly renderMode?: string;
-  private readonly role: string;
-  private readonly fetchImpl: typeof fetch;
   private readonly log: (level: "info" | "warn" | "error", msg: string, err?: unknown) => void;
-  /** Step index reported to the service; patch_clean_delayed_local gates on it. */
-  private step = 0;
 
   constructor(opts: BoardClientOpts) {
     this.baseUrl = opts.baseUrl?.replace(/\/+$/, "") || undefined;
     this.agent = opts.agent;
     this.boardIds = opts.boardIds.filter(Boolean);
-    this.queueId = opts.queueId ?? "";
-    // 0 = unlimited: ship the WHOLE board on every dispatch. A windowed render
-    // makes an absent CLAIM ambiguous between "nobody claimed this work" and
-    // "it was dropped by the budget", so agents overlap on work a peer already
-    // claimed. A whole 6-hour board is ~126 entries / ~4k tokens.
-    // Override with BOARD_WINDOW_TOKENS if a board ever gets large enough to
-    // matter.
-    this.windowTokens = opts.windowTokens ?? 0;
-    this.renderMode = opts.renderMode || undefined;
-    this.role = opts.role || "implementer";
-    this.fetchImpl = opts.fetchImpl ?? fetch;
     this.log = opts.log ?? (() => {});
-  }
-
-  /** Advance the step counter used by the delayed render modes. */
-  setStep(step: number): void {
-    this.step = Math.max(0, step);
   }
 
   /** True when a board is configured; callers skip all board work otherwise. */
@@ -173,13 +127,9 @@ export class BoardClient {
     const missing = () => new Set(this.boardIds.filter((b) => !out.has(b)));
     const qs =
       `?viewer=${encodeURIComponent(this.agent)}` +
-      `&boards=${encodeURIComponent(this.boardIds.join(","))}` +
-      `&window_tokens=${this.windowTokens}` +
-      `&role=${encodeURIComponent(this.role)}` +
-      `&step=${this.step}` +
-      (this.renderMode ? `&render_mode=${encodeURIComponent(this.renderMode)}` : "");
+      `&boards=${encodeURIComponent(this.boardIds.join(","))}`;
     try {
-      const res = await this.fetchImpl(`${this.baseUrl}/snapshot${qs}`, { method: "GET" });
+      const res = await fetch(`${this.baseUrl}/snapshot${qs}`, { method: "GET" });
       if (res.ok) {
         const body = (await res.json()) as {
           boards?: Record<string, { rendered?: string }>;
@@ -199,12 +149,8 @@ export class BoardClient {
       try {
         const url =
           `${this.baseUrl}/board/${encodeURIComponent(boardId)}/read` +
-          `?viewer=${encodeURIComponent(this.agent)}` +
-          `&window_tokens=${this.windowTokens}` +
-          `&role=${encodeURIComponent(this.role)}` +
-          `&step=${this.step}` +
-          (this.renderMode ? `&render_mode=${encodeURIComponent(this.renderMode)}` : "");
-        const res = await this.fetchImpl(url, { method: "GET" });
+          `?viewer=${encodeURIComponent(this.agent)}`;
+        const res = await fetch(url, { method: "GET" });
         if (res.ok) {
           const body = (await res.json()) as { rendered?: string };
           out.set(boardId, body.rendered ?? "");
@@ -218,50 +164,6 @@ export class BoardClient {
     // Whatever we never managed to read is UNREACHABLE, not empty. The caller
     // must not present it to the agent as "nobody has written here yet".
     return { boards: out, unreachable: missing() };
-  }
-
-  /**
-   * Render the current task queue for a board's queue id. Included alongside
-   * the board so a woken agent can see that work is waiting without having to
-   * poll `queue_claim` first — in the round-2 run the planner enqueued four
-   * subtasks and no worker ever claimed one, because nothing told them the
-   * queue was non-empty.
-   */
-  async renderQueueForPrompt(queueId: string): Promise<string> {
-    if (!this.enabled || !queueId) return "";
-    try {
-      const url = `${this.baseUrl}/queue/${encodeURIComponent(queueId)}/status`;
-      const res = await this.fetchImpl(url, { method: "GET" });
-      if (!res.ok) return "";
-      const body = (await res.json()) as {
-        counts?: Record<string, number>;
-        tasks?: Array<{ task_id?: string; state?: string; description?: string; claimed_by?: string }>;
-      };
-      const tasks = body.tasks ?? [];
-      if (tasks.length === 0) return "";
-      const counts = body.counts ?? {};
-      const lines = tasks
-        .filter((t) => t.state === "pending" || t.state === "claimed")
-        .slice(0, 12)
-        .map((t) => {
-          const who = t.state === "claimed" ? ` (claimed by ${t.claimed_by})` : "";
-          return `  [${t.state}] ${t.task_id}${who}: ${String(t.description ?? "").slice(0, 120)}`;
-        });
-      if (lines.length === 0) return "";
-      const pending = counts["pending"] ?? 0;
-      return (
-        `==== TASK QUEUE (${queueId}) ====\n` +
-        `pending=${counts["pending"] ?? 0} claimed=${counts["claimed"] ?? 0} completed=${counts["completed"] ?? 0}\n` +
-        lines.join("\n") +
-        (pending > 0
-          ? `\n\n${pending} task(s) are unclaimed. Call \`queue_claim\` to take one before starting your own work.`
-          : "") +
-        "\n==== END TASK QUEUE ====\n"
-      );
-    } catch (err) {
-      this.log("warn", `queue status ${queueId} failed`, err);
-      return "";
-    }
   }
 
   /**
@@ -284,7 +186,7 @@ export class BoardClient {
         const url =
           `${this.baseUrl}/board/${encodeURIComponent(boardId)}/read_all` +
           `?viewer=${encodeURIComponent(this.agent)}`;
-        const res = await this.fetchImpl(url, { method: "GET" });
+        const res = await fetch(url, { method: "GET" });
         if (!res.ok) continue;
         const body = (await res.json()) as { entries?: Array<{ thread_id?: string; _label?: string }> };
         for (const e of body.entries ?? []) {
@@ -324,85 +226,6 @@ export class BoardClient {
     );
   }
 
-  /**
-   * The complete block attached to every dispatched UEM batch: shared context
-   * plus (when configured) the task queue. This is variant 1 — the board
-   * travels with the batch rather than being something the agent fetches.
-   */
-  async renderBatchPrefix(): Promise<string> {
-    if (!this.enabled) return "";
-    const [board, queue] = await Promise.all([
-      this.renderForPrompt(),
-      this.renderQueueForPrompt(this.queueId),
-    ]);
-    return [board, queue].filter(Boolean).join("\n");
-  }
-
-  /**
-   * Whether this agent has a live PATCH_SUMMARY on any of its boards.
-   *
-   * Gates the PATCH_READY vs SOURCE_DIFF choice: source changes plus a
-   * published candidate means "close it out", source changes with nothing
-   * published means "verify and publish". Read from storage rather than from
-   * the rendered view, because several render modes demote or hide the
-   * viewer's own notes and would report false.
-   */
-  async hasOwnPatchSummary(): Promise<boolean> {
-    if (!this.enabled) return false;
-    for (const boardId of this.boardIds) {
-      try {
-        const res = await this.fetchImpl(
-          `${this.baseUrl}/board/${encodeURIComponent(boardId)}/read_all` +
-            `?viewer=${encodeURIComponent(this.agent)}`,
-          { method: "GET" },
-        );
-        if (!res.ok) continue;
-        const body = (await res.json()) as {
-          entries?: Array<{ thread_id?: string; type?: string }>;
-        };
-        if (
-          (body.entries ?? []).some(
-            (e) => e.thread_id === this.agent && e.type === "PATCH_SUMMARY",
-          )
-        ) {
-          return true;
-        }
-      } catch (err) {
-        this.log("warn", `hasOwnPatchSummary ${boardId} failed`, err);
-      }
-    }
-    return false;
-  }
-
-  /**
-   * The task this agent currently holds on `queueId`, if any. Used by the step
-   * loop to source its task text from the live assignment rather than a static
-   * role string — upstream's task_instruction is written by the planner at
-   * delegate time, not baked into a template.
-   */
-  async claimedTaskFor(
-    queueId: string,
-    agent: string,
-  ): Promise<{ task_id: string; description: string } | null> {
-    if (!this.enabled || !queueId) return null;
-    try {
-      const res = await this.fetchImpl(
-        `${this.baseUrl}/queue/${encodeURIComponent(queueId)}/status`,
-        { method: "GET" },
-      );
-      if (!res.ok) return null;
-      const body = (await res.json()) as {
-        tasks?: Array<{ task_id?: string; state?: string; description?: string; claimed_by?: string }>;
-      };
-      const t = (body.tasks ?? []).find(
-        (x) => x.state === "claimed" && x.claimed_by === agent,
-      );
-      return t ? { task_id: String(t.task_id ?? ""), description: String(t.description ?? "") } : null;
-    } catch (err) {
-      this.log("warn", `claimedTaskFor ${queueId} failed`, err);
-      return null;
-    }
-  }
 }
 
 /** Parse the BOARD_IDS env (CSV) into a list. */

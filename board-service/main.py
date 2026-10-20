@@ -1,24 +1,22 @@
 """
-board-service — DeLM shared-context board + task queue as an HTTP service.
+board-service — shared-context board as an HTTP service.
 
-Ports SharedLessons + verify_notes verbatim from ~/DeLM/src/{shared_lessons,verifier}.py
-and wraps them with:
-  1. FastAPI endpoints (POST /board/{board_id}/note, GET /board/{board_id}/read,
-     POST /queue/{queue_id}/{enqueue,claim,complete}).
-  2. MySQL WAL so gists + queue tasks survive container restarts.
+Retains the DeLM-derived note semantics used by the main experiment, with:
+  1. FastAPI endpoints (POST /board/{board_id}/note, GET /board/{board_id}/read).
+  2. MySQL WAL so gists survive container restarts.
   3. Per-board membership check driven by BOARD_MEMBERS_JSON env
      (agent identity → set of boards they can read/write).
 
 Design principles kept from DeLM:
   - Verifier is deterministic (no LLM). Schema, per-type char cap, evidence-
     quality regex on PATCH_SUMMARY, batch dedupe.
-  - Shared context is append-only in memory (SharedLessons._entries);
-    windowing, dedupe, and priority selection happen at read time.
+  - Shared context holds live notes in memory (SharedLessons._entries), with
+    latest-wins patch summaries; dedupe and selection happen at read time.
   - Coordination is state-based: agents write compact typed gists, later
     agents read the accumulated view.
 
-MySQL tables (03-board-schema.sql): board_gists, board_queue_tasks,
-board_members. On boot we rehydrate SharedLessons for each board_id
+MySQL table (03-board-schema.sql): board_gists.
+On boot we rehydrate SharedLessons for each board_id
 we find in board_gists (idempotent).
 """
 from __future__ import annotations
@@ -38,7 +36,7 @@ from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from shared_lessons import SharedLessons, VALID_TYPES
-from verifier import verify_notes
+from verifier import verify_note
 import unfold as unfold_mod
 import gquery
 
@@ -55,51 +53,6 @@ if _MEMBERS_ENV:
     except Exception as e:  # noqa: BLE001
         raise SystemExit(f"invalid BOARD_MEMBERS_JSON: {e}")
 
-# Feature flags handed to every SharedLessons instance. Upstream constructs the
-# board per-task from config.py:58-86; several of these default OFF there and
-# gate real behavior, so they have to be reachable rather than hardcoded:
-#   patch_summary_latest_wins_enabled — a refined PATCH_SUMMARY REPLACES the
-#     thread's earlier one in place, so peers stop reading a stale candidate.
-#   patch_summary_lifecycle_enabled  — enables mark_patch_summary_final() and
-#     the [status=final,verified,local_failures=N] render suffix agents are
-#     told to trust.
-_DEFAULT_FEATURE_FLAGS = {
-    "patch_summary_enabled": True,
-    "claims_enabled": True,
-    "tried_admission_filter": True,
-    "patch_summary_latest_wins_enabled": True,
-    "patch_summary_lifecycle_enabled": True,
-}
-_FLAGS_ENV = os.environ.get("BOARD_FEATURE_FLAGS_JSON", "").strip()
-FEATURE_FLAGS: Dict[str, bool] = dict(_DEFAULT_FEATURE_FLAGS)
-if _FLAGS_ENV:
-    try:
-        FEATURE_FLAGS.update({k: bool(v) for k, v in json.loads(_FLAGS_ENV).items()})
-    except Exception as e:  # noqa: BLE001
-        raise SystemExit(f"invalid BOARD_FEATURE_FLAGS_JSON: {e}")
-
-# Upstream's shared_lessons_render_mode (config.py:79, modes dispatched at
-# planner_agent.py:169-207 and swebench_implementer_agent.py:322-377).
-VALID_RENDER_MODES = (
-    "full",
-    "peer_digest",
-    "patch_digest",
-    "patch_fail_digest",
-    "patch_evidence_digest",
-    "patch_digest_local_only",
-    "patch_clean_local_only",
-    "patch_clean_delayed_local",
-    "patch_selective_unfold",
-)
-DEFAULT_RENDER_MODE = os.environ.get("BOARD_RENDER_MODE", "full").strip() or "full"
-if DEFAULT_RENDER_MODE not in VALID_RENDER_MODES:
-    raise SystemExit(
-        f"invalid BOARD_RENDER_MODE {DEFAULT_RENDER_MODE!r}; "
-        f"must be one of {VALID_RENDER_MODES}"
-    )
-# swebench_implementer_agent.py:21 — patch_clean_delayed_local shows nothing
-# until this many steps have elapsed.
-PATCH_CLEAN_DELAY_STEPS = int(os.environ.get("BOARD_PATCH_CLEAN_DELAY_STEPS", "8"))
 # Operator identity used by the harness for the diagnostic endpoints. Not an
 # agent; exempt from board membership.
 BOARD_OPERATOR = os.environ.get("BOARD_OPERATOR", "harness")
@@ -116,13 +69,8 @@ _GREP_MAX_LIMIT = int(os.environ.get("BOARD_GREP_MAX_LIMIT", "500"))
 # set. Bounded so a pathological call cannot wedge the service for every agent.
 _GREP_MAX_TERMS = int(os.environ.get("BOARD_GREP_MAX_TERMS", "50"))
 
-# CLAIM TTL. Upstream's default is 300s (shared_lessons.py:24) and CLAIM is
-# advisory throughout: never consulted before a write, capped at 2 per
-# delegation, and off entirely in DeLM's shipped preset. We keep that
-# semantics — a claim says "I am on this now", not "I own this path" — so the
-# upstream TTL is the right default. Overridable for experiments.
-# 1h: a claim should outlive the work item it describes. See the rationale on
-# DEFAULT_CLAIM_TTL_SECONDS in shared_lessons.py.
+# Claims are advisory, repeatable liveness signals. The experiment gives
+# them a one-hour TTL; see DEFAULT_CLAIM_TTL_SECONDS in shared_lessons.py.
 CLAIM_TTL_SECONDS = float(os.environ.get("BOARD_CLAIM_TTL_SECONDS", "3600"))
 
 # How long one /pending caller owns this agent's durable delivery mutex while
@@ -152,24 +100,18 @@ def _parse_dsn(dsn: str) -> Dict[str, Any]:
 
 # ------------- global state ----------------------------------------------
 class State:
-    """Per-process board + queue registry.
+    """Per-process board registry.
 
     boards: board_id -> SharedLessons. Constructed lazily on first touch;
     hydrated from board_gists on boot.
 
-    Queue state lives in MySQL only (claim is an atomic UPDATE); no per-process
-    cache to keep the "at most once per worker per task" property honest across
-    restarts.
     """
 
     def __init__(self) -> None:
         self.pool: Optional[aiomysql.Pool] = None
         self.boards: Dict[str, SharedLessons] = {}
-        self._boards_lock = asyncio.Lock()
-        # The L/R layer of the paper's G->S->raw model: board_id -> gist_id ->
-        # raw detail. Deliberately NOT inside SharedLessons — the shared context
-        # C holds only gists, and keeping the detail out of it is what makes the
-        # compression real rather than cosmetic.
+        # Full detail lives outside the shared gist view. Peers retrieve it
+        # explicitly by label; a normal read contains only short notes.
         self.details: Dict[str, Dict[int, str]] = {}
         # board_id -> lock held from note() until the entry has its label.
         self.write_locks: Dict[str, asyncio.Lock] = {}
@@ -183,7 +125,6 @@ class State:
         if b is None:
             b = SharedLessons(
                 task_id=board_id,
-                feature_flags=dict(FEATURE_FLAGS),
             )
             self.boards[board_id] = b
         return b
@@ -193,7 +134,7 @@ class State:
     ) -> Tuple[Dict[str, List[Dict[str, Any]]], float]:
         """Copy the entry list of every requested board inside ONE critical section.
 
-        A multi-board render (a director board plus a team board) is
+        A multi-board render is
         otherwise assembled from N independent reads, so a peer writing between
         read 1 and read 2 yields a view that never existed at any single instant.
         DeLM never hits this because a thread reads exactly one SharedLessons
@@ -221,8 +162,8 @@ class State:
         async with self.pool.acquire() as conn:
             async with conn.cursor(aiomysql.DictCursor) as cur:
                 await cur.execute(
-                    "SELECT id, board_id, thread_id, type, content, task_id, "
-                    "ts_epoch, expires_at, delegation_id, task_instruction, detail "
+                    "SELECT id, board_id, thread_id, type, content, "
+                    "ts_epoch, expires_at, delegation_id, detail "
                     "FROM board_gists ORDER BY id"
                 )
                 rows = await cur.fetchall()
@@ -250,8 +191,6 @@ class State:
                 "_label": f"G{gid}",
                 "_has_detail": bool(detail),
             }
-            if r.get("task_instruction"):
-                entry["task"] = r["task_instruction"]
             # Re-admit through the same step note() uses, skipping note()'s
             # verifier (every row already passed it on its first admit). It
             # replays what the live board did row by row: the PATCH_SUMMARY
@@ -260,7 +199,7 @@ class State:
             # MAX_BOARD_ENTRIES trim in write order. A trim applied once at the
             # end instead would replace a revision into a slot the live board
             # had already dropped, then cut it.
-            b._admit(entry, replay=True)
+            b._admit(entry)
 
         # Restore each board's clock origin.
         #
@@ -282,26 +221,13 @@ STATE = State()
 # ------------- FastAPI schemas -------------------------------------------
 class NoteIn(BaseModel):
     thread_id: str = Field(..., description="Agent identity, e.g. 'pbench-worker3'")
-    type: str = Field(..., description="One of FACT/TRIED/OBSERVED/FAIL/CLAIM/PATCH_SUMMARY")
+    type: str = Field(..., description="One of FACT/OBSERVED/FAIL/CLAIM/PATCH_SUMMARY")
     content: str
-    # task_id and delegation_id land in VARCHAR(128) columns. A longer value is
-    # refused here; past this point the note is admitted in memory before the
-    # INSERT that would reject it.
-    task_id: Optional[str] = Field(None, max_length=128)
-    # Upstream keys several behaviors on (thread_id, delegation_id) rather than
-    # thread alone: the CLAIM cap of 2, the one-PATCH_SUMMARY-per-delegation
-    # rule and its latest-wins replacement, and "a FAIL invalidates THIS
-    # delegation's own patch summary". Passing None collapses every unit of
-    # work an agent ever does into a single bucket, which silently disarms all
-    # four. Our analogue is the queue task the agent is working under.
+    # Stable work label for patch replacement and FAIL invalidation. Bound it
+    # before admission because the persisted column is VARCHAR(128).
     delegation_id: Optional[str] = Field(None, max_length=128)
-    # Rendered as the "Task:" line by the patch_selective_unfold mode
-    # (shared_lessons.py:1065-1076). Upstream only populates it in that mode.
-    task_instruction: Optional[str] = None
     ttl_seconds: Optional[float] = None
-    # The raw source unit R[l] behind this gist. Stored outside the shared
-    # context and reachable only via /unfold, so peers pay gist-sized tokens by
-    # default and full price only for the slice they ask for.
+    # Full text behind this gist, retrieved on demand through /unfold.
     detail: Optional[str] = None
 
 
@@ -310,24 +236,6 @@ class NoteOut(BaseModel):
     reason: Optional[str] = None
     gist_id: Optional[int] = None
     label: Optional[str] = None
-
-
-class EnqueueIn(BaseModel):
-    task_id: str
-    description: str
-    deps: List[str] = Field(default_factory=list)
-    enqueued_by: str
-
-
-class ClaimIn(BaseModel):
-    claimed_by: str
-
-
-class CompleteIn(BaseModel):
-    task_id: str
-    claimed_by: str
-    state: str = "completed"  # or "failed"
-    result_gist_id: Optional[int] = None
 
 
 # ------------- helpers ----------------------------------------------------
@@ -351,7 +259,6 @@ def _authorize(agent: str, board_id: str) -> None:
 
 
 async def _persist_gist(board_id: str, entry: Dict[str, Any],
-                        task_id: Optional[str] = None,
                         detail: Optional[str] = None) -> int:
     """Append the just-admitted gist to the MySQL WAL. Returns its id.
 
@@ -363,19 +270,17 @@ async def _persist_gist(board_id: str, entry: Dict[str, Any],
         async with conn.cursor() as cur:
             await cur.execute(
                 "INSERT INTO board_gists "
-                "(board_id, thread_id, type, content, task_id, ts_epoch, expires_at, "
-                " delegation_id, task_instruction, detail) "
-                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                "(board_id, thread_id, type, content, ts_epoch, expires_at, "
+                " delegation_id, detail) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
                 (
                     board_id,
                     entry["thread_id"],
                     entry["type"],
                     entry["content"],
-                    task_id,
                     entry["ts"],
                     entry.get("_expires_at"),
                     entry.get("delegation_id"),
-                    entry.get("task"),
                     detail,
                 ),
             )
@@ -389,22 +294,7 @@ async def _persist_gist(board_id: str, entry: Dict[str, Any],
 # column".
 _MIGRATIONS = (
     "ALTER TABLE board_gists ADD COLUMN delegation_id VARCHAR(128) NULL",
-    "ALTER TABLE board_gists ADD COLUMN task_instruction TEXT NULL",
     "ALTER TABLE board_gists ADD COLUMN detail LONGTEXT NULL",
-    # The merge poller's record. The poller writes here and GET /merges?since=
-    # reads it back. Merge notices are not delivered to
-    # agents, so this table is the analytic record of what landed, nothing more.
-    """CREATE TABLE IF NOT EXISTS merges (
-         id BIGINT AUTO_INCREMENT PRIMARY KEY,
-         repo VARCHAR(255) NOT NULL,
-         number INT NOT NULL,
-         title VARCHAR(512) NOT NULL DEFAULT '',
-         merged_by VARCHAR(128) NOT NULL DEFAULT '',
-         merged_at DATETIME NOT NULL,
-         seen_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-         UNIQUE KEY uq_merge (repo, number, merged_at),
-         KEY ix_id (id)
-       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4""",
     # What mcp-notice-shim has already rendered into a tool result, so the
     # router can retire those rows in its next tick instead of re-delivering
     # them at the turn boundary.
@@ -551,230 +441,6 @@ async def _migrate() -> None:
                     pass
 
 
-# ---------------------------------------------------------------------------
-# Merge notices
-#
-# Gitea notifies IssueWatchers u RepoWatchers u Participants - author, and the
-# merger is excluded from their own event, so a merge reaches the PR author and
-# its commenters and nobody else. Every other worker keeps building against a
-# main that has already moved -- 664 re-pushes across 70 PRs on the ffmpeg
-# 16-worker run, each re-entering a 772s median CI queue.
-#
-# The poller lives here, not in the per-agent router, so the stack polls Gitea
-# once instead of once per agent.
-# ---------------------------------------------------------------------------
-
-MERGE_WATCH_REPO = os.environ.get("MERGE_WATCH_REPO", "").strip()
-MERGE_POLL_MS = int(os.environ.get("MERGE_POLL_MS", "20000") or 20000)
-_GITEA_HOST = os.environ.get("GITEA_HOST", "").strip().rstrip("/")
-
-
-def _gitea_token() -> str:
-    """Token from env, or from a file for the secret-service path."""
-    t = os.environ.get("GITEA_TOKEN", "").strip()
-    if t:
-        return t
-    f = os.environ.get("GITEA_TOKEN_FILE", "").strip()
-    if f:
-        try:
-            return Path(f).read_text().strip()
-        except OSError:
-            return ""
-    return ""
-
-
-def _fetch_merged_pulls() -> List[Dict[str, Any]]:
-    """Blocking; callers must run it off the loop. stdlib only -- board-service
-    has no HTTP client dependency and this is not worth adding one for."""
-    import urllib.request
-
-    url = (
-        f"{_GITEA_HOST}/api/v1/repos/{MERGE_WATCH_REPO}/pulls"
-        "?state=closed&sort=recentupdate&limit=50"
-    )
-    req = urllib.request.Request(url, headers={
-        "Authorization": f"token {_gitea_token()}",
-        "Accept": "application/json",
-    })
-    with urllib.request.urlopen(req, timeout=15) as r:  # noqa: S310 - in-stack host
-        return json.loads(r.read().decode())
-
-
-async def _record_merges(rows: List[Dict[str, Any]]) -> int:
-    """INSERT IGNORE on the unique key, so re-polling the same page is free."""
-    if not rows:
-        return 0
-    n = 0
-    async with STATE.pool.acquire() as conn:
-        async with conn.cursor() as cur:
-            for pr in rows:
-                merged_at = pr.get("merged_at")
-                if not merged_at:
-                    continue  # closed but not merged
-                await cur.execute(
-                    "INSERT IGNORE INTO merges (repo, number, title, merged_by, merged_at) "
-                    "VALUES (%s,%s,%s,%s,%s)",
-                    (
-                        MERGE_WATCH_REPO,
-                        int(pr.get("number") or 0),
-                        str(pr.get("title") or "")[:512],
-                        str(((pr.get("merged_by") or {}) or {}).get("login") or "")[:128],
-                        merged_at.replace("T", " ").replace("Z", "")[:19],
-                    ),
-                )
-                n += cur.rowcount
-        await conn.commit()
-    return n
-
-
-async def _merge_poll_loop() -> None:
-    """Board endpoints must keep working without a token, so this degrades
-    rather than raising.
-
-    The readiness check is INSIDE the loop, not a one-shot guard. board-service
-    depends only on mysql, so it starts before bootstrap has written
-    admin.token: a startup-time check sees no token, and an early return would
-    disable the merge poller for the entire run while every endpoint still
-    looked healthy ("token=unset" logged at boot, with the file readable
-    moments later).
-    """
-    announced = False
-    started = False
-    while True:
-        ready = bool(MERGE_WATCH_REPO and _GITEA_HOST and _gitea_token())
-        if not ready:
-            if not announced:
-                print(
-                    "[board] merge poller waiting "
-                    f"(repo={MERGE_WATCH_REPO or 'unset'} "
-                    f"host={'set' if _GITEA_HOST else 'unset'} "
-                    f"token={'set' if _gitea_token() else 'unset'})",
-                    flush=True,
-                )
-                announced = True
-            await asyncio.sleep(MERGE_POLL_MS / 1000)
-            continue
-        if not started:
-            # Say so exactly once. A poller that is silent when healthy is
-            # indistinguishable from one that never started -- which is the
-            # failure this loop already exists to survive.
-            print(
-                f"[board] merge poller watching {MERGE_WATCH_REPO} "
-                f"every {MERGE_POLL_MS}ms",
-                flush=True,
-            )
-            started = True
-        announced = False
-        try:
-            rows = await asyncio.to_thread(_fetch_merged_pulls)
-            added = await _record_merges(rows)
-            if added:
-                print(f"[board] recorded {added} new merge(s)", flush=True)
-        except Exception as e:  # noqa: BLE001 - a poll failure must not kill the service
-            print(f"[board] merge poll failed: {e}", flush=True)
-        await asyncio.sleep(MERGE_POLL_MS / 1000)
-
-
-async def _render_mode(
-    b: SharedLessons,
-    *,
-    mode: str,
-    role: str,
-    viewer: str,
-    window_tokens: int,
-    step: int,
-) -> str:
-    """Dispatch upstream's shared_lessons_render_mode matrix.
-
-    Ported from the two call sites that implement it — planner_agent.py:169-207
-    and swebench_implementer_agent.py:322-377. The matrix is role-dependent:
-    the same mode string shows a planner and an implementer different things,
-    and three of the modes blind the planner entirely (the "local_only" family,
-    which exists to test whether the planner benefits from the board at all).
-
-    We map role: a lead/director/planner is a "planner"; everyone else is an
-    "implementer".
-    """
-    is_planner = role == "planner"
-
-    if mode == "full":
-        # Implementers demote their OWN notes so peer content wins the budget;
-        # the planner sees the board unfiltered.
-        if is_planner:
-            return await b.render(window_tokens=window_tokens)
-        return await b.render(
-            window_tokens=window_tokens,
-            viewer_thread_id=viewer,
-            self_policy="demote_current",
-        )
-
-    if mode == "peer_digest":
-        return await b.render_peer_digest(
-            window_tokens=window_tokens, viewer_thread_id=viewer
-        )
-
-    if mode == "patch_digest":
-        return await b.render_peer_digest(
-            window_tokens=window_tokens,
-            viewer_thread_id=viewer,
-            allowed_types=("PATCH_SUMMARY",),
-        )
-
-    if mode == "patch_fail_digest":
-        if is_planner:
-            return await b.render_peer_digest(
-                window_tokens=window_tokens,
-                viewer_thread_id=viewer,
-                allowed_types=("PATCH_SUMMARY",),
-            )
-        # Only peer FAILs grounded in a real patch attempt — an ungrounded FAIL
-        # is usually just someone's broken command.
-        #
-        # NOTE: board_finalize was removed, so nothing sets `_finalized` any
-        # more and this filter now matches nothing — patch_fail_digest would
-        # render no FAILs at all. It is unreachable in our config
-        # (BOARD_RENDER_MODE is unset -> "full"), so this is dormant rather
-        # than broken; anyone enabling this mode must first decide what
-        # "grounded" means without the finalize signal.
-        return await b.render_peer_digest(
-            window_tokens=window_tokens,
-            viewer_thread_id=viewer,
-            allowed_types=("PATCH_SUMMARY", "FAIL"),
-            fail_requires_finalized_patch=True,
-        )
-
-    if mode == "patch_evidence_digest":
-        if is_planner:
-            return await b.render_peer_digest(
-                window_tokens=window_tokens,
-                viewer_thread_id=viewer,
-                allowed_types=("PATCH_SUMMARY",),
-            )
-        return await b.render_peer_digest(
-            window_tokens=window_tokens,
-            viewer_thread_id=viewer,
-            allowed_types=("PATCH_SUMMARY", "OBSERVED", "FACT"),
-        )
-
-    if mode in ("patch_digest_local_only", "patch_clean_local_only",
-                "patch_clean_delayed_local"):
-        if is_planner:
-            return ""  # planner deliberately blinded in this family
-        if mode == "patch_clean_delayed_local" and step < PATCH_CLEAN_DELAY_STEPS:
-            return ""
-        return await b.render_peer_digest(
-            window_tokens=window_tokens,
-            viewer_thread_id=viewer,
-            allowed_types=("PATCH_SUMMARY",),
-            patch_requires_no_fail=(mode != "patch_digest_local_only"),
-        )
-
-    if mode == "patch_selective_unfold":
-        return await b.render_patch_selective_unfold()
-
-    raise HTTPException(status_code=400, detail=f"unknown render_mode {mode!r}")
-
-
 # ------------- app --------------------------------------------------------
 app = FastAPI(title="omcgitea-board", version="0.1.0")
 
@@ -809,8 +475,6 @@ async def _startup() -> None:
         raise SystemExit(f"board: cannot reach mysql after retries: {last}")
     await _migrate()
     await STATE.hydrate()
-    # Fire-and-forget: a poll failure must never take the board down.
-    asyncio.create_task(_merge_poll_loop())
 
 
 @app.on_event("shutdown")
@@ -818,42 +482,6 @@ async def _shutdown() -> None:
     if STATE.pool is not None:
         STATE.pool.close()
         await STATE.pool.wait_closed()
-
-
-@app.get("/merges")
-async def get_merges(since: int = 0, limit: int = 200) -> Dict[str, Any]:
-    """Merges observed since `since`. READ-ONLY — advances no cursor.
-
-    The router polls this and inserts UEM `events` rows itself, keeping it the
-    only writer to that table. Self-merge suppression is NOT done here: the
-    router knows its own agent and filters on `merged_by`, which keeps this
-    endpoint agent-agnostic and therefore cacheable across the stack.
-
-    It must stay read-only: a take-once read that advances a cursor as a side
-    effect loses the merge outright whenever the reader drains and then fails
-    to deliver (a failed prompt, a crashed MCP server).
-    """
-    async with STATE.pool.acquire() as conn:
-        async with conn.cursor(aiomysql.DictCursor) as cur:
-            await cur.execute(
-                "SELECT id, repo, number, title, merged_by, merged_at "
-                "FROM merges WHERE id > %s ORDER BY id ASC LIMIT %s",
-                (int(since), max(1, min(1000, int(limit)))),
-            )
-            rows = list(await cur.fetchall())
-    return {
-        "merges": [
-            {
-                "id": int(r["id"]),
-                "repo": r["repo"],
-                "number": int(r["number"]),
-                "title": r["title"],
-                "merged_by": r["merged_by"],
-                "text": f"[system] PR #{int(r['number'])} merged to main",
-            }
-            for r in rows
-        ],
-    }
 
 
 @app.get("/pending/{agent}")
@@ -1042,8 +670,8 @@ async def healthz() -> Dict[str, Any]:
 async def post_note(board_id: str, note: NoteIn) -> NoteOut:
     _authorize(note.thread_id, board_id)
     # Run DeLM's deterministic verifier on this single-note batch.
-    clean, status = verify_notes([{"type": note.type, "content": note.content}])
-    if not clean:
+    clean, status = verify_note({"type": note.type, "content": note.content})
+    if clean is None:
         return NoteOut(status="rejected", reason=status)
     b = STATE.board(board_id)
     # One write per board at a time, from admission until the label is set.
@@ -1058,21 +686,20 @@ async def post_note(board_id: str, note: NoteIn) -> NoteOut:
         # dedupe key being (type, normalized-content), which doesn't care.
         entry = await b.note(
             thread_id=note.thread_id,
-            type=clean[0]["type"],
-            content=clean[0]["content"],
+            type=clean["type"],
+            content=clean["content"],
             delegation_id=note.delegation_id,
             # CLAIM carries the configured TTL unless the caller pins one.
             ttl_seconds=(
                 note.ttl_seconds
                 if note.ttl_seconds is not None
-                else (CLAIM_TTL_SECONDS if clean[0]["type"] == "CLAIM" else None)
+                else (CLAIM_TTL_SECONDS if clean["type"] == "CLAIM" else None)
             ),
-            task_instruction=note.task_instruction,
         )
         if entry is None:
-            # e.g. TRIED admission filter dropped it
+            # Placeholder or empty-information note.
             return NoteOut(status="rejected", reason="admission-filter")
-        gid = await _persist_gist(board_id, entry, task_id=note.task_id, detail=note.detail)
+        gid = await _persist_gist(board_id, entry, detail=note.detail)
         # Label the live entry so the render index can advertise it. `entry` is the
         # same dict SharedLessons holds in _entries, so this mutation is visible to
         # every later read without touching the ported storage code.
@@ -1087,66 +714,17 @@ async def post_note(board_id: str, note: NoteIn) -> NoteOut:
 async def get_read(
     board_id: str,
     viewer: str = Query(..., description="Agent identity of the reader"),
-    # 0 = unlimited (ship the whole board). The lower bound must allow 0, or
-    # the router's request for the full board would 422. See
-    # shared_lessons._select_entries.
-    window_tokens: int = Query(1000, ge=0, le=8000),
-    render_mode: Optional[str] = Query(
-        None, description=f"One of {VALID_RENDER_MODES}; defaults to BOARD_RENDER_MODE"
-    ),
-    role: str = Query("implementer", description="'planner' or 'implementer'"),
-    self_policy: str = Query(
-        "include",
-        description="include | demote_current | demote_thread | exclude_current "
-                    "(applies to render_mode=full only)",
-    ),
-    step: int = Query(0, ge=0, description="Caller's step index; patch_clean_delayed_local gates on it"),
 ) -> Dict[str, Any]:
     _authorize(viewer, board_id)
-    b = STATE.board(board_id)
-    mode = render_mode or DEFAULT_RENDER_MODE
-    if mode not in VALID_RENDER_MODES:
-        raise HTTPException(status_code=400, detail=f"unknown render_mode {mode!r}")
-
-    # The default path keeps returning stats (callers depend on them); the
-    # non-`full` modes upstream return a bare string.
-    if mode == "full" and role != "planner":
-        entries, stats = await b.read_with_stats(
-            window_tokens=window_tokens,
-            viewer_thread_id=viewer,
-            self_policy=self_policy,
-        )
-        rendered = b.format_for_prompt(entries)
-        stats = dict(stats)
-        stats["rendered_chars_actual"] = len(rendered)
-        idx = unfold_mod.render_index(entries)
-        if idx:
-            rendered = rendered + "\n\n" + idx
-        return {"board_id": board_id, "rendered": rendered,
-                "render_mode": mode, "stats": stats}
-
-    rendered = await _render_mode(
-        b, mode=mode, role=role, viewer=viewer,
-        window_tokens=window_tokens, step=step,
-    )
-    return {"board_id": board_id, "rendered": rendered, "render_mode": mode, "stats": {}}
+    board = STATE.board(board_id)
+    entries = await board.read()
+    rendered = board.format_for_prompt(entries)
+    index = unfold_mod.render_index(entries)
+    if index:
+        rendered += "\n\n" + index
+    return {"board_id": board_id, "rendered": rendered}
 
 
-@app.get("/board/{board_id}/stats")
-async def get_board_stats(
-    board_id: str,
-    viewer: str = Query(...),
-    window_tokens: Optional[int] = Query(None, ge=100, le=8000),
-) -> Dict[str, Any]:
-    """Storage + render-selection stats (shared_lessons.py:842-921).
-
-    This is how we answer "did the board actually get used" with something
-    better than counting HTTP calls: it reports duplicates suppressed, entries
-    dropped for budget, expired claims, and per-type live counts.
-    """
-    _authorize(viewer, board_id)
-    b = STATE.board(board_id)
-    return await b.get_stats(window_tokens=window_tokens)
 
 
 @app.post("/board/{board_id}/lifecycle")
@@ -1173,7 +751,7 @@ async def post_lifecycle(board_id: str, viewer: str = Query(...)) -> Dict[str, A
 
 @app.get("/board/{board_id}/read_all")
 async def get_read_all(board_id: str, viewer: str = Query(...)) -> Dict[str, Any]:
-    """Diagnostic: return every raw entry. Not for agent consumption."""
+    """Stored entries used by the router to detect its own board writes."""
     _authorize(viewer, board_id)
     b = STATE.board(board_id)
     entries = await b.read_all()
@@ -1347,14 +925,6 @@ async def get_grep(
 async def get_snapshot(
     viewer: str = Query(..., description="Agent identity of the reader"),
     boards: str = Query(..., description="Comma-separated board ids"),
-    # 0 = unlimited (ship the whole board). The lower bound must allow 0, or
-    # the router's request for the full board would 422. See
-    # shared_lessons._select_entries.
-    window_tokens: int = Query(1000, ge=0, le=8000),
-    render_mode: Optional[str] = Query(None),
-    role: str = Query("implementer"),
-    self_policy: str = Query("include"),
-    step: int = Query(0, ge=0),
 ) -> Dict[str, Any]:
     """Render several boards from a single consistent read point.
 
@@ -1363,268 +933,79 @@ async def get_snapshot(
     up front: a viewer who cannot read one of them gets a 403 rather than a
     quietly-truncated view, so board tiering stays a real boundary.
 
-    Every render mode goes through a `*_from(snap)` seam, so the tiered case
-    gets the same consistency guarantee as the flat one.
+    Every board is rendered from that captured snapshot, so all callers get
+    the same consistency guarantee.
     """
     board_ids = [b.strip() for b in (boards or "").split(",") if b.strip()]
     if not board_ids:
         raise HTTPException(status_code=400, detail="boards must be non-empty")
-    mode = render_mode or DEFAULT_RENDER_MODE
-    if mode not in VALID_RENDER_MODES:
-        raise HTTPException(status_code=400, detail=f"unknown render_mode {mode!r}")
     for bid in board_ids:
         _authorize(viewer, bid)
 
     snaps, at = await STATE.snapshot_many(board_ids)
-    is_planner = role == "planner"
     out: Dict[str, Any] = {}
     for bid in board_ids:
         b = STATE.board(bid)
         snap = snaps[bid]
-        stats: Dict[str, Any] = {}
-        # Must be reset per board: it is only assigned in the "full" branch, so
-        # without this it would leak the previous board's entries into this
-        # board's watermark.
-        rendered_entries: Optional[List[Dict[str, Any]]] = None
-
-        if mode == "full":
-            # The turn-start block is a DELTA, not the whole board.
-            #
-            # An agent already holds every earlier entry in previous turns of its
-            # context; re-rendering the full board each turn would spend context
-            # on a duplicate and force a cap on FACT/OBSERVED entries.
-            #
-            # PATCH_SUMMARY gets no exemption. It is latest-wins state rather
-            # than an event, but re-sending it in FULL every turn would be most
-            # of the block's cost: at 16 workers it grows to tens of thousands
-            # of tokens per turn, and cumulative board text passes twice the
-            # 272k window, forcing the compaction that destroys the very
-            # earlier turns this delta design depends on.
-            #
-            # Safe because latest-wins writes a REVISED summary with a new, higher
-            # board_gists.id, which clears any cursor that had seen the original,
-            # so revisions still propagate. What an agent loses is the implicit
-            # complete fix-set; board_read returns it on demand (a few thousand
-            # tokens) and the prompt already points there.
-            #
-            # RECOVERY: after a session compaction the earlier turns are gone and
-            # this delta cannot bring them back. board_read returns the full
-            # board on demand and the prompt tells agents to call it; that is the
-            # only path back to older FACT/FAIL/CLAIM.
-            if not is_planner:
-                _cur = await _get_board_cursor(viewer, bid)
-                snap = [e for e in snap if _gist_id(e) > _cur]
-            entries, stats = b._select_entries(
-                snap,
-                window_tokens=window_tokens,
-                viewer_thread_id=None if is_planner else viewer,
-                self_policy="include" if is_planner else self_policy,
-            )
-            rendered = b.format_for_prompt(entries)
-            stats = dict(stats)
-            stats["rendered_chars_actual"] = len(rendered)
-            idx = unfold_mod.render_index(entries)
-            if idx:
-                rendered = rendered + "\n\n" + idx
-            rendered_entries = entries
-        elif mode == "patch_selective_unfold":
-            rendered = b.render_patch_selective_unfold_from(snap)
-        elif mode in ("patch_digest_local_only", "patch_clean_local_only",
-                      "patch_clean_delayed_local"):
-            if is_planner or (mode == "patch_clean_delayed_local"
-                              and step < PATCH_CLEAN_DELAY_STEPS):
-                rendered = ""
-            else:
-                rendered = b.render_peer_digest_from(
-                    snap, window_tokens=window_tokens, viewer_thread_id=viewer,
-                    allowed_types=("PATCH_SUMMARY",),
-                    patch_requires_no_fail=(mode != "patch_digest_local_only"),
-                )
-        else:
-            allowed, fail_grounded = _digest_filters(mode, is_planner)
-            rendered = b.render_peer_digest_from(
-                snap, window_tokens=window_tokens, viewer_thread_id=viewer,
-                allowed_types=allowed,
-                fail_requires_finalized_patch=fail_grounded,
-            )
-        out[bid] = {"rendered": rendered, "stats": stats}
+        # The turn-start block is a DELTA, not the whole board.
+        #
+        # An agent already holds every earlier entry in previous turns of its
+        # context; re-rendering the full board each turn would spend context
+        # on a duplicate and force a cap on FACT/OBSERVED entries.
+        #
+        # PATCH_SUMMARY gets no exemption. It is latest-wins state rather
+        # than an event, but re-sending it in FULL every turn would be most
+        # of the block's cost: at 16 workers it grows to tens of thousands
+        # of tokens per turn, and cumulative board text passes twice the
+        # 272k window, forcing the compaction that destroys the very
+        # earlier turns this delta design depends on.
+        #
+        # Safe because latest-wins writes a REVISED summary with a new, higher
+        # board_gists.id, which clears any cursor that had seen the original,
+        # so revisions still propagate. What an agent loses is the implicit
+        # complete fix-set; board_read returns it on demand (a few thousand
+        # tokens) and the prompt already points there.
+        #
+        # RECOVERY: after a session compaction the earlier turns are gone and
+        # this delta cannot bring them back. board_read returns the full
+        # board on demand and the prompt tells agents to call it; that is the
+        # only path back to older FACT/FAIL/CLAIM.
+        _cur = await _get_board_cursor(viewer, bid)
+        snap = [e for e in snap if _gist_id(e) > _cur]
+        entries = b._select_entries(snap)
+        rendered = b.format_for_prompt(entries)
+        idx = unfold_mod.render_index(entries)
+        if idx:
+            rendered = rendered + "\n\n" + idx
+        out[bid] = {"rendered": rendered}
 
         # Anchor this agent's mid-turn watermark to what actually reached
         # its prompt. Everything at or below is now in the context window, so
         # /pending must not inject it again -- "newly arrived" means created
         # AFTER this snapshot.
         #
-        # Basis is the RENDERED entries in full mode: an entry dropped by the
-        # token budget never reached the agent, so it must stay deliverable.
-        # Digest modes have no per-entry render list, so the snapshot is the
-        # honest basis there -- the agent saw a summary of it, and treating it
-        # as unseen would flood the next tool call with the whole board.
+        # Advance only through entries that actually reached this prompt.
         try:
-            basis = rendered_entries if rendered_entries is not None else snap
             await _advance_board_cursor(
-                viewer, bid, max((_gist_id(e) for e in basis), default=0)
+                viewer, bid, max((_gist_id(e) for e in entries), default=0)
             )
         except Exception:  # noqa: BLE001 -- never fail a prompt render over a cursor
             pass
-    return {"viewer": viewer, "snapshot_at": at, "render_mode": mode, "boards": out}
-
-
-def _digest_filters(mode: str, is_planner: bool):
-    """allowed_types + fail_requires_finalized_patch for the digest modes."""
-    if mode == "peer_digest":
-        return None, False
-    if mode == "patch_digest" or is_planner:
-        return ("PATCH_SUMMARY",), False
-    if mode == "patch_fail_digest":
-        return ("PATCH_SUMMARY", "FAIL"), True
-    if mode == "patch_evidence_digest":
-        return ("PATCH_SUMMARY", "OBSERVED", "FACT"), False
-    return None, False
+    return {"viewer": viewer, "snapshot_at": at, "boards": out}
 
 
 @app.get("/board/{board_id}/unfold")
 async def get_unfold(
     board_id: str,
     viewer: str = Query(...),
-    labels: str = Query(..., description="Comma-separated, e.g. 'G12,G7.2'"),
-    depth: str = Query(
-        "raw",
-        description="'raw' (S->raw, the default) or 'summary' (G->S, diagnostics only)",
-    ),
+    labels: str = Query(..., description="Comma-separated gist labels, e.g. G12,G7"),
 ) -> Dict[str, Any]:
-    """Expand gists into their backing detail — the paper's selective unfolding.
-
-    Read-only by construction. Nothing here writes to the board, which is the
-    paper's guarantee that unfolded content stays "local to the requesting call"
-    (A.2) and that peers keep observing only the gist layer.
-
-    depth defaults to 'raw': every unfold an agent makes is a raw unfold. The
-    'summary' hop (G->S) is retained for diagnostics but is not reachable
-    from the agent surface -- mcp-board pins depth=raw, and render_index
-    advertises only base labels, so nothing enumerates the G12.1/G12.2
-    sub-chunks a summary would list, and agents in practice only ever ask for
-    raw.
-    """
+    """Expand gists directly to full stored detail, local to this request."""
     _authorize(viewer, board_id)
-    if depth not in ("summary", "raw"):
-        raise HTTPException(status_code=400, detail="depth must be 'summary' or 'raw'")
-    req = [l for l in (labels or "").split(",") if l.strip()]
-    if not req:
+    requested = [label for label in labels.split(",") if label.strip()]
+    if not requested:
         raise HTTPException(status_code=400, detail="labels must be non-empty")
-    out = unfold_mod.unfold(req, STATE.details.get(board_id, {}), depth=depth)
-    return {"board_id": board_id, **out}
-
-
-# ---- queue endpoints -----------------------------------------------------
-@app.post("/queue/{queue_id}/enqueue")
-async def post_enqueue(queue_id: str, item: EnqueueIn) -> Dict[str, Any]:
-    now = time.time()
-    async with STATE.pool.acquire() as conn:
-        async with conn.cursor() as cur:
-            try:
-                await cur.execute(
-                    "INSERT INTO board_queue_tasks "
-                    "(queue_id, task_id, description, deps, state, enqueued_at) "
-                    "VALUES (%s,%s,%s,%s,'pending',%s)",
-                    (queue_id, item.task_id, item.description,
-                     ",".join(item.deps), now),
-                )
-            except aiomysql.IntegrityError:
-                raise HTTPException(
-                    status_code=409, detail=f"task {item.task_id} already enqueued"
-                )
-    return {"queue_id": queue_id, "task_id": item.task_id, "state": "pending"}
-
-
-@app.post("/queue/{queue_id}/claim")
-async def post_claim(queue_id: str, req: ClaimIn) -> Optional[Dict[str, Any]]:
-    """Atomically claim the oldest ready (deps-satisfied) pending task."""
-    now = time.time()
-    async with STATE.pool.acquire() as conn:
-        async with conn.cursor(aiomysql.DictCursor) as cur:
-            # 1) Find all pending tasks and completed task_ids, then pick
-            #    the oldest pending whose deps are all satisfied.
-            #    Doing this in SQL cleanly is awkward with a CSV deps col;
-            #    we do the deps join in Python (queues are small — 10s of tasks).
-            await cur.execute(
-                "SELECT task_id FROM board_queue_tasks "
-                "WHERE queue_id=%s AND state='completed'", (queue_id,)
-            )
-            done = {r["task_id"] for r in await cur.fetchall()}
-            await cur.execute(
-                "SELECT id, task_id, description, deps FROM board_queue_tasks "
-                "WHERE queue_id=%s AND state='pending' "
-                "ORDER BY enqueued_at ASC", (queue_id,)
-            )
-            pendings = await cur.fetchall()
-            picked = None
-            for p in pendings:
-                deps = [d for d in (p["deps"] or "").split(",") if d]
-                if all(d in done for d in deps):
-                    picked = p
-                    break
-            if picked is None:
-                return None
-            # 2) Atomic claim: UPDATE ... WHERE state='pending'.
-            # If another worker beat us to it, affected_rows=0 → retry.
-            await cur.execute(
-                "UPDATE board_queue_tasks "
-                "SET state='claimed', claimed_by=%s, claimed_at=%s "
-                "WHERE id=%s AND state='pending'",
-                (req.claimed_by, now, picked["id"]),
-            )
-            if cur.rowcount == 0:
-                # Someone raced us. Recurse — but we simplify: just return null,
-                # let the client retry on its next poll.
-                return None
-    return {
-        "queue_id": queue_id,
-        "task_id": picked["task_id"],
-        "description": picked["description"],
-        "deps": [d for d in (picked["deps"] or "").split(",") if d],
-        "claimed_by": req.claimed_by,
-        "claimed_at": now,
-    }
-
-
-@app.post("/queue/{queue_id}/complete")
-async def post_complete(queue_id: str, req: CompleteIn) -> Dict[str, Any]:
-    now = time.time()
-    if req.state not in ("completed", "failed"):
-        raise HTTPException(status_code=400, detail="state must be completed or failed")
-    async with STATE.pool.acquire() as conn:
-        async with conn.cursor() as cur:
-            await cur.execute(
-                "UPDATE board_queue_tasks "
-                "SET state=%s, completed_at=%s, result_gist_id=%s "
-                "WHERE queue_id=%s AND task_id=%s AND claimed_by=%s "
-                "AND state='claimed'",
-                (req.state, now, req.result_gist_id, queue_id,
-                 req.task_id, req.claimed_by),
-            )
-            if cur.rowcount == 0:
-                raise HTTPException(
-                    status_code=409,
-                    detail=f"task {req.task_id!r} not in claimed state by {req.claimed_by!r}",
-                )
-    return {"queue_id": queue_id, "task_id": req.task_id, "state": req.state}
-
-
-@app.get("/queue/{queue_id}/status")
-async def get_queue_status(queue_id: str) -> Dict[str, Any]:
-    async with STATE.pool.acquire() as conn:
-        async with conn.cursor(aiomysql.DictCursor) as cur:
-            await cur.execute(
-                "SELECT task_id, description, deps, state, claimed_by, "
-                "claimed_at, completed_at, result_gist_id "
-                "FROM board_queue_tasks WHERE queue_id=%s ORDER BY enqueued_at",
-                (queue_id,),
-            )
-            tasks = await cur.fetchall()
-    counts = {"pending": 0, "claimed": 0, "completed": 0, "failed": 0}
-    for t in tasks:
-        counts[t["state"]] = counts.get(t["state"], 0) + 1
-    return {"queue_id": queue_id, "counts": counts, "tasks": tasks}
+    return {"board_id": board_id, **unfold_mod.unfold(requested, STATE.details.get(board_id, {}))}
 
 
 if __name__ == "__main__":

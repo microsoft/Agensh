@@ -3,20 +3,20 @@
  *
  * No periodic polling fallback; SSE is the sole wake. One catch-up
  * pollOnce on boot drains backlog. Listener writes ingested events into
- * MySQL via State.ingestBatch (idempotent on dedup_key). Dispatcher is
+ * MySQL via EventStore.ingest (idempotent on dedup_key). Dispatcher is
  * woken via onIngest callback.
  */
 import {
   advanceCursor,
   fetchNotificationsPage,
-  type FetchLike,
+  NOTIFICATION_PAGE_SIZE,
   type GiteaNotificationRaw,
 } from "./fetcher.ts";
 import { giteaNotificationToUEM } from "./notification.ts";
 import { GiteaSSE } from "./sse.ts";
 import type { EventStore } from "../../state.ts";
 import type { UEM } from "../../uem.ts";
-import type { UpstreamAuth } from "../../upstream_auth.ts";
+import type { GiteaFormAuth } from "../../gitea_form_auth.ts";
 
 export interface GiteaListenerOptions {
   agent: string;
@@ -24,15 +24,10 @@ export interface GiteaListenerOptions {
   baseUrl: string;
   /** PAT — REST notifications. */
   token: string;
-  /** Cookie/OIDC auth — SSE only. */
-  auth: UpstreamAuth;
-  fetch?: FetchLike;
-  now?: () => number;
+  /** Form-session cookie auth for SSE. */
+  auth: GiteaFormAuth;
   hostHeader?: string;
   onIngest?: (insertedCount: number) => void;
-  limit?: number;
-  /** SSE driver; tests can disable by passing null. */
-  sse?: GiteaSSE | null;
 }
 
 /** Upper bound on pages per poll, so a runaway backlog cannot pin the loop. */
@@ -47,13 +42,12 @@ export class GiteaListener {
   constructor(private opts: GiteaListenerOptions) {}
 
   /** Run one pull cycle: read cursor → fetch → ingest → advance cursor. */
-  async pollOnce(): Promise<{ inserted: number; cursor: string | null }> {
+  async pollOnce(): Promise<void> {
     const { agent, state } = this.opts;
     const since = await state.getCursor(agent, "gitea");
     // Gitea returns the newest first, and the cursor jumps to the newest seen,
     // so anything past the first page would never be fetched again. Page until
     // a short page; overlap between pages is collapsed by ingest's dedup.
-    const limit = this.opts.limit ?? 50;
     const items: GiteaNotificationRaw[] = [];
     let maxUpdatedAt: string | null = null;
     for (let n = 1; n <= MAX_PAGES; n++) {
@@ -61,18 +55,16 @@ export class GiteaListener {
         baseUrl: this.opts.baseUrl,
         token: this.opts.token,
         since,
-        ...(this.opts.fetch ? { fetch: this.opts.fetch } : {}),
         ...(this.opts.hostHeader ? { hostHeader: this.opts.hostHeader } : {}),
-        limit,
         page: n,
       });
       items.push(...page.items);
       if (page.maxUpdatedAt && (!maxUpdatedAt || page.maxUpdatedAt > maxUpdatedAt)) {
         maxUpdatedAt = page.maxUpdatedAt;
       }
-      if (page.items.length < limit) break;
+      if (page.items.length < NOTIFICATION_PAGE_SIZE) break;
     }
-    const observed = (this.opts.now ?? Date.now)();
+    const observed = Date.now();
     const uems: UEM[] = items.map((n) =>
       giteaNotificationToUEM(n, agent, observed),
     );
@@ -84,42 +76,32 @@ export class GiteaListener {
     }
     if (next) await state.setCursor(agent, "gitea", next);
     if (inserted > 0) this.opts.onIngest?.(inserted);
-    return { inserted, cursor: next };
   }
 
   async runPolling(opts: {
-    signal?: AbortSignal;
+    signal: AbortSignal;
     onError?: (e: unknown) => void;
-  } = {}): Promise<void> {
-    let sseTask: Promise<void> | null = null;
-    if (this.opts.sse !== null) {
-      const sse = this.opts.sse ??
-        new GiteaSSE({
-          baseUrl: this.opts.baseUrl,
-          auth: this.opts.auth,
-          ...(this.opts.hostHeader
-            ? { hostHeader: this.opts.hostHeader }
-            : {}),
-          ...(this.opts.fetch ? { fetch: this.opts.fetch } : {}),
-          onTrigger: () => this.trigger(),
-          ...(opts.onError ? { onError: opts.onError } : {}),
-        });
-      this.sse = sse;
-      if (sse && opts.signal) {
-        sseTask = sse.run(opts.signal).catch((e) => {
-          opts.onError?.(e);
-        });
-      }
-    }
+  }): Promise<void> {
+    const sse = new GiteaSSE({
+      baseUrl: this.opts.baseUrl,
+      auth: this.opts.auth,
+      ...(this.opts.hostHeader ? { hostHeader: this.opts.hostHeader } : {}),
+      onTrigger: () => this.trigger(),
+      ...(opts.onError ? { onError: opts.onError } : {}),
+    });
+    this.sse = sse;
+    const sseTask = sse.run(opts.signal).catch((e) => {
+      opts.onError?.(e);
+    });
     try {
       try {
         await this.pollOnce();
       } catch (e) {
         opts.onError?.(e);
       }
-      while (!opts.signal?.aborted) {
+      while (!opts.signal.aborted) {
         await this.waitForWake(opts.signal);
-        if (opts.signal?.aborted) break;
+        if (opts.signal.aborted) break;
         try {
           await this.pollOnce();
         } catch (e) {
@@ -127,7 +109,7 @@ export class GiteaListener {
         }
       }
     } finally {
-      if (sseTask) await sseTask;
+      await sseTask;
     }
   }
 
@@ -141,7 +123,7 @@ export class GiteaListener {
     for (const w of ws) w();
   }
 
-  private waitForWake(signal?: AbortSignal): Promise<void> {
+  private waitForWake(signal: AbortSignal): Promise<void> {
     if (this.wakePending) {
       this.wakePending = false;
       return Promise.resolve();
@@ -155,11 +137,11 @@ export class GiteaListener {
       const finish = () => {
         if (done) return;
         done = true;
-        if (signal) signal.removeEventListener("abort", finish);
+        signal.removeEventListener("abort", finish);
         resolve();
       };
       this.wakers.push(finish);
-      signal?.addEventListener("abort", finish, { once: true });
+      signal.addEventListener("abort", finish, { once: true });
     });
   }
 }

@@ -3,8 +3,8 @@
 #
 # Each image, omcgitea-agent-<repo>:pbench, is FROM that task's own
 # programbench/<task>:task_cleanroom_v6, so the agent builds in the environment
-# its submission is graded in (see docker/agent/Dockerfile). The gitea-mcp binary
-# and claude-agent-acp come from omcgitea-agent-base:pbench.
+# its submission is graded in (see agent/Dockerfile). The Gitea MCP binary
+# comes from omcgitea-agent-base:pbench.
 #
 # Builds run in parallel with a concurrency cap — each is ~4 min and ~3.9 GB,
 # and 20 unrestricted docker builds will thrash the layer store.
@@ -33,7 +33,7 @@ for t in $TASKS; do
     sudo docker image inspect "$img" >/dev/null 2>&1 || { log "FATAL: base missing: $img"; fail=1; }
 done
 sudo docker image inspect omcgitea-agent-base:pbench >/dev/null 2>&1 \
-    || { log "FATAL: omcgitea-agent-base:pbench missing (source of gitea-mcp and claude-agent-acp)"; fail=1; }
+    || { log "FATAL: omcgitea-agent-base:pbench missing (source of gitea-mcp)"; fail=1; }
 [ "$fail" = 0 ] || exit 1
 
 # Name images after the REPO, not the org: osgeo__gdal and osgeo__proj both
@@ -46,7 +46,7 @@ build_one() {
     local base="programbench/${t/__/_1776_}:task_cleanroom_v6"
     local name="omcgitea-agent-$(short "$t"):$TAG"
     local lg="$LOGDIR/$(short "$t").log"
-    if sudo docker build -f docker/agent/Dockerfile \
+    if sudo docker build -f agent/Dockerfile \
          --build-arg TASK_IMAGE="$base" -t "$name" . >"$lg" 2>&1; then
         # Verify the property the whole design exists for: the agent image's
         # crate versions must equal the grader's, and our Node must stay off PATH.
@@ -55,8 +55,8 @@ build_one() {
             b=$(ls /usr/local/cargo/registry/cache/*/ 2>/dev/null | grep -cE "^clap-4\.6\.1")
             n=$(command -v node >/dev/null && echo onpath || echo private)
             m=$(python3 -c "import json;print(\"board\" in json.load(open(\"/opt/omcgitea/config/mcp.json.tmpl\"))[\"mcpServers\"])" 2>/dev/null)
-            a=$([ -f /opt/claude-agent-acp/dist/index.js ] && echo yes || echo NO)
-            echo "clap461=$b node=$n board=$m acp=$a"' 2>/dev/null)
+            a=$([ -x /usr/local/bin/copilot-wrapped ] && echo yes || echo NO)
+            echo "clap461=$b node=$n board=$m copilot=$a"' 2>/dev/null)
         echo "OK   $name  $ok" >> "$SUMMARY"
     else
         echo "FAIL $name  (see $lg)" >> "$SUMMARY"
@@ -64,10 +64,8 @@ build_one() {
 }
 
 log "building $(echo $TASKS | wc -w) images, ${JOBS} at a time -> $LOGDIR"
-n=0
 for t in $TASKS; do
     build_one "$t" &
-    n=$((n+1))
     while [ "$(jobs -rp | wc -l)" -ge "$JOBS" ]; do sleep 5; done
 done
 wait

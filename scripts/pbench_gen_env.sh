@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Writes the ProgramBench profiles .env.pbench-<MODE>-<short task>, one per task.
+# Writes .env.pbench-single-node-<short task>, one profile per task.
 # Needs no base profile: every key is written here.
 #
-#   MODE      single-node | multi-node | multi-node-smoke          (required)
+#   MODE      single-node (the only supported mode; also the default)
 #   TASKS     task ids, space-separated (default jgm__pandoc.5caad90)
-#   WORKERS   agents per team (default 8 single-node, 1024 multi-node)
+#   WORKERS   agents per team (default 8)
 #   ENV_DIR   where the profiles go (default: the repo root)
 #
 # The upstream comes from ~/.pbench-upstream.env (LLM_UPSTREAM,
@@ -14,19 +14,17 @@
 #
 # A task's ports and subnets come from its position in TASK_TABLE, so a profile
 # gets the same ranges whether it is generated alone or with others, and two
-# profiles of one mode never overlap.
+# profiles never overlap at the same worker count.
 set -u
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ENV_DIR="${ENV_DIR:-$ROOT}"
 umask 077
 
-MODE="${MODE:-}"
-case "$MODE" in
-    single-node)      PORT_BASE=22000; SUBNET_OCTET=216; WORKERS="${WORKERS:-8}" ;;
-    multi-node)       PORT_BASE=18000; SUBNET_OCTET=199; WORKERS="${WORKERS:-1024}" ;;
-    multi-node-smoke) PORT_BASE=18400; SUBNET_OCTET=200; WORKERS="${WORKERS:-1024}" ;;
-    *) echo "FATAL: MODE='$MODE' must be single-node, multi-node or multi-node-smoke" >&2; exit 2 ;;
-esac
+MODE="${MODE:-single-node}"
+[ "$MODE" = "single-node" ] || { echo "FATAL: MODE='$MODE'; this release supports single-node only" >&2; exit 2; }
+PORT_BASE=22000
+SUBNET_OCTET=216
+WORKERS="${WORKERS:-8}"
 TASKS="${TASKS:-jgm__pandoc.5caad90}"
 
 TASK_TABLE=(
@@ -67,21 +65,18 @@ import os, re, secrets, string, sys
 out, mode, short, idx, port_base, octet, workers, root = sys.argv[1:]
 idx, port_base, workers = int(idx), int(port_base), int(workers)
 profile = f"pbench-{mode}-{short}"
-k8s = mode != "single-node"
 http = port_base + idx * 10
 mm = http + 2
 
 # Compose puts every agent, its mini-router and 8 infra containers on the
 # default network, so it widens past a /24 with the worker count. It is
 # followed by the egress and edge /24s, and each profile's block is a multiple
-# of the default's width so the wider network stays aligned. On k8s these are
-# only rendered, so a /24 is enough.
-prefix, units = 24, 1
-if not k8s:
-    need = 2 * workers + 8 + 6          # +6: restarts and one-shot containers
-    while (1 << (32 - prefix)) - 2 < need and prefix > 16:
-        prefix -= 1
-    units = 1 << (24 - prefix)
+# of the default's width so the wider network stays aligned.
+prefix = 24
+need = 2 * workers + 8 + 6          # +6: restarts and one-shot containers
+while (1 << (32 - prefix)) - 2 < need and prefix > 16:
+    prefix -= 1
+units = 1 << (24 - prefix)
 stride = 3 if units == 1 else 2 * units
 sub = idx * stride
 if sub + units + 1 > 255:
@@ -107,6 +102,7 @@ keys = [
     ("EDGE_DOMAIN", "localhost"),
     ("MATTERMOST_SITE_URL", f"http://localhost:{mm}"),
     ("DATA_ROOT", f"{root}/.claude-team-data"),
+    ("PBENCH_CLEANROOM_TAG", "task_cleanroom_v6"),
     ("GITEA_ADMIN_USER", "chairman"),
     ("GITEA_ADMIN_PASSWORD", password("GITEA_ADMIN_PASSWORD", 22)),
     ("MYSQL_ROOT_PASSWORD", password("MYSQL_ROOT_PASSWORD", 64)),
@@ -123,15 +119,8 @@ keys = [
     # Compose requires a non-empty value; the proxy replaces it upstream.
     ("ANTHROPIC_API_KEY", "local-proxy-no-auth"),
     ("UPSTREAM_AUTH_TOKEN", os.environ["LLM_UPSTREAM_TOKEN"]),
-    # Empty: the proxy forwards /v1/responses unmodified.
-    ("UPSTREAM_PATH_OVERRIDE", ""),
-    ("PBENCH_TEAMS", 1),
     ("PBENCH_WORKERS_PER_TEAM", workers),
-    ("PBENCH_AUDITOR", 0),
-    ("ACP_CHILD_UID", 10000),
-    ("ACP_CHILD_GID", 10000),
     ("REPOS", "main"),
-    ("REQUIRED_APPROVALS", 1),
     ("MINI_ROUTER_STUCK_MS", 1200000),
     ("AGENT_IMAGE", f"omcgitea-agent-{short}:pbench"),
     ("PBENCH_SUBNET_DEFAULT", f"10.{octet}.{sub}.0/{prefix}"),
@@ -142,29 +131,8 @@ keys = [
     ("COPILOT_AGENT_REASONING_EFFORT", os.environ["REASONING_EFFORT"]),
     # Copilot's catalogue has no window for this model and would assume 128000.
     ("COPILOT_PROVIDER_MAX_PROMPT_TOKENS", 272000),
-    # Empty disables board-service's merge poller.
-    ("MERGE_WATCH_REPO", "pbench/main"),
-    ("PBENCH_CI_GATE", 0),
     ("UPSTREAM_AUTH_STYLE", "bearer"),
 ]
-if k8s:
-    keys += [
-        ("PBENCH_ORCHESTRATOR", "k8s"),
-        ("PBENCH_AGENT_CPU", "383m"),
-        ("PBENCH_AGENT_MEM", "1Gi"),
-        ("PBENCH_AGENT_MEM_LIMIT", "8Gi"),
-        # $HOME is an Azure Files share there, and SQLite cannot lock on it.
-        ("COPILOT_STATE_DIR", "/opt/copilot-state"),
-        # 1,024 agents: Mattermost team size, MySQL connections, Gitea's pool,
-        # and the shared files volume.
-        ("MM_MAX_USERS_PER_TEAM", 2048),
-        ("MYSQL_MAX_CONNECTIONS", 5000),
-        ("GITEA_DB_TYPE", "mysql"),
-        ("GITEA_DB_MAX_OPEN", 200),
-        ("GITEA_DB_MAX_IDLE", 50),
-        ("PBENCH_FILES_SIZE", "256Gi"),
-    ]
-
 body = (f"# .env.{profile}\n"
         "# Generated by scripts/pbench_gen_env.sh: regenerate, do not hand-edit.\n"
         + "".join(f"{k}={v}\n" for k, v in keys))

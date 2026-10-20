@@ -1,10 +1,8 @@
-# Shared by scripts/launch_single_node.sh (compose) and scripts/launch_multi_node.sh
-# (AKS). Sourced, never executed.
+# Helpers for scripts/launch_single_node.sh. Sourced, never executed.
 #
 # Callers set before sourcing: ROOT, MODE, TASKS (space-separated task ids) and
 # HOURS. A launch runs its TASKS in order, each on its own profile
-# pbench-<MODE>-<short task>. Everything that differs between the two paths
-# (compose vs k8s, image preparation) stays in the launchers.
+# pbench-single-node-<short task>.
 #
 # Run identity: RUN_ID (default: the UTC start time) names this launch, so its
 # trajectories and logs never collide with another launch of the same profile.
@@ -23,15 +21,13 @@ task_profile() { echo "pbench-$MODE-$(short "$1")"; }
 
 # The launch shell must not decide what runs. Compose interpolation ranks the
 # shell environment above --env-file (make runs compose under sudo -E), so any
-# `${KEY:-default}` in gen-compose-prod.py resolves from the shell first, and
-# gen-k8s.py takes ANTHROPIC_MODEL, PBENCH_LLM_UPSTREAM and UPSTREAM_AUTH_TOKEN
-# from the shell over the profile. A shell that exports ANTHROPIC_MODEL,
+# `${KEY:-default}` in gen-compose-prod.py resolves from the shell first.
+# A shell that exports ANTHROPIC_MODEL,
 # ANTHROPIC_BASE_URL or ANTHROPIC_AUTH_TOKEN for its own use would otherwise
 # hand the agents another model, a route past egress-proxy, or a personal
 # token. Every key the profile sets is unset from the shell when the values
 # differ; the key is logged, never its value. No launcher-owned variable (HOURS,
-# WORKERS, TASKS, RUN_ID; on multi-node also AZ_SUBSCRIPTION, PBENCH_ACR,
-# PBENCH_REGISTRY, PBENCH_IMAGE_DIGESTS) appears in a profile.
+# WORKERS, TASKS, RUN_ID) appears in a profile.
 scrub_shadowed_env() {  # $1 = profile env file
     local f="$1" k v cur n=0
     [ -r "$f" ] || return 0
@@ -89,20 +85,13 @@ image_file_matches() {
 # launch. Must filter exactly as the chain's salvage_interrupted does.
 unfinished_runs() { ls "$1" 2>/dev/null | grep '__' | grep -vE '\.archived$|\.aborted$|\.interrupted$'; }
 
-# Names of extra variables exported into the RUN / EVAL phase of every task, on
-# top of the common set below. The launcher sets these before run_chain. A value
-# that belongs to one profile only is set per task by an optional
-# launch_profile_env <profile>, which run_chain calls before reading them.
-LAUNCH_RUN_VARS=()
-LAUNCH_EVAL_VARS=()
-
 # The tasks run back to back. RUN is in the foreground; eval is detached so the
 # next task starts at once instead of waiting 5-30 min for scoring. Eval touches
 # no containers and each task has its own OUT_ROOT, so it cannot collide with
 # the next run.
 EVAL_PIDS=()
 run_chain() {
-    local task p common v run_extra eval_extra rc
+    local task p common rc
     for task in $TASKS; do
         p="$(task_profile "$task")"
         common=(
@@ -111,19 +100,15 @@ run_chain() {
             TASKS_ENV="$task"
             TRAJ_ROOT="$TRAJ_ROOT"
             OUT_ROOT="$ROOT/out/$p"
-            RUN_SCRIPT="./scripts/pbench_run.sh"
             PROGRAMBENCH_REPO="$PB_REPO"
             HOURS="$HOURS"
         )
-        if declare -F launch_profile_env >/dev/null; then launch_profile_env "$p"; fi
-        run_extra=(); for v in "${LAUNCH_RUN_VARS[@]}"; do run_extra+=("$v=${!v}"); done
-        eval_extra=(); for v in "${LAUNCH_EVAL_VARS[@]}"; do eval_extra+=("$v=${!v}"); done
         log "starting $task (${HOURS}h) profile=$p"
-        env "${common[@]}" PHASE=run "${run_extra[@]}" PATH="$HOME/.local/bin:$PATH" \
+        env "${common[@]}" PHASE=run PATH="$HOME/.local/bin:$PATH" \
             "$ROOT/scripts/pbench_chain.sh" > "$ROOT/out/chain-$p.driver.log" 2>&1
         rc=$?
         log "finished RUN $task (rc=$rc) — eval detached"
-        env "${common[@]}" PHASE=eval "${eval_extra[@]}" PATH="$HOME/.local/bin:$PATH" \
+        env "${common[@]}" PHASE=eval PATH="$HOME/.local/bin:$PATH" \
             nohup "$ROOT/scripts/pbench_chain.sh" >> "$ROOT/out/chain-$p.driver.log" 2>&1 &
         EVAL_PIDS+=($!)
         log "  eval $task pid=$! (runs alongside the next task)"
