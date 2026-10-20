@@ -101,6 +101,16 @@ and disk-space failures before a six-hour run.
 
 ## Configure the experiment
 
+Choose a run identifier before the relay or fresh-build commands below:
+
+```bash
+export RUN_ID="$(date -u +%Y%m%dt%H%M%Sz)"
+```
+
+The lowercase UTC value is also suitable for profile suffixes and image tags.
+Each concurrent worker count needs a distinct final `RUN_ID`, because it names
+the trajectory archive even when the Compose profiles differ.
+
 Keep credentials in `~/.pbench-upstream.env`, with mode 600:
 
 ```dotenv
@@ -303,9 +313,9 @@ generation and retain `PROFILE_SUFFIX` during preflight and launch:
 
 | Workers | `PROFILE_SUFFIX` example | `PORT_BASE` | `SUBNET_OCTET` |
 |---|---|---|---|
-| 1 | `scratch-w1` | 24000 | 248 |
-| 8 | `scratch-w8` | 24100 | 249 |
-| 32 | `scratch-w32` | 24200 | 250 |
+| 1 | `scratch-<cohort>-w1` | 24000 | 248 |
+| 8 | `scratch-<cohort>-w8` | 24100 | 249 |
+| 32 | `scratch-<cohort>-w32` | 24200 | 250 |
 
 These are example ranges: check host routes and listening ports before using
 them. Pandoc adds 50 to `PORT_BASE` for Gitea and 52 for Mattermost, and uses
@@ -315,17 +325,21 @@ or digit. For example:
 
 ```bash
 export TASKS=jgm__pandoc.5caad90 WORKERS=1 HOURS=6
-export PROFILE_SUFFIX=scratch-w1 PORT_BASE=24000 SUBNET_OCTET=248
+export RUN_ID="${IMAGE_TAG}-w1"
+export PROFILE_SUFFIX="$RUN_ID" PORT_BASE=24000 SUBNET_OCTET=248
 bash scripts/pbench_gen_env.sh
-make check-env PROFILE=pbench-single-node-pandoc-scratch-w1
+make check-env PROFILE="pbench-single-node-pandoc-$PROFILE_SUFFIX"
 PREFLIGHT_ONLY=1 bash scripts/launch_single_node.sh
 bash scripts/launch_single_node.sh
 ```
 
 Repeat profile generation and preflight in the other fixed checkouts with
-their own worker count and isolation settings. Record image IDs, rendered
+their own worker count, `RUN_ID` (for example `${IMAGE_TAG}-w8`), and matching
+`PROFILE_SUFFIX`. Keep `IMAGE_TAG` and component image names fixed across the
+cohort. Record image IDs, rendered
 Compose configuration, release/evaluator revisions and scheduled/actual start
-times. For a 10-minute and 6h30m stagger, schedule starts at the first launch's
+times. Rendered Compose output includes credentials; keep it private with mode
+600. For a 10-minute and 6h30m stagger, schedule starts at the first launch's
 actual service start plus 600 and 23,400 seconds. The runner's internal
 30-second worker ramp and six-hour budget remain unchanged.
 
