@@ -239,7 +239,7 @@ services:
   bootstrap:
     build:
       context: ./bootstrap
-    image: omcgitea-bootstrap:local
+    image: "${BOOTSTRAP_IMAGE:-omcgitea-bootstrap:local}"
     restart: "no"
     cgroup_parent: pbench.slice
     depends_on:
@@ -273,7 +273,7 @@ services:
   secret-service:
     build:
       context: ../secret-service
-    image: omcgitea-secret-service:local
+    image: "${SECRET_SERVICE_IMAGE:-omcgitea-secret-service:local}"
     restart: unless-stopped
     cgroup_parent: pbench.slice
     depends_on:
@@ -445,7 +445,7 @@ services:
 
   # ---- central board-service (shared DeLM board, reuses the profile's mysql) --
   board-service:
-    image: omcgitea-board:local
+    image: "${BOARD_IMAGE:-omcgitea-board:local}"
     restart: unless-stopped
     cgroup_parent: pbench.slice
     depends_on:

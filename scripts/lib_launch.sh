@@ -11,13 +11,16 @@
 PB_REPO="${PROGRAMBENCH_REPO:-$HOME/programbench}"
 RUN_ID="${RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
 [[ "$RUN_ID" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "FATAL: RUN_ID='$RUN_ID' must match [A-Za-z0-9._-]+" >&2; exit 1; }
+PROFILE_SUFFIX="${PROFILE_SUFFIX:-}"
+[[ -z "$PROFILE_SUFFIX" || "$PROFILE_SUFFIX" =~ ^[a-z0-9][a-z0-9-]*$ ]] \
+    || { echo "FATAL: PROFILE_SUFFIX must begin with a lowercase letter or digit and contain only lowercase letters, digits and hyphens" >&2; exit 2; }
 SUFFIX="$MODE.$RUN_ID"
 TRAJ_ROOT="${TRAJ_ROOT:-$HOME/pbench-trajectories}"
 DRIVER_LOG="$ROOT/out/$MODE.driver.log"
 
 log() { echo "[$MODE $(date -u +%H:%M:%S)] $*" | tee -a "$DRIVER_LOG"; }
 short() { local t="${1#*__}"; echo "${t%%.*}" | tr -cd 'a-z0-9-'; }
-task_profile() { echo "pbench-$MODE-$(short "$1")"; }
+task_profile() { echo "pbench-$MODE-$(short "$1")${PROFILE_SUFFIX:+-$PROFILE_SUFFIX}"; }
 
 # The launch shell must not decide what runs. Compose interpolation ranks the
 # shell environment above --env-file (make runs compose under sudo -E), so any

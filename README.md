@@ -79,6 +79,26 @@ the checkout moves. The reboot guard stops orphaned project stacks while
 preserving their data. `PBENCH_SKIP_HOST_GUARDS=1` allows preflight on a host
 without the guards, but removes those protections.
 
+On a shared host, verify the installed guards first. Reuse working guards;
+do not replace their checkout path, change Docker settings, restart Docker or
+stop another experiment as part of a fresh run. Builds and model requests still
+share host and gateway capacity. Build one image at a time when other runs are
+active, and record available memory, disk space and competing load.
+
+For a fresh evaluator checkout, follow the upstream installation instructions:
+
+```bash
+git clone https://github.com/facebookresearch/ProgramBench.git /path/to/programbench
+git -C /path/to/programbench checkout <recorded-upstream-revision>
+uv sync --project /path/to/programbench --frozen
+export PROGRAMBENCH_REPO=/path/to/programbench
+uv run --project "$PROGRAMBENCH_REPO" programbench blob sync jgm__pandoc.5caad90
+```
+
+Record the upstream revision and v6 image digest. Test blobs can also download
+on demand during evaluation; downloading them before inference catches access
+and disk-space failures before a six-hour run.
+
 ## Configure the experiment
 
 Keep credentials in `~/.pbench-upstream.env`, with mode 600:
@@ -93,6 +113,43 @@ REASONING_EFFORT=high
 proxy injects the upstream credential; agents receive a local proxy credential.
 The same variables supplied in the environment override this credentials file.
 Never commit credentials or generated profiles.
+
+### A model API bound to host loopback
+
+`127.0.0.1` inside a container is the container itself. A host API listening only
+on `127.0.0.1:4399` therefore needs a relay reachable from the egress container;
+`host.docker.internal` alone cannot reach a loopback-only listener. Keep the
+original API process running with its existing settings. For the local Copilot
+endpoint, use one of its configured GitHub credentials as the bearer token.
+For example, its owner-only client file can supply the credential without
+printing it:
+
+```bash
+source ~/.config/copilot-endpoint/client.env
+export LLM_UPSTREAM_TOKEN="$OPENAI_API_KEY"
+```
+
+Find the Docker host gateway (`ip -4 addr show docker0`; commonly
+`172.17.0.1`). Start a uniquely named relay from the fixed run checkout:
+
+```bash
+systemd-run --user --unit="omcgitea-api-relay-$RUN_ID" \
+  --property=Restart=on-failure \
+  /usr/bin/env UPSTREAM=http://127.0.0.1:4399 \
+  LISTEN_HOST=172.17.0.1 LISTEN_PORT=4399 UPSTREAM_RETRY_ATTEMPTS=1 \
+  python3 "$PWD/scripts/strip_metadata_proxy.py"
+export LLM_UPSTREAM=http://172.17.0.1:4399
+```
+
+This reuses the release proxy, rewrites the HTTP Host header for the loopback
+API, preserves the supplied bearer credential, and adds no retries. Bind to
+the Docker gateway, rather than every host interface. Use the URL without
+`/v1`; the egress proxy appends the API path. Check the real model route with
+tools and high reasoning, and verify access from the experiment's egress
+container as well as from the host. A relay health check only proves that its
+own listener is up. Keep the relay running through all scheduled inference
+runs. A transient `systemd-run` unit survives terminal exit; install a regular
+service if it must also survive a reboot.
 
 Use the same task list and worker count for profile generation, image building
 and launch. These are the main experiment defaults:
@@ -111,8 +168,9 @@ alone defaults to Pandoc, whereas the launcher defaults to all five tasks.
 Each task gets `.env.pbench-single-node-<task>`, for example
 `.env.pbench-single-node-pandoc`. Profiles are mode 600, contain secrets, and
 retain their local passwords when regenerated. Each has its own ports, subnet
-and data directory under `.claude-team-data/`. Do not mix profiles generated
-with different worker counts in a concurrent run.
+and data directory under `.claude-team-data/`. Regenerating the same profile
+with another worker count overwrites its configuration. For concurrent runs of
+the same task, use the isolated workflow below.
 
 ### Reference and evaluation images
 
@@ -194,6 +252,90 @@ mini-router or board. Third-party service images are
 
 If Docker's default bridge is unavailable, build commands that execute `RUN`
 steps may need `--network host`; use the corresponding Dockerfile directly.
+
+### Fresh builds and concurrent runs on a shared host
+
+Start with a new checkout at a recorded release commit for each worker count.
+Keep those checkouts fixed for the whole run: prompts, the ACP bridge, proxy,
+MCP adapters and configuration are mounted from them. Each run needs empty
+output and data directories, its own profile name, ports and non-overlapping
+subnets. `RUN_ID` names logs and trajectories; it does not isolate Compose.
+
+Use a new image tag for this cohort so building cannot move an image tag used
+by another experiment. These optional settings preserve the standard defaults
+when absent:
+
+```bash
+export IMAGE_TAG="scratch-$RUN_ID"
+export AGENT_IMAGE_TAG="$IMAGE_TAG"
+export MINI_ROUTER_IMAGE="omcgitea-mini-router:$IMAGE_TAG"
+export BOARD_IMAGE="omcgitea-board:$IMAGE_TAG"
+export BOOTSTRAP_IMAGE="omcgitea-bootstrap:$IMAGE_TAG"
+export SECRET_SERVICE_IMAGE="omcgitea-secret-service:$IMAGE_TAG"
+```
+
+Rebuild every project image without the build cache. Upstream images are
+dependencies, not earlier experiment state. Resolve and record their digests;
+on a shared host, pull a resolved digest instead of moving shared upstream
+tags. `TASK_IMAGE` must resolve to the same official v6 image used for reference
+extraction and evaluation. For Pandoc, from one fixed checkout:
+
+```bash
+sudo docker build --no-cache --network host -f agent/Dockerfile.base \
+  -t "omcgitea-agent-base:$IMAGE_TAG" agent/
+sudo docker build --no-cache --network host -f agent/Dockerfile \
+  --build-arg TASK_IMAGE=programbench/jgm_1776_pandoc.5caad90:task_cleanroom_v6 \
+  --build-arg AGENT_BASE_IMAGE="omcgitea-agent-base:$IMAGE_TAG" \
+  -t "omcgitea-agent-pandoc:$IMAGE_TAG" .
+sudo docker build --no-cache --network host -t "$MINI_ROUTER_IMAGE" mini-router/
+sudo docker build --no-cache --network host -t "$BOARD_IMAGE" board-service/
+sudo docker build --no-cache --network host -t "$SECRET_SERVICE_IMAGE" secret-service/
+sudo docker build --no-cache --network host -t "$BOOTSTRAP_IMAGE" docker/bootstrap/
+```
+
+Use the image variables above while generating every profile. `AGENT_IMAGE_TAG`
+selects each task image's tag; the other variables select complete image names.
+The launcher validates the images named by the profile. Bootstrap and secret
+builds during startup also use these private names.
+
+For each checkout, set the following isolation variables before profile
+generation and retain `PROFILE_SUFFIX` during preflight and launch:
+
+| Workers | `PROFILE_SUFFIX` example | `PORT_BASE` | `SUBNET_OCTET` |
+|---|---|---|---|
+| 1 | `scratch-w1` | 24000 | 248 |
+| 8 | `scratch-w8` | 24100 | 249 |
+| 32 | `scratch-w32` | 24200 | 250 |
+
+These are example ranges: check host routes and listening ports before using
+them. Pandoc adds 50 to `PORT_BASE` for Gitea and 52 for Mattermost, and uses
+`10.<SUBNET_OCTET>.15.0/24`, `.16.0/24` and `.17.0/24` at these worker counts.
+Suffixes contain lowercase letters, digits and hyphens and begin with a letter
+or digit. For example:
+
+```bash
+export TASKS=jgm__pandoc.5caad90 WORKERS=1 HOURS=6
+export PROFILE_SUFFIX=scratch-w1 PORT_BASE=24000 SUBNET_OCTET=248
+bash scripts/pbench_gen_env.sh
+make check-env PROFILE=pbench-single-node-pandoc-scratch-w1
+PREFLIGHT_ONLY=1 bash scripts/launch_single_node.sh
+bash scripts/launch_single_node.sh
+```
+
+Repeat profile generation and preflight in the other fixed checkouts with
+their own worker count and isolation settings. Record image IDs, rendered
+Compose configuration, release/evaluator revisions and scheduled/actual start
+times. For a 10-minute and 6h30m stagger, schedule starts at the first launch's
+actual service start plus 600 and 23,400 seconds. The runner's internal
+30-second worker ramp and six-hour budget remain unchanged.
+
+Use independently named systemd services and timers for delayed launches, with
+the absolute checkout path and explicit `TASKS`, `WORKERS`, `HOURS`,
+`PROFILE_SUFFIX`, `RUN_ID`, `PROGRAMBENCH_REPO` and `TRAJ_ROOT`. Regular timer
+files with `OnCalendar=` and `Persistent=true` survive terminal exit and host
+reboot; arrange startup after Docker and the reboot guard. Do not enable
+automatic retries of a failed benchmark run. Verify each timer's next trigger
+and the first run's native model activity before reporting it as launched.
 
 ## Launch
 

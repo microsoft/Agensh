@@ -50,10 +50,9 @@ for task in $TASKS; do
     [ "${o:-compose}" = "compose" ] || { log "FATAL: .env.$p supports single-node Compose only"; fail=1; }
     [ "${PBENCH_ORCHESTRATOR:-compose}" = "compose" ] || { log "FATAL: PBENCH_ORCHESTRATOR supports single-node Compose only"; fail=1; }
 
-    img="omcgitea-agent-$(short "$task"):pbench"
+    img="$(pv "$p" AGENT_IMAGE)"
+    [ -n "$img" ] || { log "FATAL: .env.$p AGENT_IMAGE missing"; fail=1; continue; }
     sudo docker image inspect "$img" >/dev/null 2>&1 || { log "FATAL: image missing: $img"; fail=1; }
-    got="$(pv "$p" AGENT_IMAGE)"
-    [ "$got" = "$img" ] || { log "FATAL: .env.$p AGENT_IMAGE=$got expected $img"; fail=1; }
     sudo docker run --rm --network none --entrypoint sh "$img" -c 'test -x /usr/local/bin/copilot-wrapped' \
         2>/dev/null || { log "FATAL: $img has no copilot-wrapped"; fail=1; }
 
@@ -121,11 +120,16 @@ stale_img() {  # $1 image  $2 label  $3... build inputs (files or dirs)
     log "image OK: $img is newer than $label"
 }
 BS="$ROOT/board-service"; MR="$ROOT/mini-router"
-stale_img omcgitea-board:local board-service/ \
-    "$BS/Dockerfile" "$BS/requirements.txt" "$BS"/*.py || fail=1
-stale_img omcgitea-mini-router:local mini-router/ \
-    "$MR/Dockerfile" "$MR/package.json" "$MR/package-lock.json" "$MR/tsconfig.json" \
-    "$MR/src" || fail=1
+for task in $TASKS; do
+    p="$(task_profile "$task")"
+    board_img="$(pv "$p" BOARD_IMAGE)"
+    router_img="$(pv "$p" MINI_ROUTER_IMAGE)"
+    stale_img "${board_img:-omcgitea-board:local}" board-service/ \
+        "$BS/Dockerfile" "$BS/requirements.txt" "$BS"/*.py || fail=1
+    stale_img "${router_img:-omcgitea-mini-router:local}" mini-router/ \
+        "$MR/Dockerfile" "$MR/package.json" "$MR/package-lock.json" "$MR/tsconfig.json" \
+        "$MR/src" || fail=1
+done
 
 # The agent image bakes the entrypoint, and the entrypoint decides which paths
 # the prompt and config mounts must cover: an image built before a path moved
