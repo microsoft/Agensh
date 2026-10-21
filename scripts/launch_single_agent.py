@@ -210,6 +210,8 @@ print(json.dumps({'uid':os.getuid(),'reference_readable':os.access('/opt/pbench/
         temporary.mkdir()
         eval_env = env | {'PROGRAMBENCH_DOCKER_EXECUTABLE': str(SOURCE / 'scripts/pbench-docker-sudo.sh'),
                           'TMPDIR': str(temporary)}
+        if config.get('pytest_addopts'):
+            eval_env['PBENCH_EVAL_PYTEST_ADDOPTS'] = config['pytest_addopts']
         with (run_dir / 'eval.log').open('w') as output:
             invoke([str(Path.home() / '.local/bin/uv'), 'run', '--project', config['programbench_repo'],
                     'programbench', 'eval', out, '--filter', config['task'], '--image-tag', 'task_cleanroom_v6'],

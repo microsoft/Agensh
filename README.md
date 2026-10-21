@@ -487,6 +487,7 @@ model.chmod(0o600)
 config = {
     'task': 'jgm__pandoc.5caad90', 'model': 'gpt-5.6-sol', 'reasoning_effort': 'high',
     'hours': 6, 'deadline_seconds': 21600, 'snapshot_seconds': 1200, 'skip_eval': False,
+    'pytest_addopts': '--rootdir=.',
     'project': 'omcgitea-pbench-single-agent-' + os.environ['RUN_ID'],
     'agent_image': os.environ['AGENT_IMAGE'],
     'cleanroom_image': 'programbench/jgm_1776_pandoc.5caad90:task_cleanroom_v6',
@@ -555,6 +556,23 @@ score. Preserve the initial evaluation JSON and rerun the same evaluation
 command against the unchanged submission after the failure is resolved.
 ProgramBench v1.2.5 retries incomplete branches and retains completed branches
 without `--force`; inference does not need to be repeated.
+
+For Pandoc evaluation, set `PBENCH_EVAL_PYTEST_ADDOPTS='--rootdir=.'` when using
+the Docker shim. The standalone configuration above passes it through
+`pytest_addopts`. A submitted `pyproject.toml` can otherwise change pytest's
+inferred root, adding `eval.` to the larger branch's JUnit names and producing
+both missing tests and unexpected duplicates. The relative root preserves each
+branch runner's own working directory and the registered test identities. The
+shim appends to the evaluator's existing pytest options; submission files and
+test definitions stay unchanged. This option is opt-in for other evaluations.
+Check for test-identity warnings as well as branch errors before accepting a
+score. To verify the fix with real cases from both official Pandoc branches:
+
+```bash
+python3 scripts/test_eval_pytest_root.py \
+  --submission /absolute/path/to/jgm__pandoc.5caad90/submission.tar.gz \
+  --blob-dir /absolute/path/to/cached/blobs/jgm__pandoc.5caad90
+```
 
 The chain's `SCORE` line and `programbench info` count rerun attempts separately.
 For the canonical-kept score, use the reporting tool, which calls

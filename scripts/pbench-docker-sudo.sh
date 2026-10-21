@@ -67,6 +67,28 @@ if [ "$sub" = "run" ]; then
     # swaps instead of dying.
     extra=(--memory="$CAP" --memory-swap="$CAP")
     [ -n "$NET" ] && extra+=(--network="$NET")
+    # Keep pytest's root relative to each branch's own working directory when
+    # submission metadata would otherwise change JUnit test identities. Preserve
+    # the evaluator's existing options, including its worker-restart setting.
+    if [ -n "${PBENCH_EVAL_PYTEST_ADDOPTS:-}" ]; then
+        pytest_args=("$@")
+        pytest_found=0
+        for ((pytest_index=idx; pytest_index<${#pytest_args[@]}; pytest_index++)); do
+            case "${pytest_args[$pytest_index]}" in
+                --env|-e)
+                    if [ $((pytest_index + 1)) -lt "${#pytest_args[@]}" ] \
+                        && [[ "${pytest_args[$((pytest_index + 1))]}" = PYTEST_ADDOPTS=* ]]; then
+                        pytest_args[$((pytest_index + 1))]+=" $PBENCH_EVAL_PYTEST_ADDOPTS"
+                        pytest_found=1
+                    fi ;;
+                --env=PYTEST_ADDOPTS=*|-ePYTEST_ADDOPTS=*)
+                    pytest_args[$pytest_index]+=" $PBENCH_EVAL_PYTEST_ADDOPTS"
+                    pytest_found=1 ;;
+            esac
+        done
+        set -- "${pytest_args[@]}"
+        [ "$pytest_found" = 1 ] || extra+=(--env "PYTEST_ADDOPTS=$PBENCH_EVAL_PYTEST_ADDOPTS")
+    fi
     set -- "${@:1:$idx}" "${extra[@]}" "${@:$((idx + 1))}"
 fi
 
