@@ -11,8 +11,9 @@ This release contains the **single-node setup used for the main experiment**.
 `scripts/launch_single_node.sh` runs a team of peer coding agents in Docker
 Compose, one ProgramBench task at a time. Agents collaborate through Gitea,
 Mattermost and a shared board; each has a mini-router sidecar and a native
-Copilot ACP process. Kubernetes, simulation and standalone baseline launchers
-are outside this release. The agent runtime is Copilot only; the router uses
+Copilot ACP process. `scripts/launch_single_agent.py` runs the standalone
+single-agent baseline with immediate continuation. Kubernetes and simulation
+launchers are outside this release. The agent runtime is Copilot only; the router uses
 the experiment's batch dispatcher. Alternate adapters and the separate
 step-loop experiment are removed.
 
@@ -420,8 +421,9 @@ the T-45-minute notice tells workers to stop new features and focus on merging
 and buildability, and the T-5-minute notice tells them to finish and stop.
 
 The historical standalone single-agent driver used different prompts and
-immediately sent another resume prompt after a turn ended. It is outside this
-release. Report `WORKERS=1` as the one-worker team condition, and record active
+immediately sent another resume prompt after a turn ended. Use the dedicated
+standalone entrypoint below for that condition. Report `WORKERS=1` as the
+one-worker team condition, and record active
 prompt intervals as well as allocated wall time when comparing it with other
 team sizes or a continuously driven solo baseline. Changing the resume or idle
 policy creates a different experimental condition.
@@ -437,6 +439,111 @@ rate-limit larger teams or concurrent evaluations differently. Agent
 trajectories contain Copilot usage events for inspecting latency; the optional
 `scripts/pbench_rpm_dashboard.py` observes proxy request rates without making
 model calls.
+
+## Standalone single-agent baseline
+
+Use `scripts/launch_single_agent.py` for the single-agent condition. It uses
+all three standalone prompts from `06e16c2` and the historical ACP resume loop:
+a normal stop immediately triggers another prompt in the same native session.
+The separate 600-second timeout recovers a pending request with no ACP output;
+it does not impose an idle delay. The original 15-minute deadline notice and
+last-minute stopping rule are preserved. Unused Claude configuration support
+has been removed from this Copilot-only driver.
+
+This path runs one autonomous engineer with local Git and two containers: the
+agent and its API egress proxy. It does not start the team services. It retains
+the release's private Node, Copilot 1.0.70, 1 MiB tool-output threshold,
+`task`/`list_agents` exclusions, 64 GiB worker limit and verified shutdown
+archives. Reference, worker image and official evaluation use cleanroom v6.
+These infrastructure updates differ from the historical standalone image;
+record the release revision when reporting the result.
+
+Run these commands **from this repository** after installing the prerequisites,
+preparing a pinned ProgramBench checkout and setting up the local API relay as
+shown above. Choose a fresh run ID, image tags, data and unoccupied subnets:
+
+```bash
+export RUN_ID="$(date -u +%Y%m%dt%H%M%Sz)"
+export BASELINE_ROOT="$PWD/out/single-agent-pandoc-$RUN_ID"
+export AGENT_BASE_IMAGE="omcgitea-agent-base:release-single-$RUN_ID"
+export AGENT_IMAGE="omcgitea-agent-pandoc:release-single-$RUN_ID"
+export PROGRAMBENCH_REPO=/absolute/path/to/pinned-programbench
+export LLM_UPSTREAM=http://172.17.0.1:4399
+source ~/.config/copilot-endpoint/client.env
+export LLM_UPSTREAM_TOKEN="$OPENAI_API_KEY"
+mkdir -p "$BASELINE_ROOT/config"
+chmod 700 "$BASELINE_ROOT" "$BASELINE_ROOT/config"
+
+python3 - <<'PYCONFIG'
+import json, os
+from pathlib import Path
+root = Path(os.environ['BASELINE_ROOT']).resolve()
+model = root / 'config/model.env'
+model.write_text('UPSTREAM=' + os.environ['LLM_UPSTREAM'] + '\n'
+                 'UPSTREAM_AUTH_STYLE=bearer\n'
+                 'UPSTREAM_AUTH_TOKEN=' + os.environ['LLM_UPSTREAM_TOKEN'] + '\n'
+                 'UPSTREAM_RETRY_ATTEMPTS=4\n')
+model.chmod(0o600)
+config = {
+    'task': 'jgm__pandoc.5caad90', 'model': 'gpt-5.6-sol', 'reasoning_effort': 'high',
+    'hours': 6, 'deadline_seconds': 21600, 'snapshot_seconds': 1200, 'skip_eval': False,
+    'project': 'omcgitea-pbench-single-agent-' + os.environ['RUN_ID'],
+    'agent_image': os.environ['AGENT_IMAGE'],
+    'cleanroom_image': 'programbench/jgm_1776_pandoc.5caad90:task_cleanroom_v6',
+    'run_dir': str(root / 'run'), 'model_env_file': str(model),
+    'programbench_repo': str(Path(os.environ['PROGRAMBENCH_REPO']).resolve()),
+    'subnet_default': '10.177.242.0/24', 'subnet_egress': '10.177.243.0/24',
+}
+(root / 'config/baseline.json').write_text(json.dumps(config, indent=2) + '\n')
+PYCONFIG
+
+sudo docker build --no-cache -f agent/Dockerfile.base -t "$AGENT_BASE_IMAGE" agent/
+sudo docker build --no-cache -f agent/Dockerfile \
+  --build-arg AGENT_BASE_IMAGE="$AGENT_BASE_IMAGE" \
+  --build-arg TASK_IMAGE=programbench/jgm_1776_pandoc.5caad90:task_cleanroom_v6 \
+  -t "$AGENT_IMAGE" .
+PBENCH_TEST_AGENT_IMAGE="$AGENT_IMAGE" python3 scripts/test_single_agent.py
+```
+
+The integration test runs real native Copilot ACP and bash tools; only the
+external model is a fixture. It checks immediate continuation in one session,
+model/effort, tool exclusions, reference permissions, network isolation,
+snapshots, submission export and archive integrity. Test state is isolated
+under `out/single-agent-test-*`. `PBENCH_TEST_GATEWAY`, `PBENCH_TEST_SUBNET` and
+`PBENCH_TEST_EGRESS_SUBNET` override the default Docker gateway and test
+subnets (`172.17.0.1`, `10.177.244.0/24`, `10.177.245.0/24`).
+
+Commit the code and README before the benchmark launch. Run through the repo
+entrypoint in the installed memory-limited slice; systemd keeps it running
+when the terminal disconnects:
+
+```bash
+sudo systemd-run --unit="omcgitea-single-agent-$RUN_ID" \
+  --uid="$(id -u)" --gid="$(id -g)" --working-directory="$PWD" \
+  --slice=pbench.slice --property=Restart=no --property=KillMode=mixed \
+  --property=TimeoutStopSec=12min --property=UMask=0077 \
+  --setenv=PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin" \
+  /usr/bin/python3 "$PWD/scripts/launch_single_agent.py" \
+  --config "$BASELINE_ROOT/config/baseline.json"
+```
+
+The launcher refuses existing run state or a project with existing containers,
+publishes no host ports, and verifies the reference is executable but unreadable
+as UID 10000 and that the agent cannot reach a public IP. Only the proxy receives
+the upstream credential. Keep the repo revision and image tags fixed during the
+run. `run/provenance.json` records source/image/reference hashes; `run/cc.log`
+records prompt starts and stops; `run/status.json` records lifecycle state.
+Snapshots occur every 20 minutes. After inference, the ACP bridge cancels native
+work, stops detached tools and saves a checksummed HOME/workspace archive. The
+launcher verifies the archive, freezes and exports the workspace, and evaluates
+with `--image-tag task_cleanroom_v6`. It preserves data if shutdown verification
+fails and never automatically reruns an experiment.
+
+The submission and evaluation are in `run/out/<task>/`. For canonical scoring,
+use the reporting command below with `run/out` as the results directory. To
+stop this baseline, use `sudo systemctl stop omcgitea-single-agent-<RUN_ID>`;
+its archive and data remain available for recovery. Team `make down`/`clean`
+commands apply to the separate team launcher.
 
 ## Score
 
