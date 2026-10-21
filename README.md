@@ -547,6 +547,15 @@ commands apply to the separate team launcher.
 
 ## Score
 
+ProgramBench can exit successfully while `test_branch_errors` records an
+evaluation failure. Inspect both `error_code` and `test_branch_errors` in the
+evaluation JSON before reporting a final score. Missing test results are counted
+as failures, so a dependency-download outage can produce a low, incomplete
+score. Preserve the initial evaluation JSON and rerun the same evaluation
+command against the unchanged submission after the failure is resolved.
+ProgramBench v1.2.5 retries incomplete branches and retains completed branches
+without `--force`; inference does not need to be repeated.
+
 The chain's `SCORE` line and `programbench info` count rerun attempts separately.
 For the canonical-kept score, use the reporting tool, which calls
 ProgramBench's `score_instance`:
