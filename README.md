@@ -410,6 +410,22 @@ After export, routers and CI runners stop first. Workers then receive up to
 600 seconds to cancel native work, stop detached tools and seal final state;
 this shutdown grace does not extend the submitted Git cutoff.
 
+`WORKERS=1` runs a **one-worker team** with the same peer instructions,
+Git/PR workflow, chat, board and event-driven dispatcher. When that worker
+finishes a prompt and has no pending events, the dispatcher waits. The idle
+watchdog uses a 600-second inactivity threshold and 60-second checks; it does
+not immediately resume the agent. Multiple workers can wake one another through
+normal coordination events. The initial team task brief omits the total budget;
+the T-45-minute notice tells workers to stop new features and focus on merging
+and buildability, and the T-5-minute notice tells them to finish and stop.
+
+The historical standalone single-agent driver used different prompts and
+immediately sent another resume prompt after a turn ended. It is outside this
+release. Report `WORKERS=1` as the one-worker team condition, and record active
+prompt intervals as well as allocated wall time when comparing it with other
+team sizes or a continuously driven solo baseline. Changing the resume or idle
+policy creates a different experimental condition.
+
 All workers receive the same peer-coder role and tool configuration. The CI
 merge gate is disabled. Bootstrap creates only the peer-coder team and sets required approvals to
 **0**. Direct agent pushes to main are restricted; peers collaborate through
