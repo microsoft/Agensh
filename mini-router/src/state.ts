@@ -1,17 +1,10 @@
 /**
- * mini-router state — MySQL-backed events store.
- *
- * Mini-router runs one process per agent. A single shared MySQL holds
- * `events` rows for ALL agents; row-level isolation via `agent` column
- * means a sidecar only ever WHEREs `agent = $self`.
+ * Store per-worker events, source cursors and ACP session IDs in shared MySQL.
+ * Events move pending -> sending -> sent, with bounded retries after failures.
  */
 import { createPool, type Pool, type RowDataPacket, type ResultSetHeader } from "mysql2/promise";
 import { GROUP_CHAT_SQL } from "./group_messages.ts";
 
-/**
- * UEM-shaped payload (kept structural to avoid pulling in router/src
- * types). Mini-router doesn't validate the shape — Gitea listener does.
- */
 export interface UEMLike {
   event_id: string;
   source: string;
@@ -24,10 +17,6 @@ export interface EventRow {
   payload: UEMLike;
 }
 
-/** Backoff schedule, indexed by attempts-1 (1-based).
- * This ladder re-delivers a batch after a turn fails or is killed. MAX_ATTEMPTS
- * deliveries use MAX_ATTEMPTS-1 rungs, so the whole span is ~2.6 min (the
- * sweeper's 30 s poll rounds the first two rungs up). */
 export const RETRY_BACKOFF_MS: readonly number[] = [
   1_000,
   5_000,
@@ -73,8 +62,6 @@ export class EventStore {
          \`cursor\` VARCHAR(255) NOT NULL,
          PRIMARY KEY (agent, source)
        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
-      // Persist the Copilot ACP session under acp_session_id:copilot so a
-      // router restart can restore the conversation.
       `CREATE TABLE IF NOT EXISTS agent_kv (
          agent VARCHAR(128) NOT NULL,
          k VARCHAR(128) NOT NULL,
@@ -87,10 +74,7 @@ export class EventStore {
       await this.pool.query(stmt);
     }
 
-    // CREATE TABLE IF NOT EXISTS does not upgrade an existing database. Most
-    // sidecars will see the index and return immediately; on an old schema the
-    // advisory lock serializes the one ALTER across all concurrently starting
-    // sidecars.
+    // All routers may start together; serialize the index upgrade with a DB lock.
     const batchIndexSql = `SELECT COLUMN_NAME AS column_name
       FROM information_schema.STATISTICS
       WHERE TABLE_SCHEMA = DATABASE()
@@ -132,11 +116,8 @@ export class EventStore {
     }
   }
 
-  /**
-   * Insert UEM as `pending`. Returns inserted row id, or null if a row
-   * with (dedup_key, agent) already exists. (idempotency hinge).
-   */
   async ingest(uem: UEMLike, now: number = Date.now()): Promise<number | null> {
+    // The unique event/agent key absorbs repeated live events and catch-up results.
     const [r] = await this.pool.query<ResultSetHeader>(
       `INSERT INTO events
          (dedup_key, source, agent, payload, state, attempts, created_at)
@@ -144,14 +125,12 @@ export class EventStore {
        ON DUPLICATE KEY UPDATE id = id`,
       [uem.event_id, uem.source, uem.target_agent, JSON.stringify(uem), now],
     );
-    // mysql2: ON DUPLICATE KEY with id=id → affectedRows=1 but insertId=0
-    // for the dup case (no actual insert). For real insert, insertId>0.
     if (r.affectedRows === 1 && r.insertId > 0) return Number(r.insertId);
     return null;
   }
 
-  /** FIFO for other events, plus the complete file-backed group-chat backlog. */
   async nextPendingBatch(agent: string, limit: number): Promise<EventRow[]> {
+    // Drain all group messages so the file backlog includes every queued message.
     const cap = Math.max(1, Math.min(1000, Math.floor(limit)));
     const [[rows], [messages]] = await Promise.all([
       this.pool.query<RowDataPacket[]>(
@@ -164,10 +143,6 @@ export class EventStore {
     return [...rows, ...messages].map(toEventRow).sort((a, b) => a.id - b.id);
   }
 
-  /**
-   * pending → sending; tag batch_id; bump attempts. Returns # rows actually
-   * transitioned (CAS-protected so concurrent dispatchers don't double-claim).
-   */
   async markBatchSending(ids: number[], batchId: string): Promise<number> {
     if (ids.length === 0) return 0;
     const placeholders = ids.map(() => "?").join(",");
@@ -183,7 +158,6 @@ export class EventStore {
     return r.affectedRows;
   }
 
-  /** sending → sent; stamp sent_at. */
   async markBatchSent(batchId: string, now: number = Date.now()): Promise<void> {
     await this.pool.query(
       MARK_BATCH_SENT_SQL,
@@ -191,27 +165,8 @@ export class EventStore {
     );
   }
 
-  /**
-   * Retire rows mcp-notice-shim already rendered into a tool result.
-   *
-   * The shim appends pending DM notices to an MCP tool result mid-turn
-   * and reports what it showed into board-service's `shown` table. Those rows
-   * are already in the agent's context, so re-delivering them at the turn
-   * boundary would duplicate them. This is the only place that reconciles the
-   * two paths, and it lives here rather than in board-service because the
-   * ROUTER must stay the only writer to `events` (dispatchBatch guards a claim
-   * on `claimed === 0` without filtering the batch, so a partial CAS loss from
-   * an outside writer double-delivers silently).
-   *
-   * `AND state='pending'` is the CAS: a row already claimed into 'sending' by
-   * dispatchBatch belongs to that batch and is left alone.
-   *
-   * Fails OPEN. `shown` is created by board-service, so on a stack where that
-   * has not run yet the query throws; returning an empty set means "nothing was
-   * pre-shown", i.e. deliver normally. Losing a de-dup costs one duplicate
-   * notice; throwing here would stall the whole batch.
-   */
   async claimShown(agent: string, ids: number[], now: number = Date.now()): Promise<Set<number>> {
+    // The board service writes this ledger after the shim emits a notice.
     const out = new Set<number>();
     if (ids.length === 0) return out;
     const placeholders = ids.map(() => "?").join(",");
@@ -236,38 +191,22 @@ export class EventStore {
     return out;
   }
 
-  /**
-   * Mark a single row as failed. Computes next_retry_at from RETRY_BACKOFF_MS.
-   * `attempts` is read fresh inside the UPDATE; if attempts+1 >= MAX_ATTEMPTS
-   * the row becomes terminal (next_retry_at = NULL) and won't be reclaimed.
-   *
-   */
   async markFailed(
     id: number,
     err: string,
     now: number = Date.now(),
   ): Promise<void> {
-    // Read attempts then update — safer/clearer than encoding the backoff
-    // table inside SQL CASE. There is no other writer to a single row's
-    // attempts in normal operation; if there is, the worst case is a
-    // slightly stale next_retry_at, which sweeper will still pick up.
     const [rows] = await this.pool.query<RowDataPacket[]>(
       `SELECT attempts FROM events WHERE id = ?`,
       [id],
     );
     if (rows.length === 0) return;
-    // markBatchSending already did `attempts = attempts + 1` for this delivery.
-    // Adding another here would burn two attempts per try: with MAX_ATTEMPTS=5
-    // an event would die after three deliveries, not five.
+    // Attempts are incremented when claimed for sending, before the ACP call.
     const newAttempts = Number(rows[0]!.attempts);
     const next =
       newAttempts >= MAX_ATTEMPTS
         ? null
         : now + RETRY_BACKOFF_MS[newAttempts - 1]!;
-    // Guard on state='sending'. markBatchSent runs INSIDE the dispatcher's try
-    // block, so a MySQL blip on that UPDATE -- after the batch was already
-    // delivered to the agent -- flipped up to 32 'sent' rows back to 'failed',
-    // and the sweeper redelivered every one of them.
     await this.pool.query(
       `UPDATE events
          SET state='failed',
@@ -279,17 +218,6 @@ export class EventStore {
     );
   }
 
-  /**
-   * Atomically claim retry-ready rows for one agent. Transitions
-   * (failed|retrying) AND attempts < MAX_ATTEMPTS AND next_retry_at <= now
-   * → 'retrying'.
-   *
-   * 'retrying' is picked up again because a claimed row stays there if the
-   * router dies, or markBatchSending throws, before the dispatch; nothing else
-   * ever moves it on. Re-claiming cannot double-deliver: the router's one
-   * sweeper awaits each dispatch before it claims again, and markBatchSending's
-   * CAS lets only one batch take a row to 'sending'.
-   */
   async claimRetryReady(
     agent: string,
     now: number = Date.now(),
@@ -298,6 +226,7 @@ export class EventStore {
     const cap = Math.max(1, Math.min(1000, Math.floor(limit)));
     const conn = await this.pool.getConnection();
     try {
+      // Lock the chosen rows until their retry claim and payload read are complete.
       await conn.beginTransaction();
       const where = `agent = ? AND state IN ('failed','retrying')
              AND attempts < ? AND next_retry_at IS NOT NULL AND next_retry_at <= ?`;
@@ -339,7 +268,6 @@ export class EventStore {
     }
   }
 
-  /** Boot-time scrub: revive `sending` (left over from a kill -9). */
   async recoverSendingToPending(agent: string): Promise<number> {
     const [r] = await this.pool.query<ResultSetHeader>(
       `UPDATE events
@@ -368,10 +296,6 @@ export class EventStore {
     );
   }
 
-  /**
-   * Generic per-agent K/V. ACP session IDs are stored under
-   * `acp_session_id:copilot` so router restarts can restore the same ACP session.
-   */
   async getKv(agent: string, key: string): Promise<string | null> {
     const [rows] = await this.pool.query<RowDataPacket[]>(
       "SELECT v FROM agent_kv WHERE agent = ? AND k = ?",
@@ -393,7 +317,6 @@ export class EventStore {
 
 
 function toEventRow(r: RowDataPacket): EventRow {
-  // mysql2 returns JSON columns as already-parsed objects.
   const payload =
     typeof r.payload === "string"
       ? (JSON.parse(r.payload) as UEMLike)

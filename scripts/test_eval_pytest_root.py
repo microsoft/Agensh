@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Check real ProgramBench test identities when a submission has pyproject.toml."""
+# Run one official test from each Pandoc branch against a supplied submission.
+# Assert JUnit identities with the evaluator's pytest-root option appended by
+# the Docker shim. Requires real cached test blobs and the v6 cleanroom image.
+
 import argparse
 import json
 import os
@@ -10,7 +13,7 @@ import unittest
 import xml.etree.ElementTree as ET
 
 REPO = Path(__file__).resolve().parents[1]
-PARSER = argparse.ArgumentParser(description=__doc__)
+PARSER = argparse.ArgumentParser(description='Check real ProgramBench test identities when a submission has pyproject.toml.')
 PARSER.add_argument('--submission', type=Path, required=True)
 PARSER.add_argument('--blob-dir', type=Path, required=True)
 PARSER.add_argument('--image', default='programbench/jgm_1776_pandoc.5caad90:task_cleanroom_v6')
@@ -22,6 +25,7 @@ class PytestRootIntegration(unittest.TestCase):
         root = REPO / 'out' / ('eval-pytest-root-test-' + str(time.time_ns()))
         root.mkdir(parents=True)
         cases = [
+            # Branches invoke pytest from different working directories.
             ('08afe9ff1778', '/workspace', 'eval/tests/test_pandoc.py::test_version_output',
              'eval.tests.test_pandoc.test_version_output'),
             ('ea7a9f0674dc', '/workspace/eval', 'tests/test_cli_options.py::test_list_highlight_styles',

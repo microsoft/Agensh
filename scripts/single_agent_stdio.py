@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""Connect the original standalone ACP driver to the release's native ACP bridge."""
+# Adapt docker exec stdio to the standalone worker's persistent ACP Unix socket.
+# Preserve half-close on stdin EOF so remaining child output can still be drained.
+
 import os
 import socket
 import threading
@@ -34,6 +36,7 @@ threading.Thread(target=forward_input, daemon=True).start()
 try:
     while data := connection.recv(65536):
         view = memoryview(data)
+        # os.write may consume only part of a socket chunk.
         while view:
             view = view[os.write(1, view):]
 finally:

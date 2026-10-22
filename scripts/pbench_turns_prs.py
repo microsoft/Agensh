@@ -1,26 +1,6 @@
 #!/usr/bin/env python3
-"""pbench_turns_prs.py — per-task turn and PR counts for trajectories, by run.
-
-Two independent sources, both captured in every trajectory snapshot:
-
-  turns  Copilot's persistent session event log:
-           data-root/agents/<agent>/home/.copilot/session-state/<uuid>/events.jsonl
-         `assistant.turn_start` is one model turn. Sessions across reconnects
-         are summed per agent.
-
-  PRs    gitea's sqlite, data-root/gitea/gitea/gitea.db
-         `issue.is_pull=1` counts PRs opened; `pull_request.has_merged=1`
-         counts those that reached main. Both matter: opened-but-unmerged is
-         the failure mode where correct work never lands.
-
-A trajectory directory is <task>.<mode>.<RUN_ID>. Each run is one column,
-each task one row, with a per-run aggregate, so runs can be compared directly.
-Each argument is a trajectories root or a single trajectory directory.
-
-Usage:
-    sudo python3 scripts/pbench_turns_prs.py ~/pbench-trajectories
-    sudo python3 scripts/pbench_turns_prs.py ~/pbench-trajectories/*.single-node.<RUN_ID>
-"""
+# Compare model-turn, tool, compaction and PR counts across archived trajectories.
+# Read native Copilot JSONL and Gitea's SQLite snapshot; group results by task/run.
 
 from __future__ import annotations
 
@@ -31,18 +11,13 @@ from collections import Counter
 from pathlib import Path
 
 
-
 def split_name(d: Path) -> tuple[str, str]:
-    """`<task>.<mode>.<RUN_ID>` -> (`<task>`, `<mode>.<RUN_ID>`).
-
-    A task id is `<owner>__<repo>.<commit>`, so it is the first two dot fields.
-    """
     parts = d.name.split(".", 2)
     return ".".join(parts[:2]), (parts[2] if len(parts) > 2 else "")
 
 
 def count_events(root: Path) -> dict[str, int]:
-    """Sum Copilot activity across all persisted sessions in the snapshot."""
+    # Sum all retained sessions, including those created after reconnects.
     c: Counter[str] = Counter()
     for f in root.glob("agents/*/home/.copilot/session-state/*/events.jsonl"):
         for line in f.read_text(errors="replace").splitlines():
@@ -61,13 +36,6 @@ def count_events(root: Path) -> dict[str, int]:
 
 
 def warn_if_unreadable(root: Path) -> None:
-    """Distinguish "the agents did nothing" from "we cannot read their logs".
-
-    Agent transcripts under data-root are root-owned. Run without sudo, Path.glob
-    skips the unreadable directories silently and every count comes back 0 — a
-    result that looks exactly like agents that never ran. That fabricated
-    absence reads as a real result, so say so out loud.
-    """
     top = root / "agents"
     if not top.is_dir():
         return
@@ -94,12 +62,13 @@ def warn_if_unreadable(root: Path) -> None:
 
 
 def count_prs(root: Path) -> dict[str, int]:
+    # Database counts measure recorded PRs and merges, independently of transcripts.
     db = root / "gitea/gitea/gitea.db"
     if not db.exists():
         return {"prs": 0, "merged": 0}
     con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
     try:
-        q = lambda s: con.execute(s).fetchone()[0]  # noqa: E731
+        q = lambda s: con.execute(s).fetchone()[0]
         return {
             "prs": q("select count(*) from issue where is_pull=1"),
             "merged": q("select count(*) from pull_request where has_merged=1"),
@@ -110,7 +79,7 @@ def count_prs(root: Path) -> dict[str, int]:
 
 def main(argv: list[str]) -> int:
     if len(argv) < 2:
-        print(__doc__)
+        print("pbench_turns_prs.py — per-task turn and PR counts for trajectories, by run.\n\nTwo independent sources, both captured in every trajectory snapshot:\n\n  turns  Copilot's persistent session event log:\n           data-root/agents/<agent>/home/.copilot/session-state/<uuid>/events.jsonl\n         `assistant.turn_start` is one model turn. Sessions across reconnects\n         are summed per agent.\n\n  PRs    gitea's sqlite, data-root/gitea/gitea/gitea.db\n         `issue.is_pull=1` counts PRs opened; `pull_request.has_merged=1`\n         counts those that reached main. Both matter: opened-but-unmerged is\n         the failure mode where correct work never lands.\n\nA trajectory directory is <task>.<mode>.<RUN_ID>. Each run is one column,\neach task one row, with a per-run aggregate, so runs can be compared directly.\nEach argument is a trajectories root or a single trajectory directory.\n\nUsage:\n    sudo python3 scripts/pbench_turns_prs.py ~/pbench-trajectories\n    sudo python3 scripts/pbench_turns_prs.py ~/pbench-trajectories/*.single-node.<RUN_ID>\n")
         return 2
 
     per_run: dict[str, dict[str, dict]] = {}

@@ -1,9 +1,6 @@
-"""Expand a shared gist directly to its full stored detail.
+# Resolve G-labels to optional full details stored behind short board gists.
+# Rendering an expansion does not publish it back to the shared board.
 
-The experiment has two levels: the short ``content`` peers see on the board,
-and the author-provided ``detail`` returned to the requesting agent. Detail
-retrieval is read-only and never adds the expanded text to the shared board.
-"""
 from __future__ import annotations
 
 import re
@@ -14,13 +11,11 @@ _LABEL_RE = re.compile(r"G(\d+)")
 
 
 def parse_label(label: str) -> Optional[int]:
-    """Resolve a base label such as G12; malformed labels remain unknown."""
     match = _LABEL_RE.fullmatch((label or "").strip())
     return int(match.group(1)) if match else None
 
 
 def unfold(labels: List[str], details: Dict[int, str]) -> Dict[str, Any]:
-    """Return full details, reporting unknown labels and requests over the cap."""
     requested = [label.strip() for label in labels if label and label.strip()]
     kept, dropped = requested[:MAX_UNFOLD_LABELS], requested[MAX_UNFOLD_LABELS:]
     blocks: List[str] = []
@@ -54,7 +49,6 @@ def unfold(labels: List[str], details: Dict[int, str]) -> Dict[str, Any]:
 
 
 def render_index(entries: List[Dict[str, Any]]) -> str:
-    """Advertise the base labels whose full details can be retrieved."""
     labelled = [e for e in entries if e.get("_label") and e.get("_has_detail")]
     if not labelled:
         return ""

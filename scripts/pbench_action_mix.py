@@ -1,12 +1,8 @@
 #!/usr/bin/env python3
-"""pbench_action_mix.py — classify Copilot tool calls by the work they perform.
+# Estimate tool-action categories from archived Copilot assistant tool requests.
+# Shell classification is heuristic: separate executable commands from file-writing
+# heredocs so generated source is not mistaken for a build or reference probe.
 
-Reads **/events.jsonl, including assistant.message.data.toolRequests.
-Shell calls are classified by their commands rather than grouped together.
-
-Usage:
-  sudo python3 scripts/pbench_action_mix.py <task-dir> [<task-dir> ...]
-"""
 from __future__ import annotations
 
 import json
@@ -16,17 +12,7 @@ import sys
 from collections import Counter
 from pathlib import Path
 
-# Order matters: first match wins, so the specific patterns precede the general
-# ones. Matched per simple command (see segments()), and anchored on the verb at
-# its head: an unanchored `\bmake\b` also fires on "make" in a heredoc body, a
-# path or a commit message.
-#
-# NOTE: writes are NOT handled here — see write_target() below. A write has to be
-# resolved by its TARGET, which a flat rule list cannot express, and two bugs
-# came from trying: `printf ... > /tmp/probe.c` (a throwaway file written to
-# observe the reference) counted as delivered code, and `cat > src/parsers/c.c
-# <<EOF` counted as *reading* because `cat` matched the read rule first.
-_VERB_END = r"(?=[\s<>;&|)]|$)"   # `\b` never matches after `g++`
+_VERB_END = r"(?=[\s<>;&|)]|$)"
 BASH_RULES: list[tuple[str, re.Pattern]] = [
     ("vcs/git",      re.compile(r"^git\s+(?!.*\bgrep\b)")),
     ("build",        re.compile(r"^(make|cmake|gcc|g\+\+|cc|c\+\+|clang|clang\+\+|\./compile\S*|"
@@ -37,39 +23,29 @@ BASH_RULES: list[tuple[str, re.Pattern]] = [
                                 r"python\d*(\.\d+)?\s+-m\s+(pytest|unittest)|"
                                 r"((ba)?sh\s+(-\S+\s+)*)?\S*(tests?/run\.sh|\./run\.sh|"
                                 r"\btests?\b\S*\.sh))" + _VERB_END)),
-    # Unanchored on purpose: a harness script that drives the artifact names it
-    # as an argument (`subprocess.run(['./executable', ...])`), not as a verb.
     ("run artifact", re.compile(r"\./executable\b|\bexecutable\s+--")),
     ("read code",    re.compile(r"^(cat|head|tail|less|sed -n|nl|wc|grep|rg|"
                                 r"find|ls|tree|diff|file|stat|awk)\b")),
 ]
 
-# A verb can stand at a line start or after an operator or an opening group, so
-# `cd build && make`, `x | ./executable` and `(ulimit -v N; ./executable)` are
-# all read by their verbs.
 SEGMENT_SPLIT = re.compile(r"&&|\|\||\$\(|[;|&\n(){}`]")
-# Words in front of the verb that are not it.
 PREFIX = re.compile(r"^((\w+=\S*|sudo|time|nohup|exec|command|env|nice|if|then|elif|"
                     r"else|do|while|until|!|timeout(\s+-\S+)*\s+\S+)\s+)*")
 
 
 def segments(text: str) -> list[str]:
-    """The simple commands in `text`, each starting at its verb."""
     segs = (PREFIX.sub("", s.strip()) for s in SEGMENT_SPLIT.split(text))
     return [s for s in segs if s]
 
 
 HEREDOC = re.compile(r"(?<!<)<<-?\s*(['\"]?)([A-Za-z_]\w*)\1")
-# A heredoc fed to an interpreter is code the command runs. One fed to cat, tee
-# or git is data -- file contents, a commit message -- and its words are not
-# commands.
 INTERPRETER = re.compile(r"((ba|da|z)?sh|python\d*(\.\d+)?|node|perl|ruby|runghc|runhaskell)")
 
 
 def command_text(cmd: str) -> str:
-    """`cmd` without the bodies of its data heredocs."""
+    # Keep interpreter-fed heredocs, but omit literal file contents from classification.
     out: list[str] = []
-    pending: list[tuple[str, bool]] = []   # (delimiter, keep the body)
+    pending: list[tuple[str, bool]] = []
     for line in cmd.split("\n"):
         if pending:
             delim, keep = pending[0]
@@ -85,23 +61,13 @@ def command_text(cmd: str) -> str:
             pending.append((m.group(2), bool(INTERPRETER.fullmatch(verb))))
     return "\n".join(out)
 
-# A write is resolved by its TARGET, not by the presence of `>`.
 WRITE_OP = re.compile(r"(>>?\s*(?P<redir>\S+))|(\b(?P<verb>tee|cp|mv)\b(?P<rest>[^|;&]*))"
                       r"|(<<\s*'?[A-Za-z_]*EOF)")
-# Throwaway scratch space. Both arms write sample inputs here to observe the
-# reference binary; that is observation, not delivery, and counting it as code
-# inflated both arms unequally.
 PROBE_PATH = re.compile(r"(/tmp/|/var/tmp/|\$\{?d\}?\b|\$TMPDIR|\$\{?TMP\w*\}?|"
                         r"mktemp|/dev/(null|stdout|stderr)|\.tmp\b)")
 
 
 def write_target(cmd: str) -> str | None:
-    """Return the path a command writes to, or None if it writes nothing.
-
-    Handles `> path`, `>> path`, `tee path`, `cp/mv src dst` (dst is the LAST
-    argument) and heredocs. Returns "" when a write is detected but no target
-    could be extracted, so the caller can still count it as a write.
-    """
     m = WRITE_OP.search(cmd)
     if not m:
         return None
@@ -110,22 +76,13 @@ def write_target(cmd: str) -> str | None:
     if m.group("verb"):
         args = [a for a in (m.group("rest") or "").split() if not a.startswith("-")]
         return args[-1] if args else ""
-    # A heredoc: the destination, if any, is on the same line before the `<<`.
     r = re.search(r">>?\s*(\S+)", cmd[: m.start()])
     return r.group(1) if r else ""
 
-# Coordination is best identified by NAMESPACE, not by verb. Every tool served
-# by the gitea / mattermost / board MCP servers is coordination infrastructure
-# by construction, and enumerating verbs kept leaking: gitea-get_me (833 calls),
-# list_my_repos (615), notification_read (231) and board-queue_status all fell
-# into "other" and undercounted the copilot arm's coordination share. Both arms
-# name these the same way modulo separator (mcp__gitea__x vs gitea-x).
 COORD_NS = ("gitea", "mattermost", "board")
-# Within a coordination namespace, these verbs mutate; everything else observes.
 COORD_WRITE = ("write", "post_message", "create", "merge", "add_comment",
                "finalize", "unfold", "close", "update", "delete", "edit")
 
-# Native (non-MCP) tools: local work on the actual program.
 TOOL_RULES: list[tuple[str, tuple[str, ...]]] = [
     ("planning",      ("todowrite", "toolsearch", "exitplanmode")),
     ("write code",    ("edit", "write_file", "apply_patch", "create_file",
@@ -135,6 +92,7 @@ TOOL_RULES: list[tuple[str, tuple[str, ...]]] = [
 
 
 def classify(name: str, args: dict) -> str:
+    # Match specific shell activities before broad file/tool-name categories.
     n = (name or "").lower()
     base = n.split("__")[-1] if "__" in n else n
 
@@ -145,11 +103,6 @@ def classify(name: str, args: dict) -> str:
             if isinstance(v, str):
                 cmd = v
                 break
-        # The command's PRIMARY action wins. Resolving writes first made every
-        # redirect a write (`make -j8 > build.log`), collapsing build 1,386->97
-        # and test 889->72. These four rules are the primary action; the read
-        # rule is deliberately LAST, after writes, because a heredoc into a
-        # source file starts with `cat`.
         segs = segments(command_text(cmd))
         for label, pat in BASH_RULES[:4]:
             if any(pat.search(s) for s in segs):
@@ -157,15 +110,12 @@ def classify(name: str, args: dict) -> str:
         tgt = write_target(cmd)
         if tgt is not None:
             return "probe/scaffold" if PROBE_PATH.search(tgt or cmd) else "write code"
-        # A read is the command's first verb past any `cd`, not any verb in it.
         first = next((s for s in segs if not re.match(r"cd\b", s)), "")
         for label, pat in BASH_RULES[4:]:
             if pat.search(first):
                 return label
         return "shell: other"
 
-    # Namespace first. `mcp__gitea__issue_read` and `gitea-issue_read` both
-    # start their server name at the head of a separator-split.
     head = re.split(r"[-_]+", n)[0]
     if head in COORD_NS or any(f"__{s}__" in n or n.startswith(f"{s}-")
                                for s in COORD_NS):
@@ -199,12 +149,6 @@ def walk_copilot(root: Path):
 
 
 def column_labels(names: list[str]) -> list[str]:
-    """Header labels: unique, at most `width` characters.
-
-    Neither end of a trajectory name tells columns apart on its own (see
-    main()), so keep both ends and cut the middle; number the labels if that
-    still collides.
-    """
     def cut(s: str, w: int) -> str:
         if len(s) <= w:
             return s
@@ -232,10 +176,6 @@ def main(argv: list[str]) -> int:
         c: Counter = Counter()
         for name, args in walk_copilot(root):
             c[classify(name, args)] += 1
-        # Key on the WHOLE path. Any fixed slice of the name collides: a task's
-        # trajectories share their head, a run's (`<task>.single-node.<RUN_ID>`)
-        # share their tail, and a collision silently overwrites one column with
-        # another, reporting a single column that looks like a complete answer.
         cols[str(Path(d))] = c
         if not sum(c.values()):
             print(f"WARNING: {d} yielded 0 tool calls — root-owned transcripts? "
@@ -259,7 +199,6 @@ def main(argv: list[str]) -> int:
         line += f"{sum(cols[n].values()):>17,} {100.0:>8.1f}%"
     print(line)
 
-    # The three summary ratios worth reading off directly.
     print()
     for n in names:
         c = cols[n]

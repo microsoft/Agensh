@@ -1,17 +1,6 @@
 #!/usr/bin/env bash
-# Runs one launch's tasks on one profile, back to back, then scores them. Called
-# by run_chain in scripts/lib_launch.sh, which passes the run identity.
-#
-#   PHASE=run   per task: the runner with SKIP_EVAL=1, then a trajectory snapshot
-#               (DATA_ROOT + out/<task>) and `make clean`. out/<task> is kept for
-#               the eval phase.
-#   PHASE=eval  per task: `programbench eval --filter <task>`, the score into the
-#               summary, the eval.json into the trajectory, then out/<task> is
-#               archived.
-#   unset       both, in that order.
-#
-# Required: PROFILE, TASKS_ENV (comma-separated task ids), SUFFIX, TRAJ_ROOT.
-# Logs: out/chain-$PROFILE.log and .summary.
+# Sequence inference, verified trajectory copies, profile cleanup and evaluation.
+# PHASE separates run/eval so the launcher can overlap evaluation with later tasks.
 
 set -u
 PROFILE="${PROFILE:?PROFILE=pbench-<mode>-<task> required}"
@@ -25,8 +14,6 @@ OUT_ROOT="${OUT_ROOT:-$ROOT/out/$PROFILE}"
 PB_REPO="${PROGRAMBENCH_REPO:-$HOME/programbench}"
 DOCKER_SUDO_SHIM="$ROOT/scripts/pbench-docker-sudo.sh"
 ENV_FILE="$ROOT/.env.$PROFILE"
-# Resolve the host bind-mount root the way compose does: DATA_ROOT exported by
-# the caller, else the profile's DATA_ROOT, else $ROOT/.claude-team-data.
 if [ -z "${DATA_ROOT:-}" ] && [ -f "$ENV_FILE" ]; then
     DATA_ROOT="$(awk -F= '$1=="DATA_ROOT"{sub(/\r$/,"",$2); print $2; exit}' "$ENV_FILE")"
 fi
@@ -38,12 +25,6 @@ touch "$SUMMARY"
 
 log() { echo "[chain $(date -u +%H:%M:%S)] $*" | tee -a "$LOG"; }
 
-# --- Free host ports ----------------------------------------------------------
-# The compose stack publishes Gitea + Mattermost on $EDGE_HTTP_PORT and
-# $EDGE_MM_PORT (read from $ENV_FILE by both `make up` and the runner). If either
-# is already bound, pick a free ephemeral port from the kernel and rewrite
-# $ENV_FILE so the stack and every internal curl agree. The original $ENV_FILE
-# is restored on EXIT.
 port_is_free() {
     python3 - "$1" <<'PY' >/dev/null 2>&1
 import socket, sys
@@ -59,9 +40,6 @@ PY
 }
 
 pick_free_port() {
-    # Kernel-assigned ephemeral port. TOCTOU window between here and docker's
-    # actual bind is tiny in practice; if it loses the race, `make up` fails
-    # loudly and the operator re-runs (idempotent — trap restores $ENV_FILE).
     python3 - <<'PY'
 import socket
 s = socket.socket()
@@ -82,6 +60,7 @@ restore_env() {
 }
 
 allocate_ports() {
+    # Temporarily rewrite occupied profile ports and restore the original file on exit.
     if [ ! -f "$ENV_FILE" ]; then
         log "FATAL: $ENV_FILE missing — cannot resolve ports for profile $PROFILE"
         return 1
@@ -104,9 +83,6 @@ allocate_ports() {
         EDGE_MM_PORT="$new"; changed=1
     fi
     if [ $changed -eq 1 ]; then
-        # A backup left behind by a crashed chain is the pristine env from
-        # before its port rewrite: restore it rather than back up the
-        # already-rewritten $ENV_FILE over it.
         ENV_BACKUP="$ENV_FILE.chain-orig"
         if [ -f "$ENV_BACKUP" ]; then
             log "WARN: $ENV_BACKUP already exists (leftover from crashed prior chain); restoring it before re-backing-up"
@@ -137,10 +113,8 @@ wait_for_docker() {
     log "docker daemon ready"
 }
 
-# Salvage a partial in-flight run (host reboot, chain restart mid-task):
-# re-export the submission from Gitea if the runner's trap did not, then
-# snapshot and clean. Eval happens in the eval phase.
 salvage_interrupted() {
+    # An incomplete worker archive must be recovered before any automatic cleanup.
     if [ ! -d "$DATA_DIR" ]; then return 0; fi
     sudo -n python3 "$ROOT/agent/archive.py" check "$DATA_DIR" || return 1
     local current
@@ -175,9 +149,8 @@ salvage_interrupted() {
     log "salvage complete for $current (eval deferred to Phase 2)"
 }
 
-# Phase-1 snapshot: DATA_ROOT + out/<task> → traj, then make clean.
-# out/<task> is LEFT IN PLACE (not archived) so Phase 2 eval can consume it.
 snapshot_run_and_clean() {
+    # Preserve both service data and task output, then verify source and copied archives.
     local task="$1"
     local dst="$TRAJ_ROOT/${task}.${SUFFIX}"
     log "snapshotting $task -> $dst"
@@ -202,7 +175,6 @@ snapshot_run_and_clean() {
         || log "WARN: make clean returned non-zero"
 }
 
-# Phase-2: run eval for one task, tee score, copy eval.json into traj, archive.
 eval_and_archive() {
     local task="$1"
     local task_out="$OUT_ROOT/$task"
@@ -229,20 +201,18 @@ eval_and_archive() {
         return 1
     fi
     report_score "$task"
-    # copy the just-produced eval.json into the trajectory snapshot
     local eval_json="$task_out/$task.eval.json"
     if [ -f "$eval_json" ] && [ -d "$dst/out" ]; then
         sudo cp -a "$eval_json" "$dst/out/" \
             && sudo chown "$(id -u):$(id -g)" "$dst/out/$task.eval.json" 2>/dev/null || true
         log "eval.json copied into trajectory: $dst/out/"
     fi
-    # archive out/<task> so a re-run of the chain won't rerun this task
     sudo mv "$task_out" "${task_out}.${SUFFIX}.archived" 2>/dev/null || true
 }
 
-# SCORE counts every rerun attempt as its own test, so it overstates the result.
-# The canonical-kept score comes from tools/pbench_score_report.py.
 report_score() {
+    # This diagnostic counts raw attempt rows; use tools/pbench_score_report.py
+    # for the official canonical-kept score when comparing experiments.
     local task="$1"
     local eval_json="$OUT_ROOT/$task/$task.eval.json"
     if [ -f "$eval_json" ]; then
@@ -263,16 +233,11 @@ PY
 }
 
 launch_task() {
+    # Keep inference alive across terminal disconnects and record its exit separately.
     local task="$1"
     local hours="${HOURS:-6}"
     log "launching $task (${hours}h, SKIP_EVAL=1)"
     cd "$ROOT" || { log "FATAL: cd $ROOT failed"; return 1; }
-    # Collect the runner's real exit status, so a stack that fails `make up`
-    # in 60s is not reported like a clean session and then graded as 0.00%.
-    # The runner is disowned, so `wait` is unavailable: the status goes through
-    # a file written by the wrapping subshell.
-    # Keyed on the full task id: tasks can share an owner (osgeo__gdal,
-    # osgeo__proj), and an owner-keyed name would mix their logs and statuses.
     local run_log="$ROOT/out/pbench-${task}-${SUFFIX}.log"
     local rcfile="$ROOT/out/pbench-${task}-${SUFFIX}.rc"
     rm -f "$rcfile"
@@ -295,10 +260,6 @@ launch_task() {
     local rc; rc="$(cat "$rcfile" 2>/dev/null || true)"; rc="${rc:-unknown}"
     log "$task pid=$pid exited rc=$rc"
     if [ "$rc" != "0" ]; then
-        # Leave a marker next to the outputs. Scoring must treat this task as
-        # NO RESULT rather than as a 0.00%: the difference is "the harness
-        # broke" vs "the agents failed", and averaging the latter in silently
-        # understates every configuration that happened to hit a bad stack.
         mkdir -p "$OUT_ROOT/$task" 2>/dev/null || true
         echo "run failed rc=$rc at $(date -u +%FT%TZ); see out/pbench-${task}-${SUFFIX}.log" \
             > "$OUT_ROOT/$task/RUN_FAILED" 2>/dev/null || true
@@ -311,20 +272,14 @@ IFS=',' read -r -a TASKS <<< "$TASKS_ENV"
 
 log "=== chain start (${#TASKS[@]} tasks x ${HOURS:-6}h; profile=$PROFILE; suffix=$SUFFIX; traj=$TRAJ_ROOT) ==="
 
-# PHASE selects which halves run (see the header). Eval needs no containers (it
-# works on the exported submission) and OUT_ROOT is per profile, so an eval and
-# the next task's run cannot collide.
 PHASE="${PHASE:-both}"
 
 wait_for_docker || exit 1
-# Salvage belongs to the run half: in an eval-only pass it would restart the
-# stack and re-export over the submission taken at the budget boundary.
 if [ "$PHASE" != "eval" ]; then
     allocate_ports || exit 1
     salvage_interrupted
 fi
 
-# --- Phase 1: RUN, eval deferred ---------------------------------------------
 if [ "$PHASE" = "both" ] || [ "$PHASE" = "run" ]; then
 log "=== Phase 1: RUN (SKIP_EVAL=1) ==="
 for t in "${TASKS[@]}"; do
@@ -342,7 +297,6 @@ done
 log "=== Phase 1 complete ==="
 fi
 
-# --- Phase 2: EVAL ------------------------------------------------------------
 if [ "$PHASE" = "both" ] || [ "$PHASE" = "eval" ]; then
 log "=== Phase 2: EVAL ==="
 for t in "${TASKS[@]}"; do
@@ -355,7 +309,6 @@ done
 log "=== Phase 2 complete ==="
 fi
 
-# Only the EVAL phase has a summary worth printing; the RUN phase has no scores.
 if [ "$PHASE" = "eval" ] || [ "$PHASE" = "both" ]; then
     log "=== chain complete ==="
     log "summary written to $SUMMARY:"

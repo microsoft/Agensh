@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Keep reference extraction on the same recommended cleanroom as workers/eval.
-pbench_cleanroom_tag() {  # profile path -> validated reference tag
+# Resolve the reference cleanroom tag from environment/profile and require v6.
+# Reference extraction, worker builds and evaluation must use the same tag family.
+pbench_cleanroom_tag() {
     local configured tag
     configured=$(awk -F= '$1=="PBENCH_CLEANROOM_TAG" {sub(/\r$/, ""); print substr($0, index($0, "=")+1); exit}' "$1") || return 1
     tag="${PBENCH_CLEANROOM_TAG:-${configured:-task_cleanroom_v6}}"

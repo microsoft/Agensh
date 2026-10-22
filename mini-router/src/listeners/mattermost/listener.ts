@@ -1,15 +1,6 @@
 /**
- * MattermostListener — wraps MattermostWS + ingests UEM into the events
- * store. Parallel to listeners/gitea/listener.ts.
- *
- * Lifecycle:
- *   run({signal}) — start ws driver; for each event call mapper + ingest;
- *                   onIngest fires per row inserted (so the dispatcher
- *                   can wake immediately).
- *
- * No filtering: per the V8 design decision, mattermost server already
- * pre-filters events to per-user via the ws subscription. We trust it.
- * (Noise-control optional; can layer kind whitelist later.)
+ * Ingest live Mattermost activity and recover recent posts after reconnects.
+ * Both paths use the same event conversion and durable deduplication key.
  */
 import type { EventStore } from "../../state.ts";
 import { MattermostWS } from "./ws.ts";
@@ -19,25 +10,17 @@ export interface MattermostListenerOptions {
   agent: string;
   state: EventStore;
   baseUrl: string;
-  /** Personal access token. */
   token: string;
   hostHeader?: string;
-  /** Wake hook for the dispatcher. */
   onIngest?: (insertedCount: number) => void;
-  /** Errors callback. */
   onError?: (e: unknown) => void;
 }
 
 export class MattermostListener {
   ws: MattermostWS;
-  /** Newest post timestamp already ingested; the `since` cursor for catch-up. */
   private cursor = 0;
-  /** This agent's mattermost user id; undefined = not yet resolved, null = unknown. */
   private selfId: string | null | undefined = undefined;
-  /** Cached (team,channel) list. Membership is fixed for a run, and re-walking
-   *  teams+channels on every reconnect turned one poll into ~8 requests. */
   private channelCache: { id: string; name: string; display_name: string; type: string }[] | null = null;
-  /** Serialises catch-up so a reconnect storm cannot stack N polls per agent. */
   private polling = false;
 
   constructor(private opts: MattermostListenerOptions) {
@@ -46,9 +29,6 @@ export class MattermostListener {
       token: opts.token,
       ...(opts.hostHeader ? { hostHeader: opts.hostHeader } : {}),
       onEvent: (ev) => { void this.ingestEvent(ev); },
-      // Every (re)connect drains the gap. Mattermost's websocket does not
-      // replay, so this is the only thing that makes a dropped socket
-      // recoverable rather than a permanently missed wake.
       onConnect: () => { void this.scheduleCatchup(); },
       ...(opts.onError ? { onError: opts.onError } : {}),
     });
@@ -58,23 +38,11 @@ export class MattermostListener {
     await this.ws.run(opts.signal);
   }
 
-  /**
-   * Drain posts that arrived while the websocket was down.
-   *
-   * The gitea listener does the same (its pollOnce() catch-up). Without it, a
-   * routine socket drop becomes a permanently missed wake for every agent whose
-   * post landed during the gap.
-   *
-   * Synthesises the same `posted` event shape the websocket delivers, so both
-   * paths produce the SAME event_id (`mattermost:post:<id>:<edit_at>`) and the
-   * store's (dedup_key, agent) unique key collapses any overlap. Returns the
-   * number of rows actually inserted.
-   */
-  /** Spread reconnect catch-up over 30 seconds and keep polls serial. */
   private async scheduleCatchup(): Promise<void> {
     if (this.polling) return;
     this.polling = true;
     try {
+      // Stagger REST catch-up when many workers reconnect to the same server.
       await new Promise((r) => setTimeout(r, Math.random() * 30_000));
       await this.pollOnce();
     } catch (e) {
@@ -89,8 +57,6 @@ export class MattermostListener {
     const headers: Record<string, string> = { Authorization: `Bearer ${this.opts.token}` };
     if (this.opts.hostHeader) headers.Host = this.opts.hostHeader;
     const getJson = async (path: string): Promise<unknown> => {
-      // Bounded: an unbounded fetch against a saturated mattermost wedges the
-      // poll, and `polling` would then block every later catch-up too.
       const ac = new AbortController();
       const t = setTimeout(() => ac.abort(), 15_000);
       try {
@@ -106,15 +72,12 @@ export class MattermostListener {
       ? this.cursor
       : Date.now() - 10 * 60_000;
 
-    // The websocket path filters an agent's own posts on sender_name; REST only
-    // carries user_id, so catch-up needs the id or it would re-inject the
-    // agent's own posts as notices. Resolved
-    // once, lazily, so callers need not wire it through.
+    // REST posts expose user IDs, so resolve our own ID before filtering echoes.
     if (this.selfId === undefined) {
       try {
         this.selfId = str(await getJson("/api/v4/users/me"), "id") ?? null;
       } catch {
-        this.selfId = null; // fail open: better a duplicate than a lost wake
+        this.selfId = null;
       }
     }
 
@@ -143,10 +106,9 @@ export class MattermostListener {
         const posts = (page as { posts?: Record<string, unknown> } | null)?.posts ?? {};
         for (const post of Object.values(posts)) {
           const p = post as Record<string, unknown>;
-          // REST carries user_id where the websocket carries sender_name, so the
-          // self-filter has to key on the id here.
           if (this.selfId && p.user_id === this.selfId) continue;
           const createAt = Number(p.create_at ?? 0);
+          // This catch-up cursor is process-local; a fresh router looks back 10 min.
           if (createAt > this.cursor) this.cursor = createAt;
           const ev: MattermostWsEvent = {
             event: "posted",
@@ -166,16 +128,9 @@ export class MattermostListener {
     }
   }
 
-  /** Shared ingestion for websocket and catch-up posts. */
   private async ingestEvent(ev: MattermostWsEvent): Promise<void> {
-    // Skip non-content events (hello, status_change, typing, …).
-    // We could whitelist later; for now accept post*, ignore others.
     if (!isInterestingEvent(ev.event)) return;
-    // An agent must never be notified of its own post: that spends the notice
-    // budget injecting an agent's own words back into its context mid-turn,
-    // and without this filter it is about half of every DM delivered.
     if (isSelfAuthored(ev, this.opts.agent)) return;
-    // Membership churn is N^2 during startup and wakes the whole team at once.
     if (isSystemPost(ev)) return;
     const observed = Date.now();
     const uem = mattermostEventToUEM(ev, this.opts.agent, observed);
@@ -198,10 +153,6 @@ function str(o: unknown, k: string): string | undefined {
 }
 
 function isInterestingEvent(name: string): boolean {
-  // Posts: the agent must see them.
-  // Reactions: an emoji up/down vote is feedback with meaning, so the agent
-  // must see it too. A reaction storm is absorbed by the dispatcher's batch
-  // merge, not by a whitelist here in the listener.
   return (
     name === "posted" ||
     name === "post_edited" ||

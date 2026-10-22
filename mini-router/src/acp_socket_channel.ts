@@ -1,35 +1,22 @@
 /**
- * ACPSocketChannel — connects to a unix socket served by acp-bridge.py in the
- * agent container, from the mini-router sidecar.
- *
- * Each socket connection spawns an unmodified Copilot ACP process. We keep
- * one long-lived connection per channel for
- * cache reuse (session_id stable across prompts).
- *
- * Reconnect: prompt() detects dead connection → reconnects with backoff
- * [1s, 2s, 5s, 10s, 30s, 60s] (capped). Dispatcher only sees prompt()
- * resolve/reject — connection drama is hidden.
+ * Deliver prompts to Copilot over the agent container's Unix socket using ACP.
+ * Persist session IDs in MySQL so reconnects can restore conversational state.
  */
 import * as acp from "@agentclientprotocol/sdk";
 import { createConnection, type Socket } from "node:net";
 import type { UEM } from "./uem.ts";
 import { errorMessage, sleep } from "./runtime.ts";
 
-// Exhausting this ladder throws `acp connect exhausted`, which markFailed()s
-// every row in the batch at once -- burning one of MAX_ATTEMPTS=5 for up to 32
-// events.
 const RECONNECT_BACKOFF_MS: readonly number[] = [1_000, 2_000, 5_000, 10_000, 30_000, 60_000];
 
 export interface ACPSocketChannelOptions {
   socketPath: string;
   cwd: string;
-  /** Optional: restore a sessionId across reconnects (cache continuity). */
   sessionStore: {
     get(): Promise<string | null>;
     set(sessionId: string): Promise<void>;
   };
   stuckMs?: number;
-  /** Logger hook for connection drama (optional). */
   onLog?: (level: "info" | "warn" | "error", msg: string, err?: unknown) => void;
 }
 
@@ -39,21 +26,12 @@ export class ACPSocketChannel {
   private sessionId: string | null = null;
   private lastUpdateAt = 0;
   private connecting: Promise<void> | null = null;
-  /** Set when the previous prompt was force-closed by stuck-timeout.
-   *  Prepended to the next prompt text so the agent learns the prior
-   *  turn was killed for going silent (it should background long tools). */
   private pendingNotice: string | null = null;
-  /**
-   * DeLM forced read: rendered shared-context block spliced ahead of the next
-   * prompt's text. Set by Dispatcher before each dispatch; consumed once.
-   * null → prompt text is unchanged from the pre-board behavior.
-   */
   private promptPrefix: string | null = null;
   private readonly log: (lvl: "info" | "warn" | "error", msg: string, err?: unknown) => void;
 
   constructor(private readonly opts: ACPSocketChannelOptions) {
     this.log = opts.onLog ?? ((lvl, m, e) => {
-      // eslint-disable-next-line no-console
       console.error(`[acp-socket] ${lvl} ${m}`, e ?? "");
     });
   }
@@ -65,18 +43,13 @@ export class ACPSocketChannel {
     const events = uem as UEM[];
     let text = defaultRenderBatch(events);
 
-    // If a previous turn was force-closed due to ACP silence,
-    // prepend a system notice so the agent learns to use background
-    // execution (& / nohup) for long-running tools next time.
     if (this.pendingNotice) {
       text = this.pendingNotice + "\n\n---\n\n" + text;
       this.pendingNotice = null;
     }
 
-    // DeLM forced read: splice the rendered shared context ahead of the event
-    // text so peer progress is always in context, without the agent having to
-    // call a read tool. Consumed once per prompt.
     if (this.promptPrefix) {
+      // Shared context belongs to this prompt and must not leak into the next turn.
       text = this.promptPrefix + "\n---\n\n" + text;
       this.promptPrefix = null;
     }
@@ -84,15 +57,10 @@ export class ACPSocketChannel {
     return this.sendText(text);
   }
 
-  /** Set (or clear with null) the shared-context prefix for the next prompt. */
   setPromptPrefix(prefix: string | null): void {
     this.promptPrefix = prefix;
   }
 
-  /**
-   * Send a raw text turn with no UEM rendering. Used for the DeLM
-   * forced-write follow-up nudge.
-   */
   async promptText(text: string): Promise<{ stopReason: string }> {
     if (!this.connection || !this.sessionId) {
       await this.connectWithBackoff();
@@ -100,13 +68,9 @@ export class ACPSocketChannel {
     return this.sendText(text);
   }
 
-  /** Shared prompt-send path: watchdog + error handling. */
   private async sendText(text: string): Promise<{ stopReason: string }> {
     try {
       this.lastUpdateAt = Date.now();
-      // Race conn.prompt against a silence-watchdog. The watchdog
-      // checks `lastUpdateAt` (updated on every ACP RX in connectOnce); if
-      // no RX for stuckMs, force-close the connection so prompt rejects.
       const stuckMs = this.opts.stuckMs;
       const promptP = this.connection!.prompt({
         sessionId: this.sessionId!,
@@ -125,19 +89,17 @@ export class ACPSocketChannel {
       }
       return { stopReason: res.stopReason };
     } catch (err) {
-      // Connection died mid-prompt. Tear down so next call reconnects.
       this.log("warn", `prompt failed; closing connection`, err);
       await this.close();
       throw err;
     }
   }
 
-  /** Returns a promise that rejects when no ACP RX has been observed for
-   *  stuckMs. Polls every min(stuckMs/4, 5000)ms. cancel() stops the timer. */
   private watchSilence(stuckMs: number): {
     promise: Promise<never>;
     cancel: () => void;
   } {
+    // The optional watchdog measures time since a session update, not turn length.
     const tick = Math.max(50, Math.min(Math.floor(stuckMs / 4), 5000));
     let timer: NodeJS.Timeout | null = null;
     const promise = new Promise<never>((_, reject) => {
@@ -153,8 +115,6 @@ export class ACPSocketChannel {
             `[system] previous turn timed out (no ACP message for ${Math.floor(silentFor / 1000)}s). ` +
             `Connection was reset. For long-running tools (tests, large bash scripts), ` +
             `run them in the background with & or nohup so you stay responsive to events.`;
-          // Closing socket will cause conn.prompt() to reject; the catch
-          // in prompt() also calls close() — idempotent.
           this.close().catch(() => undefined);
           reject(new Error(`acp prompt stuck: no RX for ${silentFor}ms`));
           return;
@@ -176,7 +136,7 @@ export class ACPSocketChannel {
 
   async close(): Promise<void> {
     if (this.socket) {
-      try { this.socket.destroy(); } catch { /* */ }
+      try { this.socket.destroy(); } catch {   }
     }
     this.socket = null;
     this.connection = null;
@@ -184,6 +144,7 @@ export class ACPSocketChannel {
   }
 
   private async connectWithBackoff(): Promise<void> {
+    // Share concurrent callers' handshake instead of opening competing sessions.
     if (this.connecting) return this.connecting;
     this.connecting = (async () => {
       let lastErr: unknown = null;
@@ -219,13 +180,9 @@ export class ACPSocketChannel {
     this.socket = sock;
     this.log("info", `connectOnce: socket established`);
 
-    // Detect socket close → reject any pending requests via SDK abort
     sock.on("close", () => {
       this.log("warn", `socket closed (peer EOF)`);
-      // A failed attempt's socket can close after a later attempt connected;
-      // it must not tear down the live connection.
       if (this.socket !== sock) return;
-      // Force the connection to abort so prompt() rejects instead of hanging
       this.socket = null;
       this.connection = null;
       this.sessionId = null;
@@ -234,12 +191,6 @@ export class ACPSocketChannel {
       this.log("warn", `socket error`, e);
     });
 
-    // Bridge node Socket (Duplex) to web streams expected by ACP SDK ndJsonStream.
-    // CRITICAL: We hand-build the readable + writable instead of using Duplex.toWeb,
-    // because the latter has subtle backpressure / pause-mode interactions with
-    // bidirectional sockets that stop newSession-response bytes from flowing
-    // (reproducible when mini-router connects to a socat-bridged python
-    // acp_adapter).
     const readable = new ReadableStream<Uint8Array>({
       start: (controller) => {
         sock.on("data", (chunk: Buffer) => {
@@ -247,10 +198,10 @@ export class ACPSocketChannel {
           controller.enqueue(new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength));
         });
         sock.on("end", () => {
-          try { controller.close(); } catch { /* */ }
+          try { controller.close(); } catch {   }
         });
         sock.on("error", (e) => {
-          try { controller.error(e); } catch { /* */ }
+          try { controller.error(e); } catch {   }
         });
       },
       cancel() {
@@ -261,7 +212,6 @@ export class ACPSocketChannel {
       write(chunk) {
         return new Promise<void>((resolve, reject) => {
           if (sock.writableEnded) { reject(new Error("socket already ended")); return; }
-          // sock.write returns false → backpressure → wait for 'drain'
           const ok = sock.write(chunk, (err) => {
             if (err) reject(err);
             else if (ok) resolve();
@@ -289,18 +239,7 @@ export class ACPSocketChannel {
     this.connection = conn;
     this.log("info", `connectOnce: ACP connection wired, sending initialize`);
 
-    // A failed handshake must close its socket, or every reconnect attempt
-    // leaks one, along with whatever the bridge accepted it into.
     try {
-      // TIME-BOUNDED. An unanswered initialize would hang connectOnce forever, so
-      // the reconnect loop would never get another turn.
-      //
-      // When acp-bridge.py's Popen hits the slice TasksMax, its serve thread dies
-      // and leaves the socket ACCEPTED with no child behind it. The router logs
-      // "socket established" and "sending initialize", then waits on a dead peer
-      // while still ingesting events and waking a dispatcher that has nothing to
-      // deliver to, and the agent is lost. A connect that succeeds at the socket
-      // layer says nothing about whether an agent is actually behind it.
       const initMs = Number(process.env.ACP_INIT_TIMEOUT_MS ?? 60_000);
       await withTimeout(
         conn.initialize({
@@ -315,6 +254,7 @@ export class ACPSocketChannel {
       this.log("info", `connectOnce: initialize OK, opening session`);
 
       const restoreId = await this.opts.sessionStore.get();
+      // A missing or unloadable native session starts fresh and replaces the ID.
       let sessionId: string | null = null;
       if (restoreId) {
         try {
@@ -349,6 +289,7 @@ export class ACPSocketChannel {
 }
 
 function clientImpl(onSessionUpdate: () => void): acp.Client {
+  // Workers run autonomously; prefer ACP's one-time permission grant when offered.
   return {
     async requestPermission(params: acp.RequestPermissionRequest) {
       return {
@@ -369,7 +310,6 @@ function clientImpl(onSessionUpdate: () => void): acp.Client {
 
 import { defaultRenderBatch } from "./uem_render.ts";
 
-/** Reject if `p` has not settled within `ms`, so a dead peer cannot stall a caller forever. */
 function withTimeout<T>(p: Promise<T>, ms: number, msg: string): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error(msg)), ms);

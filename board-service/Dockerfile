@@ -1,5 +1,4 @@
-# board-service — DeLM shared-context board as an HTTP microservice.
-# See board-service/main.py for details.
+# Package the shared-context API; MySQL state is provided by the Compose stack.
 FROM python:3.13-slim
 WORKDIR /app
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1

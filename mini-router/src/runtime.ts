@@ -1,3 +1,4 @@
+/** Shared error formatting and abort-aware delays for router background loops. */
 import { setTimeout as delay } from "node:timers/promises";
 
 export function errorMessage(error: unknown): string {
@@ -9,7 +10,6 @@ export function errorMessage(error: unknown): string {
   }
 }
 
-/** Resolve after the delay or on abort, removing the listener on either path. */
 export function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   if (!signal) return delay(ms);
   return new Promise((resolve) => {

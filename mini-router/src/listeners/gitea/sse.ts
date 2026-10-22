@@ -1,46 +1,15 @@
 /**
- * Gitea SSE driver — push-only wakeup channel.
- *
- * Why push-only:
- *   PAT does not authorize /user/events (Gitea 1.22 rejects with
- *   `event: close, data: unauthorized`). Cookie auth is the only way.
- *   Form-session cookies authorize this connection.
- *
- *   There is no polling fallback: at N=300 agents a 5s polling floor
- *   adds 60 QPS of empty-response noise to Gitea. SSE is
- *   the sole wake channel, with a heartbeat watchdog to detect silent
- *   half-close and reconnect.
- *
- * Architecture rules:
- *   - This module emits TRIGGERS, not data. We never trust the SSE
- *     payload — it has no Last-Event-ID replay semantics. Every trigger
- *     just causes the listener to call `pollOnce()` immediately to read
- *     the per-user-filtered /api/v1/notifications endpoint.
- *   - On disconnect we reconnect with exponential backoff + jitter.
- *   - On `event: close, data: unauthorized` we invalidate the cached
- *     credentials and reconnect (forces fresh login on next attempt).
- *   - Watchdog: if no frame arrives within 45 seconds the
- *     connection is presumed dead (NAT silent-close, mid-box reaped
- *     idle TCP, …) and we cancel the reader to force a reconnect.
- *     Gitea natively emits `notification-count` ~every 30s as a
- *     keep-alive, so a 45s default timeout has 50% margin.
- *
- * Lifecycle:
- *   run(signal) — connects, parses SSE frames, calls onTrigger on
- *                 `notification-count`. Returns when the signal aborts.
+ * Maintain Gitea's cookie-authenticated SSE connection with heartbeat recovery.
+ * notification-count frames wake REST ingestion; they are not event payloads.
  */
 import type { GiteaFormAuth } from "../../gitea_form_auth.ts";
 import { sleep } from "../../runtime.ts";
 
 export interface GiteaSSEOptions {
   baseUrl: string;
-  /** Per-user Gitea form-session credentials. */
   auth: GiteaFormAuth;
-  /** Called when a notification-count event arrives. */
   onTrigger: () => void;
-  /** Optional Host header (we go through nginx-edge in some setups). */
   hostHeader?: string;
-  /** Optional log callback for visibility (errors only). */
   onError?: (e: unknown) => void;
 }
 
@@ -49,16 +18,12 @@ const CLOSE_EVENT = "close";
 const UNAUTHORIZED_DATA = "unauthorized";
 
 export class GiteaSSE {
-  /** Whether the driver currently believes it has an open connection. */
   connected = false;
-  /** Epoch-ms of last frame received (0 if none yet). */
   lastFrameAt = 0;
 
   constructor(private readonly opts: GiteaSSEOptions) {}
 
   async run(signal: AbortSignal): Promise<void> {
-    // A reconnect gap is time the agent gets no issue/PR wakeups. Twin of the
-    // Mattermost ws.ts backoff; the two halves of this recovery path must agree.
     const initial = 500;
     const cap = 30_000;
     let backoff = initial;
@@ -66,7 +31,6 @@ export class GiteaSSE {
     while (!signal.aborted) {
       try {
         await this.connectOnce(signal);
-        // A clean disconnect: reset backoff to initial.
         backoff = initial;
       } catch (e) {
         this.opts.onError?.(e);
@@ -92,7 +56,6 @@ export class GiteaSSE {
     const res = await fetch(url, { headers, signal });
     if (!res.ok || !res.body) {
       const body = await res.text().catch(() => "");
-      // 401/403 → cached cookie is stale, force re-login next time.
       if (res.status === 401 || res.status === 403) {
         this.opts.auth.invalidate();
       }
@@ -108,14 +71,8 @@ export class GiteaSSE {
     const decoder = new TextDecoder();
     let buf = "";
 
-    // Heartbeat watchdog: cancels the reader if no frame is observed
-    // within heartbeatTimeoutMs. Gitea sends notification-count ~30s,
-    // default timeout 45s gives 50% margin. Half-closed TCP (NAT timeout,
-    // load-balancer reaping idle conns) shows up as "reader.read() never
-    // returns" — without this watchdog the loop would hang forever.
-    // A half-closed stream left undetected is time the agent receives no
-    // Gitea wakeups at all.
     const hbTimeout = 45_000;
+    // A silent stream is canceled so the outer loop can authenticate and reconnect.
     const watchdog = setInterval(() => {
         if (Date.now() - this.lastFrameAt > hbTimeout) {
           this.opts.onError?.(
@@ -123,9 +80,7 @@ export class GiteaSSE {
               `gitea SSE heartbeat timeout (${hbTimeout}ms without frame)`,
             ),
           );
-          // cancel() resolves the in-flight reader.read() with done=true.
           reader.cancel().catch(() => {
-            /* best-effort */
           });
         }
     }, Math.max(1000, Math.floor(hbTimeout / 4)));
@@ -143,9 +98,6 @@ export class GiteaSSE {
           buf = buf.slice(idx + frameDelimLen(buf, idx));
           const fr = parseFrame(frame);
           if (fr.event === CLOSE_EVENT && fr.data === UNAUTHORIZED_DATA) {
-            // Gitea explicitly told us our session is no good. Invalidate
-            // and abort this connection — outer loop will reconnect with
-            // fresh credentials.
             unauthorized = true;
             this.opts.auth.invalidate();
             return;
@@ -164,12 +116,9 @@ export class GiteaSSE {
       try {
         reader.releaseLock();
       } catch {
-        /* best-effort */
       }
       this.connected = false;
       if (unauthorized) {
-        // Treat unauthorized close as an error path so backoff applies
-        // and we don't tight-loop the auth flow.
         throw new Error("gitea SSE unauthorized — session invalidated");
       }
     }
@@ -195,8 +144,8 @@ function parseFrame(frame: string): ParsedFrame {
   return { event, data: dataLines.join("\n") };
 }
 
-/** Find the index of the first frame terminator ("\n\n" or "\r\n\r\n"). */
 function findFrameEnd(buf: string): number {
+  // Accept both newline conventions without splitting a partially received frame.
   const a = buf.indexOf("\n\n");
   const b = buf.indexOf("\r\n\r\n");
   if (a === -1) return b;

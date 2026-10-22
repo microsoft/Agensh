@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Launch the release single-agent baseline with immediate ACP continuation."""
+# Launch the standalone baseline in an isolated Compose project from a JSON config.
+# Record image/prompt provenance, drive native ACP continuation and verify archives
+# before exporting committed source and optionally running ProgramBench evaluation.
+
 import argparse
 import datetime
 import hashlib
@@ -63,6 +66,7 @@ def run(config_path):
     write_json(run_dir / 'status.json', status)
     env = {key: value for key, value in os.environ.items()
            if not key.startswith(('COPILOT_', 'ANTHROPIC_', 'UPSTREAM_', 'PBENCH_'))}
+    # Explicit run configuration takes precedence over inherited model/profile state.
     env.update(MODEL_ENV_FILE=config['model_env_file'], SINGLE_AGENT_IMAGE=config['agent_image'],
                WORKSPACE_DIR=str(workspace), REFERENCE_BIN=str(reference), STATE_DIR=str(state),
                HOME_DIR=str(home), SUBNET_DEFAULT=config['subnet_default'], SUBNET_EGRESS=config['subnet_egress'],
@@ -83,6 +87,7 @@ def run(config_path):
                        '-C', workspace, *arguments])
 
     def snapshot_loop(container):
+        # Commit workspace state before taking periodic source-only Git archives.
         interval = config.get('snapshot_seconds', 1200)
         if interval <= 0:
             return
@@ -119,11 +124,11 @@ def run(config_path):
         prompt_dir = home / '.pbench'
         prompt_dir.mkdir(mode=0o755)
         prompt_hashes = {}
+        # Hash original templates while installing task/budget substitutions privately.
         for name in ('brief', 'rules', 'resume'):
-            raw = (SOURCE / 'prompts/single-agent' / (name + '.md')).read_text()
+            raw = (SOURCE / 'prompts/single-agent' / (name + '.txt')).read_text()
             text = raw.replace('${TASK}', config['task']).replace('${HOURS}', str(config.get('hours', 6)))
             if name == 'resume':
-                # The original shell launcher's command substitution strips trailing newlines.
                 text = text.rstrip('\n')
             (prompt_dir / (name + '.txt')).write_text(text)
             prompt_hashes[name] = hashlib.sha256(raw.encode()).hexdigest()
@@ -146,6 +151,7 @@ print(json.dumps({'uid':os.getuid(),'reference_readable':os.access('/opt/pbench/
 'output_threshold':os.environ['COPILOT_LARGE_OUTPUT_THRESHOLD_BYTES']}))
 """
         checks = json.loads(capture(DOCKER + ['exec', '-u', '10000:10000', container, 'python3', '-c', probe]))
+        # Validate access from the real worker UID rather than the root supervisor.
         write_json(run_dir / 'preflight.json', checks)
         if checks != {'uid': 10000, 'reference_readable': False, 'reference_executable': True,
                       'public_egress': False, 'output_threshold': '1048576'}:
@@ -182,14 +188,14 @@ print(json.dumps({'uid':os.getuid(),'reference_readable':os.access('/opt/pbench/
                 driver.kill()
                 driver.wait()
         if started:
+            # Stop Copilot and verify the sealed HOME/work archive before teardown.
             scoped_compose('stop', '--timeout', '600', 'cc-agent')
             with (run_dir / 'compose.log').open('w') as output:
                 scoped_compose('logs', '--no-color', stdout=output, stderr=subprocess.STDOUT)
-            # Failed archives leave stopped containers and all data in place for recovery.
             invoke(['sudo', '-n', sys.executable, SOURCE / 'agent/archive.py', 'check', data])
 
-    # Freeze source only after native work and detached tools have stopped.
     git('add', '-A')
+    # Final export uses Git HEAD, matching the committed-source evaluation contract.
     if subprocess.run(['sudo', '-n', 'git', '-c', 'safe.directory=' + str(workspace),
                        '-C', str(workspace), 'diff', '--cached', '--quiet']).returncode:
         git('commit', '-qm', 'pbench-single-agent: final snapshot')
@@ -226,7 +232,7 @@ print(json.dumps({'uid':os.getuid(),'reference_readable':os.access('/opt/pbench/
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description='Launch the release single-agent baseline with immediate ACP continuation.')
     parser.add_argument('--config', required=True, type=Path)
     args = parser.parse_args()
 

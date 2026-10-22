@@ -1,29 +1,7 @@
 #!/usr/bin/env python3
-"""
-acp_driver.py — minimal Python ACP client for the single-agent ProgramBench
-baseline, using the native Copilot runtime.
-
-Drives one Copilot session through the release ACP bridge over
-    docker exec -i <container> python3 /opt/single_agent_stdio.py
-speaking JSON-RPC 2.0 (NDJSON framing) on stdio.
-
-Protocol shape (verified against mini-router/src/acp_socket_channel.ts):
-
-    → initialize {protocolVersion: 1, clientCapabilities.fs.{read,write}TextFile: false}
-    ← result {protocolVersion: 1, ...}
-    → session/new {cwd, mcpServers: []}
-    ← result {sessionId}
-    → session/prompt {sessionId, prompt: [{type:"text", text}]}
-    ← notifications session/update ...
-    ← request  session/request_permission   → we reply "allow_once"
-    ← result   {stopReason: "end_turn" | ...}
-
-An explicit resume loop that keeps issuing session/prompt on the same sessionId
-until the wall-clock budget is fulfilled. First prompt = brief + rules;
-subsequent prompts = the resume kicker text.
-
-Stdlib only.
-"""
+# Drive a standalone Copilot session through the container's stdio/socket adapter.
+# Continue immediately after each completed turn until the budget expires; reload
+# the native session after transport failures or a silence-watchdog restart.
 
 from __future__ import annotations
 
@@ -49,12 +27,7 @@ def log(msg: str) -> None:
 
 
 class ACPChild:
-    """JSON-RPC 2.0 client over the child's stdio (NDJSON framing).
-
-    A background reader thread consumes stdout, dispatches responses to
-    per-id futures and drives an on-request callback for server→client
-    requests (session/request_permission)."""
-
+    # A reader thread multiplexes JSON-RPC replies, notifications and permission requests.
     def __init__(self, cmd: list[str], stderr_path: Optional[str] = None) -> None:
         self._cmd = cmd
         self._stderr_path = stderr_path
@@ -127,6 +100,7 @@ class ACPChild:
                     continue
                 self._dispatch(msg)
         log("reader thread exit (child closed stdout)")
+        # Release blocked request callers when the transport disappears.
         with self._cond:
             for fut in self._pending.values():
                 fut["error"] = {"code": -32000, "message": "child closed stdout"}
@@ -135,7 +109,6 @@ class ACPChild:
             self._cond.notify_all()
 
     def _dispatch(self, msg: dict[str, Any]) -> None:
-        # Response to a client-issued request?
         if "id" in msg and ("result" in msg or "error" in msg):
             mid = msg["id"]
             with self._cond:
@@ -146,7 +119,6 @@ class ACPChild:
                     fut["done"] = True
                     self._cond.notify_all()
             return
-        # Server → client request (needs a response).
         if "id" in msg and "method" in msg:
             method = msg["method"]
             params = msg.get("params") or {}
@@ -165,7 +137,6 @@ class ACPChild:
                 resp.update({k: v for k, v in reply.items() if k in ("result", "error")})
             self._send_raw(resp)
             return
-        # Notification (no id).
         if "method" in msg:
             try:
                 self.on_notification(msg["method"], msg.get("params") or {})
@@ -217,11 +188,7 @@ class Session:
             self.update_count += 1
 
     def on_request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
-        # Server→client requests count as liveness too (permission prompts
-        # arrive as requests, not notifications), so refresh the watchdog
-        # baseline here as well.
         self.last_update_at = time.monotonic()
-        # Auto-approve tool use, mirroring the mini-router's ACPSocketChannel.
         if method == "session/request_permission":
             options = params.get("options") or []
             picked = ""
@@ -232,7 +199,6 @@ class Session:
             if not picked and options:
                 picked = options[0].get("optionId", "")
             return {"result": {"outcome": {"outcome": "selected", "optionId": picked}}}
-        # fs/read_text_file, fs/write_text_file — client caps are off; decline.
         return {"error": {"code": -32601, "message": f"method not implemented: {method}"}}
 
 
@@ -258,7 +224,6 @@ def check_prompt_files(container: str, docker_bin: list[str], paths: list[str]) 
 
 
 def build_initial_prompt(brief_txt: str, rules_txt: str) -> str:
-    """Preserve the historical rules/brief text in the first user prompt."""
     return (
         "IMPORTANT — these are hard rules for the entire session (they would "
         "be the --append-system-prompt in the CLI baseline; you must follow "
@@ -269,16 +234,10 @@ def build_initial_prompt(brief_txt: str, rules_txt: str) -> str:
     )
 
 
-# How close to the wall clock the single-agent deadline notice fires.
-#
-# 15 minutes: enough for the agent to finish its current turn and wrap up.
 DEADLINE_NOTICE_SECS = 15 * 60
 
 
 def _resume_text(resume_txt: str, silent_s: int, stuck_secs: int) -> str:
-    """Return the resume prompt, prepending a stuck-notice iff a restart
-    just happened (silent_s > 0). Byte-identical to the raw resume text on
-    the happy path (clean stopReason)."""
     if silent_s <= 0:
         return resume_txt
     return (
@@ -293,17 +252,6 @@ def _resume_text(resume_txt: str, silent_s: int, stuck_secs: int) -> str:
 
 
 def _deadline_text(text: str, remaining: float) -> str:
-    """Prepend a one-shot deadline notice when under 15 minutes remain.
-
-    A solo agent has no lead to tell it the run is ending and no channel to be
-    interrupted on, so the only place to say it is the next prompt. The team
-    runners post the equivalent to their task channel at T-45m and T-5m; a
-    single agent has no work to stop dispatching, so it gets one notice, late,
-    aimed at the thing that actually loses points: uncommitted work.
-
-    Byte-identical to the raw text while there is time left, so the happy path
-    is unchanged — the same property _resume_text preserves.
-    """
     if remaining > DEADLINE_NOTICE_SECS:
         return text
     return (
@@ -329,13 +277,11 @@ def run(args: argparse.Namespace) -> int:
     child_cmd = docker_bin + ["exec", "-i", args.container] + ACP_CHILD_CMD
     session = Session()
 
-    # Mutable holder so the watchdog thread always sees the *current* child
-    # after a respawn. We only ever swap the whole ACPChild, never mutate it.
     child_ref: dict[str, Optional[ACPChild]] = {"child": None}
     spawn_seq = {"n": 0}
 
     def spawn_and_init(load_sid: Optional[str]) -> tuple[ACPChild, bool]:
-        """-> (child, True when the session is new rather than loaded)."""
+        # Return whether a new session needs the complete initial rules and brief.
         spawn_seq["n"] += 1
         n = spawn_seq["n"]
         log(f"--- spawn #{n} (load_sid={load_sid[:8] + '...' if load_sid else 'None'}) ---")
@@ -378,13 +324,10 @@ def run(args: argparse.Namespace) -> int:
         session.last_update_at = time.monotonic()
         return c, True
 
-    # Silence watchdog: daemon thread. If the current child has a request
-    # pending AND no ACP RX for stuck_secs, close the child so the pending
-    # request rejects with "child closed stdout" — which the resume loop
-    # catches and respawns from.
     watchdog_stop = threading.Event()
 
     def watchdog_loop() -> None:
+        # Only pending requests count as stalled; an idle client is not a stuck turn.
         tick = max(30.0, args.stuck_secs / 4.0)
         while not watchdog_stop.is_set():
             if watchdog_stop.wait(tick):
@@ -423,14 +366,10 @@ def run(args: argparse.Namespace) -> int:
         deadline_warned = False
         while True:
             remaining = deadline - time.monotonic()
-            # Under a minute left: do not start a turn that `timeout=remaining`
-            # would force-cancel.
             if remaining <= 60:
                 log(f"budget exhausted (remaining={remaining:.0f}s); stopping resume loop")
                 break
             iter_no += 1
-            # A new session has seen nothing -- including the one a failed
-            # session/load falls back to -- so it gets the brief and rules.
             if send_initial:
                 mode = "initial" if iter_no == 1 else "initial-new-session"
                 text = initial_prompt
@@ -439,6 +378,7 @@ def run(args: argparse.Namespace) -> int:
                 mode = "resume-after-stuck"
                 text = _resume_text(resume_txt, last_silent_s, args.stuck_secs)
             else:
+                # A normal end_turn immediately receives the continuation prompt.
                 mode = "resume"
                 text = resume_txt
             if not deadline_warned and remaining <= DEADLINE_NOTICE_SECS:
@@ -451,7 +391,7 @@ def run(args: argparse.Namespace) -> int:
                 f"update_count={session.update_count} restarts={stuck_restarts}"
             )
             iter_start = time.monotonic()
-            session.last_update_at = iter_start  # reset watchdog baseline
+            session.last_update_at = iter_start
             try:
                 res = child_ref["child"].request(
                     "session/prompt",
@@ -472,9 +412,6 @@ def run(args: argparse.Namespace) -> int:
                 )
                 stuck_restarts += 1
                 last_silent_s = max(silent_s, 1)
-                # An error reply leaves the old child running. Close it first, or
-                # its docker exec and pipes outlive it and two processes hold
-                # the session the new child is about to load.
                 child_ref["child"].close()
                 try:
                     child_ref["child"], send_initial = spawn_and_init(load_sid=session.session_id)
@@ -499,7 +436,7 @@ def run(args: argparse.Namespace) -> int:
 
 
 def parse_args() -> argparse.Namespace:
-    ap = argparse.ArgumentParser(description=__doc__)
+    ap = argparse.ArgumentParser(description='\nacp_driver.py — minimal Python ACP client for the single-agent ProgramBench\nbaseline, using the native Copilot runtime.\n\nDrives one Copilot session through the release ACP bridge over\n    docker exec -i <container> python3 /opt/single_agent_stdio.py\nspeaking JSON-RPC 2.0 (NDJSON framing) on stdio.\n\nProtocol shape (verified against mini-router/src/acp_socket_channel.ts):\n\n    → initialize {protocolVersion: 1, clientCapabilities.fs.{read,write}TextFile: false}\n    ← result {protocolVersion: 1, ...}\n    → session/new {cwd, mcpServers: []}\n    ← result {sessionId}\n    → session/prompt {sessionId, prompt: [{type:"text", text}]}\n    ← notifications session/update ...\n    ← request  session/request_permission   → we reply "allow_once"\n    ← result   {stopReason: "end_turn" | ...}\n\nAn explicit resume loop that keeps issuing session/prompt on the same sessionId\nuntil the wall-clock budget is fulfilled. First prompt = brief + rules;\nsubsequent prompts = the resume kicker text.\n\nStdlib only.\n')
     ap.add_argument("--container", required=True,
                     help="cc-agent container name (from `compose ps -q`)")
     ap.add_argument("--workspace-cwd", default="/workspace")

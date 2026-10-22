@@ -1,4 +1,4 @@
-# Shared board HTTP service and MySQL persistence.
+# Pinned dependencies for the board API, note validation and MySQL persistence.
 fastapi==0.141.1
 starlette==1.6.0
 uvicorn[standard]==0.32.0

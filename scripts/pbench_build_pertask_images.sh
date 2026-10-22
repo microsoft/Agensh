@@ -1,13 +1,6 @@
 #!/usr/bin/env bash
-# pbench_build_pertask_images.sh — build one agent image per ProgramBench task.
-#
-# Each image, omcgitea-agent-<repo>:pbench, is FROM that task's own
-# programbench/<task>:task_cleanroom_v6, so the agent builds in the environment
-# its submission is graded in (see agent/Dockerfile). The Gitea MCP binary
-# comes from omcgitea-agent-base:pbench.
-#
-# Builds run in parallel with a concurrency cap — each is ~4 min and ~3.9 GB,
-# and 20 unrestricted docker builds will thrash the layer store.
+# Build one worker image per task from its v6 cleanroom and the cached MCP artifact.
+# JOBS bounds concurrent builds; individual logs and a summary are written under out/.
 set -u
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"; cd "$ROOT" || exit 1
 JOBS="${JOBS:-6}"
@@ -15,7 +8,6 @@ TAG="${TAG:-pbench}"
 LOGDIR="$ROOT/out/pertask-build"; mkdir -p "$LOGDIR"
 SUMMARY="$LOGDIR/summary.txt"; : > "$SUMMARY"
 
-# TASKS is overridable so a launch rebuilds only the tasks it runs.
 TASKS="${TASKS:-ffmpeg__ffmpeg.360a402 universal-ctags__ctags.243595e typst__typst.88356d0
 php__php-src.c891263 gromacs__gromacs.665ea4c jgm__pandoc.5caad90
 bellard__quickjs.d7ae12a danmar__cppcheck.0a5b103 osgeo__gdal.0847f12
@@ -26,8 +18,8 @@ zk-org__zk.10d93d5 osgeo__proj.75d455c}"
 
 log() { echo "[build $(date -u +%H:%M:%S)] $*"; }
 
-# --- preflight -------------------------------------------------------------
 fail=0
+# Require all base images before spending time on any per-task build.
 for t in $TASKS; do
     img="programbench/${t/__/_1776_}:task_cleanroom_v6"
     sudo docker image inspect "$img" >/dev/null 2>&1 || { log "FATAL: base missing: $img"; fail=1; }
@@ -36,9 +28,6 @@ sudo docker image inspect omcgitea-agent-base:pbench >/dev/null 2>&1 \
     || { log "FATAL: omcgitea-agent-base:pbench missing (source of gitea-mcp)"; fail=1; }
 [ "$fail" = 0 ] || exit 1
 
-# Name images after the REPO, not the org: osgeo__gdal and osgeo__proj both
-# reduce to "osgeo" otherwise, and the second build silently overwrites the
-# first — 20 tasks, 19 images, one of them wrong.
 short() { t="${1#*__}"; echo "${t%%.*}" | tr -cd 'a-z0-9-'; }
 
 build_one() {
@@ -48,8 +37,6 @@ build_one() {
     local lg="$LOGDIR/$(short "$t").log"
     if sudo docker build -f agent/Dockerfile \
          --build-arg TASK_IMAGE="$base" -t "$name" . >"$lg" 2>&1; then
-        # Verify the property the whole design exists for: the agent image's
-        # crate versions must equal the grader's, and our Node must stay off PATH.
         local ok
         ok=$(sudo docker run --rm --network none --entrypoint sh "$name" -c '
             b=$(ls /usr/local/cargo/registry/cache/*/ 2>/dev/null | grep -cE "^clap-4\.6\.1")
@@ -64,6 +51,7 @@ build_one() {
 }
 
 log "building $(echo $TASKS | wc -w) images, ${JOBS} at a time -> $LOGDIR"
+# Each build appends one result; wait for a slot before starting another.
 for t in $TASKS; do
     build_one "$t" &
     while [ "$(jobs -rp | wc -l)" -ge "$JOBS" ]; do sleep 5; done

@@ -1,4 +1,5 @@
-# Dedicated standalone baseline; no forge, chat, router or board services.
+# Standalone baseline: one Copilot worker and one model proxy, without team services.
+# launch_single_agent.py supplies unique mounts, subnets, images and model credentials.
 services:
   egress-proxy:
     image: python:3.13-slim
@@ -22,6 +23,7 @@ services:
       retries: 30
 
   cc-agent:
+    # The root bridge supervises a non-root ACP child and seals its persistent state.
     image: "${SINGLE_AGENT_IMAGE:?}"
     init: true
     user: "0:0"
@@ -54,6 +56,7 @@ services:
       COPILOT_ENABLE_ALT_PROVIDERS: "true"
     volumes:
       - "${WORKSPACE_DIR:?}:/workspace"
+      # The archive bridge saves /work; both names refer to the same workspace.
       - "${WORKSPACE_DIR:?}:/work"
       - "${REFERENCE_BIN:?}:/opt/pbench/executable:ro"
       - "${STATE_DIR:?}:/opt/data"

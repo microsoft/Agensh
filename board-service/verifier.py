@@ -1,3 +1,6 @@
+# Normalize and cap board gists, rejecting patch summaries with placeholder evidence.
+# Verification is a deterministic text check; it does not execute the claimed tests.
+
 from __future__ import annotations
 
 from typing import Dict, Tuple
@@ -41,12 +44,12 @@ def _is_invalid_patch_summary_evidence(content: str) -> bool:
     return False
 
 def verify_note(note: Dict[str, str]) -> Tuple[Dict[str, str] | None, str]:
-    """Normalize and verify the single note accepted by the HTTP write API."""
     kind = str(note.get("type", "")).strip().upper()
     content = str(note.get("content", "")).strip()
     if kind not in VALID_TYPES or not content:
         return None, "ok:0/1"
     cap = MAX_PATCH_SUMMARY_CHARS if kind == "PATCH_SUMMARY" else MAX_CONTENT_CHARS
+    # Check the text that will actually be stored after truncation.
     content = content[:cap]
     if kind == "PATCH_SUMMARY" and _is_invalid_patch_summary_evidence(content):
         return None, "ok:0/1,ps_invalid_ev=1"

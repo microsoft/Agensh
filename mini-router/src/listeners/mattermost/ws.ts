@@ -1,40 +1,14 @@
-/**
- * Mattermost WebSocket driver — push channel for the mattermost listener.
- *
- * Lifecycle:
- *   run(signal) — connects, performs authentication_challenge, dispatches
- *                 each event to onEvent. Reconnects with exponential
- *                 backoff. Returns when signal aborts.
- *
- * Design parity with `listeners/gitea/sse.ts`:
- *   - Backoff w/ jitter
- *   - Client-originated WebSocket pings every 30 seconds
- *   - onError callback for observability
- *   - graceful shutdown on AbortSignal
- *
- * Mattermost-specific quirks:
- *   - WS URL is HTTP(S) → WS(S) scheme switch
- *   - Auth via in-band JSON `authentication_challenge`, not header
- *   - First useful frame is `hello` (sent after server accepts auth)
- *   - All frames are JSON-encoded objects with {event, data, broadcast, seq}
- */
+/** Maintain a token-authenticated Mattermost WebSocket and reconnect with jitter. */
 import WebSocket from "ws";
 import type { MattermostWsEvent } from "./notification.ts";
 import { sleep } from "../../runtime.ts";
 
 export interface MattermostWSOptions {
-  /** HTTP base URL of mattermost server, e.g. "http://mattermost:8065". */
   baseUrl: string;
-  /** Personal access token. */
   token: string;
-  /** Called for every WebSocket frame received (after auth ack). */
   onEvent: (ev: MattermostWsEvent) => void;
-  /** Optional Host header override (we go through nginx-edge in some setups). */
   hostHeader?: string;
-  /** Fired after each successful (re)connect, once auth has been sent.
-   *  The listener uses it to drain whatever arrived while the socket was down. */
   onConnect?: () => void;
-  /** Errors callback (optional). */
   onError?: (e: unknown) => void;
 }
 
@@ -42,14 +16,13 @@ export class MattermostWS {
   constructor(private opts: MattermostWSOptions) {}
 
   async run(signal: AbortSignal): Promise<void> {
-    // A reconnect gap is time the agent spends not receiving DMs.
     const initial = 500;
     const cap = 30_000;
     let backoff = initial;
     while (!signal.aborted) {
       try {
         await this.connectOnce(signal);
-        backoff = initial; // clean disconnect → reset
+        backoff = initial;
       } catch (e) {
         this.opts.onError?.(e);
       }
@@ -67,7 +40,7 @@ export class MattermostWS {
     const sock = new WebSocket(wsUrl, { headers });
 
     let onAbort = () => {
-      try { sock.terminate(); } catch { /* noop */ }
+      try { sock.terminate(); } catch {   }
     };
     signal.addEventListener("abort", onAbort, { once: true });
 
@@ -77,19 +50,15 @@ export class MattermostWS {
       sock.once("error", (err: Error) => reject(err));
       sock.once("close", () => resolve());
       sock.on("open", () => {
-        // Send authentication_challenge.
+        // Mattermost authenticates inside the socket protocol after the upgrade.
         sock.send(JSON.stringify({
           seq: 1,
           action: "authentication_challenge",
           data: { token: this.opts.token },
         }));
-        // Client-originated pings keep Mattermost's read deadline alive.
         pinger = setInterval(() => {
-          try { sock.ping(); } catch { /* socket already going down */ }
+          try { sock.ping(); } catch {   }
         }, 30_000);
-        // Drain anything posted while we were disconnected. Mattermost's
-        // websocket does not replay, so without this a reconnect recovers the
-        // channel but not the message that was missed on it.
         try { this.opts.onConnect?.(); } catch (err) { this.opts.onError?.(err); }
       });
       sock.on("message", (data) => {
@@ -100,7 +69,6 @@ export class MattermostWS {
           this.opts.onError?.(err);
           return;
         }
-        // Auth ack frames have `status` not `event` — skip them silently.
         if (typeof parsed === "object" && parsed && "event" in parsed) {
           try {
             this.opts.onEvent(parsed as MattermostWsEvent);

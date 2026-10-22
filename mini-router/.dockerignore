@@ -1,3 +1,5 @@
+# Build from source and the lockfile; dependencies and dist are recreated in Docker.
+# SQL seeds and the mounted MCP notice shim are not part of the sidecar runtime image.
 node_modules
 dist
 sql

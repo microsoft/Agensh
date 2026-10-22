@@ -1,4 +1,6 @@
-"""Seal final native HOME/workspace archives and validate them before cleanup."""
+# Save per-boot worker state and verify it before profile data can be removed.
+# A complete manifest records the sealed archive's size and SHA-256 digest.
+
 import hashlib
 import json
 import os
@@ -32,6 +34,7 @@ def _manifest(directory, **values):
         output.flush()
         os.fsync(output.fileno())
     temporary.chmod(0o600)
+    # Publish the manifest atomically and persist its directory entry.
     temporary.replace(path)
     descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
     try:
@@ -60,6 +63,7 @@ def save(directory, home, workspace):
         if directory.is_relative_to(home) or directory.is_relative_to(workspace):
             raise ValueError('archive must be outside saved state')
         temporary = directory / 'state.tar.gz.tmp'
+        # Preserve links and the complete trees, including Git and ignored files.
         with tarfile.open(temporary, 'w:gz', dereference=False, compresslevel=1) as bundle:
             bundle.add(home, arcname='home')
             bundle.add(workspace, arcname='work')
@@ -68,6 +72,7 @@ def save(directory, home, workspace):
             os.fsync(stream.fileno())
         archive = directory / 'state.tar.gz'
         temporary.replace(archive)
+        # Completion is recorded only after the archive has been flushed and sealed.
         _manifest(directory, status='complete', finished_at=time.time(),
                   sha256=_digest(archive), bytes=archive.stat().st_size)
     except Exception as error:
@@ -76,7 +81,6 @@ def save(directory, home, workspace):
 
 
 def check(data):
-    """Every started worker boot must have a complete, intact final archive."""
     agents = Path(data).absolute() / 'agents'
     failures = []
     if not agents.exists():
@@ -90,6 +94,7 @@ def check(data):
             manifests = list((agent / 'shutdown').glob('*/manifest.json'))
             if not manifests:
                 raise ValueError('missing worker shutdown manifest')
+            # Validate every boot so an earlier incomplete archive prevents cleanup.
             for path in manifests:
                 if path.resolve() != path:
                     raise ValueError('manifest traverses a symlink')

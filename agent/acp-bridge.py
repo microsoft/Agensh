@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""Bridge native ACP stdio to a per-agent Unix socket, preserving final state."""
+# Bridge one Unix-socket ACP connection at a time to a non-root Copilot process.
+# Disconnects cancel active prompts; shutdown saves the worker's HOME and /work.
+
 import json
 import os
 from pathlib import Path
@@ -39,8 +41,7 @@ print(f'[acp-bridge] listening at {sock_path}', file=sys.stderr, flush=True)
 
 
 def stop_processes(proc):
-    # Ordinary reconnects stop only the outgoing native process group.
-    # Final container shutdown also stops tools that deliberately detached.
+    # Reap the child's process group, or any remaining worker-UID processes at exit.
     for sig in (signal.SIGTERM, signal.SIGKILL):
         if proc is not None:
             try:
@@ -48,7 +49,6 @@ def stop_processes(proc):
             except ProcessLookupError:
                 pass
         else:
-            # This PID namespace contains only this worker's processes.
             for path in Path('/proc').glob('[0-9]*/status'):
                 try:
                     uid = next(line.split()[1] for line in path.read_text().splitlines() if line.startswith('Uid:'))
@@ -141,6 +141,7 @@ def serve(client, peer):
             with condition:
                 sessions = set(pending.values())
             if sessions:
+                # Let Copilot settle native cancellation before terminating its tools.
                 try:
                     with writer:
                         for session in sessions:
@@ -193,12 +194,13 @@ try:
         with connection_lock:
             connections.add(thread)
         thread.start()
-        # A reconnect must wait for the outgoing child/tools to finish.
+        # A replacement connection must wait for the previous child's cleanup.
         while thread.is_alive() and not stopping.is_set():
             thread.join(timeout=0.1)
 finally:
     stopping.set()
     server.close()
+    # Limit connection joins to nine minutes, leaving time for the shutdown archive.
     deadline = time.monotonic() + 540
     with connection_lock:
         threads = list(connections)

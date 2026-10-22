@@ -1,43 +1,7 @@
-/**
- * board_client — mini-router → board-service HTTP client.
- *
- * Implements the two structural properties DeLM relies on (paper §3.1-3.2,
- * upstream src/agents/swebench_implementer_agent.py:322 + src/prompts/
- * swebench_local.py:92):
- *
- *   1. FORCED READ — the shared context is not a tool the agent may choose to
- *      call. It is re-rendered and spliced into the prompt on every dispatch,
- *      so accumulated peer progress is always in the agent's context window.
- *      Upstream does this by assigning `self.shared_lessons_block` at the top
- *      of every step; we do it by prepending to the UEM prompt text.
- *
- *   2. FORCED WRITE — upstream makes the NOTE section a required part of the
- *      response format and replays any turn that omits it. We cannot reject a
- *      copilot-CLI turn mid-flight, so we approximate: count the board's gists
- *      for this agent before and after the turn; if the agent wrote nothing,
- *      offer a follow-up prompt inviting one, exactly once per turn.
- *
- *      The follow-up asks for a `CLAIM` refresh rather than accepting
- *      silence: a turn with no discovery is still a turn with state. Two
- *      failure modes bound it. Offering a `FACT (none)` escape turns a large
- *      share of writes into that placeholder, mostly from idle reviewers with
- *      no PRs to review. Accepting silence lets a busy worker publish nothing
- *      for long stretches, and peers whose only liveness signal is a branch, a
- *      PR or a board write read it as missing and reassign its work, spawning
- *      competing implementations. So the placeholder stays refused: a claim
- *      says what you are doing, which is information; `(none)` says nothing.
- *
- * Failure policy: every method degrades to a no-op on any error. A board
- * outage must never block agent dispatch — the run continues with the board
- * simply absent from the prompt.
- */
-
+/** Fetch shared context for turn starts and detect whether the worker published. */
 export interface BoardClientOpts {
-  /** e.g. http://board-service:8660 — unset disables all board behavior. */
   baseUrl?: string;
-  /** This sidecar's agent identity; used as thread_id / viewer. */
   agent: string;
-  /** CSV of board ids this agent may access. First entry is the primary. */
   boardIds: string[];
   log?: (level: "info" | "warn" | "error", msg: string, err?: unknown) => void;
 }
@@ -55,23 +19,10 @@ export class BoardClient {
     this.log = opts.log ?? (() => {});
   }
 
-  /** True when a board is configured; callers skip all board work otherwise. */
   get enabled(): boolean {
     return Boolean(this.baseUrl) && this.boardIds.length > 0;
   }
 
-  /**
-   * FORCED READ. Render every board this agent belongs to, concatenated.
-   *
-   * Attached UNCONDITIONALLY to each dispatched UEM batch, including when the
-   * board is still empty. An empty board is itself information — it tells the
-   * agent it is first and that peers will read whatever it publishes — and
-   * emitting the header every time keeps the protocol visible in context
-   * rather than appearing only once peers happen to have written something.
-   *
-   * Returns "" only when the board is disabled, so non-board profiles
-   * dispatch exactly as before.
-   */
   async renderForPrompt(): Promise<string> {
     if (!this.enabled) return "";
     const { boards: perBoard, unreachable } = await this.readBoards();
@@ -93,10 +44,6 @@ export class BoardClient {
           : rendered;
       blocks.push(`${header}\n${body}`);
     }
-    // An unreachable board must never be reported as an empty one. Saying
-    // "you are the first to write here" on a failed fetch is not a degraded
-    // message, it is a false one: agents resuming to that sentence while the
-    // peers' gists sit in the database restart the team's work from nothing.
     const guidance = anyDown
       ? "\n\nThe shared board could not be reached this turn, so the view above is " +
         "INCOMPLETE — treat it as unknown, not empty. Do NOT assume you are first: " +
@@ -112,17 +59,8 @@ export class BoardClient {
     return blocks.join("\n\n") + guidance + "\n==== END SHARED CONTEXT ====\n";
   }
 
-  /**
-   * Read every board in ONE request via /snapshot, which copies them all under
-   * a single critical section.
-   *
-   * With N separate reads, a peer writing between read 1 and read 2 gives the
-   * agent a view that never existed at any instant — a lead could see a team
-   * board claiming a task is done above a top board that has not heard of it.
-   * Falls back to per-board reads if /snapshot is unavailable, so a router
-   * built against a newer board-service still works against an older one.
-   */
   private async readBoards(): Promise<{ boards: Map<string, string>; unreachable: Set<string> }> {
+    // Snapshot returns unread gists across boards; full reads are a fallback.
     const out = new Map<string, string>();
     const missing = () => new Set(this.boardIds.filter((b) => !out.has(b)));
     const qs =
@@ -161,23 +99,11 @@ export class BoardClient {
         this.log("warn", `board read ${boardId} failed`, err);
       }
     }
-    // Whatever we never managed to read is UNREACHABLE, not empty. The caller
-    // must not present it to the agent as "nobody has written here yet".
     return { boards: out, unreachable: missing() };
   }
 
-  /**
-   * Highest board_gists id this agent has authored across its boards. Used to
-   * detect whether a turn produced a write (the forced-write check). Returns
-   * null on error so the caller can distinguish "no writes" from "couldn't
-   * tell".
-   *
-   * An id, not a count: read_all serves the trimmed window, so once the board
-   * is full a new gist can push out one of the agent's own older ones, and a
-   * refined PATCH_SUMMARY replaces its predecessor in place. Either way the
-   * count stays flat although the agent wrote; its newest id still rises.
-   */
   async latestOwnGistId(): Promise<number | null> {
+    // Distinguish a successful empty read (0) from unavailable board data (null).
     if (!this.enabled) return null;
     let latest = 0;
     let sawAny = false;
@@ -202,11 +128,6 @@ export class BoardClient {
     return sawAny ? latest : null;
   }
 
-  /**
-   * The nudge sent when a turn produced no board write. Mirrors upstream's
-   * replay message (swebench_implementer_agent.py:138) but phrased for a
-   * tool-calling agent rather than a strict three-section text format.
-   */
   buildForcedWriteNudge(): string {
     const primary = this.boardIds[0] ?? "";
     return (
@@ -228,7 +149,6 @@ export class BoardClient {
 
 }
 
-/** Parse the BOARD_IDS env (CSV) into a list. */
 export function parseBoardIds(raw: string | undefined): string[] {
   return (raw ?? "")
     .split(",")

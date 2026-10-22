@@ -1,38 +1,8 @@
 #!/usr/bin/env python3
-"""pbench_rpm_dashboard.py — live requests-per-minute against the LLM gateways.
+# Observe running profile request rates from egress-proxy logs and cgroup counters.
+# Separate client completions from gateway hits including retries, and retain
+# completed minute buckets for the dashboard's twelve-hour chart.
 
-WHY THIS EXISTS
-A gateway can advertise a hard request ceiling:
-
-    x-ratelimit-limit-requests: 600
-
-Request rate scales with agent count, so the largest fleet on a gateway
-contributes most of its traffic, and a 429 storm degrades that arm hardest, in
-proportion to the variable being measured. That is exactly the confound this
-dashboard exists to make visible while the run is happening rather than in the
-post-mortem.
-
-SOURCE OF TRUTH
-Every agent's LLM traffic passes through its stack's egress-proxy, which logs
-one line per request:
-
-    YYYY-MM-DDTHH:MM:SS.mmmZ [proxy 10.196.6.22:43274#d550] POST /responses
-        in=250960b(308159CL,plain) UA='OpenAI/JS 5.20.1' -> 200 out=458034b
-
-`docker logs --since --timestamps` on that container is therefore an exact
-request count. It costs no API quota (unlike polling the gateway's own
-ratelimit headers, which would consume the very budget it reports) and it
-attributes each request to a stack, an agent IP and a status code.
-
-Stacks are grouped by their PBENCH_LLM_UPSTREAM, so the ceiling is applied
-only to the stacks actually pointed at that gateway -- a stack running against
-another gateway must not be counted against its budget.
-
-Usage:
-    sudo python3 scripts/pbench_rpm_dashboard.py --upstream <host:port> \
-        [--ceiling-upstream <host:port>] [--port 19500] [--limit 600]
-Then open http://localhost:19500
-"""
 import argparse
 import json
 import re
@@ -44,25 +14,19 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-WINDOW = 60           # the RPM window, seconds
-POLL = 10             # how often the sampler refreshes
-BUCKET_READ = 150     # seconds of log read each poll, so a finished minute is always covered
-CHART_MINUTES = 720   # fixed 12h X axis, one point per completed minute
-CEILING_UPSTREAM = ""   # the only gateway the --limit applies to; set by main()
+WINDOW = 60
+POLL = 10
+BUCKET_READ = 150
+CHART_MINUTES = 720
+CEILING_UPSTREAM = ""
 
-# "-> 200" / "-> 429" / "-> BAD: <e>". The proxy logs a request only once it
-# has finished, so a request that got no HTTP answer at all is "-> BAD", not in
-# flight -- it is an error like any other non-200.
 STATUS_RE = re.compile(r"->\s+(\d{3}|BAD)\b")
 REQ_RE = re.compile(r"\]\s+(POST|GET)\s+(\S+)")
-# The proxy's own retries ("upstream 429, retry 1/3 in 1s"): up to four upstream
-# attempts behind one logged request, each counted by the gateway against its
-# ceiling, and they pile up exactly when it is already rate-limiting.
 RETRY_RE = re.compile(r"\]\s+upstream\s.*, retry \d+/\d+ in ")
 
 STATE_FILE = Path("/tmp/pbench_rpm_state.json")
 _state = {"stacks": {}, "groups": {}, "updated": None, "error": None}
-try:   # survive a restart: in-memory only, every restart would wipe the chart
+try:
     _saved = json.loads(STATE_FILE.read_text())
     for _key in ("minutes_by_upstream", "gateway_minutes_by_upstream"):
         _state[_key] = {
@@ -83,16 +47,10 @@ def sh(args, timeout=25):
 
 
 def profile_of(project):
-    """The pbench profile a compose project runs, or None if it is not one."""
     return project[len("omcgitea-"):] if project.startswith("omcgitea-pbench-") else None
 
 
 def stacks_on_host():
-    """profile -> {"proxy": egress-proxy name, "cids": [full container ids]}.
-
-    One docker call for the whole host. Only omcgitea-pbench-* compose
-    projects count: never touch containers this project did not create.
-    """
     out = sh(["docker", "ps", "--no-trunc", "--format",
               '{{.ID}}\t{{.Names}}\t{{.Label "com.docker.compose.project"}}'])
     by = {}
@@ -122,7 +80,6 @@ def env_val(profile, key):
 
 
 def upstream_of(profile):
-    """Which gateway this stack points at -- so ceilings apply to the right set."""
     u = env_val(profile, "PBENCH_LLM_UPSTREAM")
     return re.sub(r"^https?://", "", u).rstrip("/") or "unknown"
 
@@ -136,15 +93,6 @@ SLICE = Path("/sys/fs/cgroup/pbench.slice")
 
 
 def pids_of(cids):
-    """Sum pids.current over a stack's containers.
-
-    pids.current counts THREADS, not processes: an agent container is about a
-    dozen processes but a few hundred tasks, most of them inside the upstream
-    copilot binary and gitea-mcp's Go runtime. That is why a 128-agent fleet
-    needs a TasksMax far above its process count.
-    Read the scope path directly; `find` over /sys/fs/cgroup costs seconds once
-    a 128-agent stack is up.
-    """
     total = 0
     for cid in cids:
         try:
@@ -155,8 +103,6 @@ def pids_of(cids):
 
 
 def slice_pids():
-    """Host-wide slice usage. TasksMax is shared with every other stack, so
-    this is NOT scoped by the --upstream filter."""
     try:
         cur = int((SLICE / "pids.current").read_text())
         mx = (SLICE / "pids.max").read_text().strip()
@@ -166,17 +112,7 @@ def slice_pids():
 
 
 def sample_one(container):
-    """Trailing-WINDOW counts, plus DISCRETE per-minute buckets.
-
-    The rolling window is the right "how busy is it right now" number, but it
-    is the wrong thing to plot: sampled every POLL seconds over a WINDOW-second
-    window, consecutive points share WINDOW-POLL seconds of data, so the line is
-    autocorrelated by construction and a spike smears across six points.
-
-    So bucket by wall-clock minute as well. Reading BUCKET_READ seconds each
-    poll means every completed minute is fully inside the window several times;
-    re-counting and overwriting is idempotent and self-heals a missed poll.
-    """
+    # These are log-derived rates, not a direct measurement of upstream concurrency.
     raw = sh(["docker", "logs", "--since", f"{BUCKET_READ}s", "--timestamps", container])
     now = datetime.now(timezone.utc)
     n = inflight = retries = 0
@@ -193,8 +129,6 @@ def sample_one(container):
             continue
         age = (now - ts).total_seconds()
         minute = int(ts.timestamp()) // 60
-        # Gateway hits: every upstream attempt, a request's final one plus each
-        # retry before it, at the time it was made.
         hits[minute] = hits.get(minute, 0) + 1
         if retry:
             if age <= WINDOW:
@@ -207,7 +141,7 @@ def sample_one(container):
         m = STATUS_RE.search(line)
         if m:
             codes[m.group(1)] = codes.get(m.group(1), 0) + 1
-        else:   # no outcome logged: the proxy's format changed, or the line is cut
+        else:
             inflight += 1
         a = re.search(r"\[proxy ([\d.]+):", line)
         if a:
@@ -218,8 +152,6 @@ def sample_one(container):
 
 
 def _merge_up(stacks, key, first_full, cur_min):
-    """upstream -> {minute: count}, summing the `key` buckets of its stacks over
-    the minutes fully inside this poll's read window."""
     merged_up = {}
     for d in stacks.values():
         up = d.get("upstream", "unknown")
@@ -231,7 +163,7 @@ def _merge_up(stacks, key, first_full, cur_min):
 
 
 def _store_up(state_key, merged_up):
-    """Fold one poll's per-upstream minutes into _state[state_key]; caller holds _lock."""
+    # Poll windows overlap; keep the largest complete count rather than adding twice.
     mbu = _state.setdefault(state_key, {})
     for _up, _d in merged_up.items():
         _t = mbu.setdefault(_up, {})
@@ -250,9 +182,6 @@ def sampler(only_upstream):
                 if not st["proxy"]:
                     continue
                 up = upstream_of(s)
-                # Scope to ONE gateway. A stack running concurrently against
-                # a different upstream must not be charged against this
-                # endpoint's ceiling, nor clutter the view.
                 if only_upstream and only_upstream not in up:
                     continue
                 d = sample_one(st["proxy"])
@@ -273,23 +202,10 @@ def sampler(only_upstream):
             with _lock:
                 _state["stacks"] = stacks
                 _state["groups"] = groups
-                # Merge discrete minutes. The current minute is still filling,
-                # so storing it would plot a partial count that only looks like
-                # a dip -- keep it out until it is done.
-                # A minute may only be stored once it is FULLY inside the read
-                # window. Each poll sees [now-BUCKET_READ, now], so the OLDEST
-                # minute in that window is always partially covered. Excluding
-                # just the current minute would let that partial count
-                # overwrite a previously-complete one every time a minute ages
-                # out, and the freshest sample always looks right, which makes
-                # the undercount hard to see.
                 now_t = time.time()
-                first_full = int((now_t - BUCKET_READ) // 60) + 1   # ceil
-                cur_min = int(now_t) // 60                          # still filling
-                # Per-UPSTREAM, not summed. The --limit ceiling belongs to ONE
-                # gateway; summing stacks that run against a different gateway
-                # into the same line overstates usage against a limit those
-                # requests never touch.
+                # Exclude partial boundary minutes before persisting chart history.
+                first_full = int((now_t - BUCKET_READ) // 60) + 1
+                cur_min = int(now_t) // 60
                 merged_up = _merge_up(stacks, "buckets", first_full, cur_min)
                 mbu = _store_up("minutes_by_upstream", merged_up)
                 gmbu = _store_up("gateway_minutes_by_upstream",
@@ -308,7 +224,7 @@ def sampler(only_upstream):
                 _state["slice_pids"], _state["slice_max"] = slice_pids()
                 _state["updated"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
                 _state["error"] = None
-        except Exception as e:  # a sampler crash must not take the page down
+        except Exception as e:
             with _lock:
                 _state["error"] = str(e)
         time.sleep(POLL)
@@ -358,8 +274,6 @@ def render():
         parts.append(f'<div class="card">No running stack points at <b>{ep}</b>.</div>')
 
     for up, g in sorted(st["groups"].items(), key=lambda kv: -kv[1]["rpm"]):
-        # The ceiling is charged per upstream attempt, so it is measured with the
-        # proxy's retries in: a 429 storm multiplies them.
         rpm, hits = g["rpm"], g.get("gateway_rpm", g["rpm"])
         pct = 100.0 * hits / limit if limit else 0
         colour = "#cc4125" if pct >= 85 else ("#d1922b" if pct >= 60 else "#1baf7a")
@@ -402,12 +316,6 @@ def render():
                     f'<td class="{"warn" if bad else ""}">{codes}</td></tr>')
     parts.append(f'<div class="card"><table>{"".join(rows)}</table></div>')
 
-    # render() snapshots _state via a json round-trip, which turns the integer
-    # minute keys into strings. Coerce back before any arithmetic.
-    # Chart the CEILING-BEARING upstream only. The --limit ceiling is
-    # advertised by one gateway; stacks on any other gateway are not bound by
-    # it, so summing them into this line would compare traffic against a limit
-    # it never touches.
     mbu = {u: {int(k): v for k, v in d.items()}
            for u, d in st.get("minutes_by_upstream", {}).items()}
     ceil_up = next((u for u in mbu if CEILING_UPSTREAM and CEILING_UPSTREAM in u), None)
@@ -416,9 +324,6 @@ def render():
               st.get("gateway_minutes_by_upstream", {}).get(ceil_up, {}).items()}
              if ceil_up else {})
     chart_label = ceil_up or "(no rate-limited upstream present)"
-    # Fixed 12h X axis. Points sit at their true time, so a gap in the data
-    # renders as a gap rather than being closed up by the polyline -- an
-    # interpolated line across a dead stack would read as steady traffic.
     now_min = int(time.time()) // 60
     span = CHART_MINUTES
     x0 = now_min - span
@@ -428,16 +333,11 @@ def render():
     mean = sum(vals) / len(vals) if vals else 0
     gpts = sorted((k, v) for k, v in gmins.items() if k > x0)
     gpeak = max((v for _, v in gpts), default=0)
-    # Fixed y scale: 0 at the bottom, the ceiling at the top. An
-    # auto-scaled axis makes "how close are we to the limit" unreadable --
-    # the curve looks equally tall at 35 rpm and at 400. Values above the
-    # ceiling are CLAMPED for drawing but reported truthfully on hover.
     top = float(limit)
     w, h = 1020, 190
-    ceil_y = 1.0                      # the ceiling IS the top edge; inset 1px to stay visible
+    ceil_y = 1.0
     yv = lambda v: h - (min(v, top) / top) * h
 
-    # Break the polyline wherever a minute is missing.
     def polylines(series, stroke):
         segs, cur = [], []
         prev = None
@@ -454,11 +354,8 @@ def render():
             f'<polyline fill="none" {stroke} stroke-width="1.8" '
             f'stroke-linejoin="round" points="{" ".join(f"{x:.2f},{y:.2f}" for x, y in sg)}"/>'
             for sg in segs)
-    # Gateway hits under client requests: with no retries the two coincide
-    # and only the request line shows.
     poly = polylines(gpts, 'class="gw"') + polylines(pts, 'stroke="#2b6cb0"')
 
-    # Hour gridlines across the fixed 12h span.
     yticks = "".join(
         f'<line x1="0" y1="{h-(t/top)*h:.1f}" x2="{w}" y2="{h-(t/top)*h:.1f}" '
         f'stroke="currentColor" opacity=".10"/>'
@@ -548,7 +445,7 @@ class H(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def log_message(self, *a):
-        pass  # a page refresh every 10s must not spam the console
+        pass
 
 
 def main():

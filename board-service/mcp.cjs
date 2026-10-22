@@ -1,20 +1,8 @@
 #!/usr/bin/env node
-// mcp-board — copilot-CLI MCP stdio server that proxies to board-service HTTP.
-//
-// Reads env:
-//   BOARD_SERVICE_URL  (required) — e.g. http://board-service:8660
-//   AGENT_NAME         (required) — the identity used as thread_id / viewer
-//   BOARD_IDS          (optional) — CSV of boards this agent can access
-//                                    (only used as a hint in tool descriptions;
-//                                    real auth is enforced by board-service)
-//
-// Protocol: stdio JSON-RPC 2.0 line-delimited (one JSON object per line).
-// Implements only what copilot-CLI needs at startup + call time:
-//   - initialize
-//   - notifications/initialized (server ignores)
-//   - tools/list
-//   - tools/call
-//   - shutdown (server exits)
+/**
+ * Expose board read/write, history search and detail expansion as stdio MCP tools.
+ * Bind requests to this worker's identity; the HTTP service enforces membership.
+ */
 "use strict";
 
 const readline = require("node:readline");
@@ -25,17 +13,12 @@ const { URL } = require("node:url");
 const BOARD_URL = process.env.BOARD_SERVICE_URL || "http://board-service:8660";
 const AGENT = process.env.AGENT_NAME || "unknown-agent";
 const BOARD_IDS = (process.env.BOARD_IDS || "").split(",").map((s) => s.trim()).filter(Boolean);
-// Mirrors MAX_BOARD_ENTRIES in board-service/shared_lessons.py. Used ONLY to
-// state the bound in the tool description — the service is what enforces it,
-// so a drift here misinforms the agent but cannot change behaviour.
 const MAX_BOARD_ENTRIES = 2000;
 
 function log(...args) {
-    // stderr only — stdout is reserved for JSON-RPC.
     process.stderr.write("[mcp-board] " + args.map(String).join(" ") + "\n");
 }
 
-// --- HTTP helper -----------------------------------------------------------
 function httpRequest(method, path, body) {
     return new Promise((resolve, reject) => {
         const u = new URL(path, BOARD_URL);
@@ -61,7 +44,6 @@ function httpRequest(method, path, body) {
                     try {
                         json = text ? JSON.parse(text) : null;
                     } catch (_) {
-                        // Leave json=null; caller sees status + text.
                     }
                     resolve({ status: res.statusCode || 0, text, json });
                 });
@@ -73,12 +55,7 @@ function httpRequest(method, path, body) {
     });
 }
 
-// --- Tool definitions -------------------------------------------------------
 
-// board_id schema shared by every board tool. With BOARD_IDS set this is an
-// enum, which makes an inaccessible board unrepresentable instead of a
-// runtime 403 (agents otherwise guess a sibling team's board name and get
-// refused).
 function boardIdSchema(verb) {
     const desc = BOARD_IDS.length
         ? `Board to ${verb}. You are a member of: ${BOARD_IDS.join(", ")} — any other board is refused.`
@@ -204,14 +181,8 @@ const TOOLS = [
             required: ["board_id"],
         },
         handler: async ({ board_id, words, limit, types }) => {
-            // Accept an array too: models routinely send ["a","b"] for a list
-            // field, and failing that is a pointless round trip. The items OR
-            // together; ',' is an ordinary character in the words grammar, so
-            // joining on it would search the literal "a,b" and find nothing.
             const w = Array.isArray(words) ? words.join("|") : String(words || "");
             const ty = Array.isArray(types) ? types.join("|") : String(types || "");
-            // Either alone is a valid query; only both-empty is refused, and
-            // the service is the one that decides that.
             if (!w.trim() && !ty.trim())
                 throw new Error("board_grep: provide words and/or types");
             let q = `viewer=${encodeURIComponent(AGENT)}`;
@@ -223,14 +194,8 @@ const TOOLS = [
             const j = r.json || {};
             const entries = j.entries || [];
             if (!entries.length) {
-                // Say "nothing in the whole history" explicitly. The useful
-                // conclusion here is "no peer has touched this", and that is
-                // only sound because the search covered the full log.
                 return `no match for [${(j.words || "")}] in the full board history (0 of 0).`;
             }
-            // Server-rendered with format_for_prompt -- the same grouping and
-            // line format as board_read and the turn-start block, so a gist
-            // never looks different depending on which tool surfaced it.
             let out = j.rendered || entries
                 .map((e) => `[${e.label} ${e.thread_id}/${e.type}] ${e.content}`)
                 .join("\n");
@@ -282,19 +247,11 @@ const TOOLS = [
 
 const TOOLS_BY_NAME = Object.fromEntries(TOOLS.map((t) => [t.name, t]));
 
-// --- JSON-RPC 2.0 stdio loop -----------------------------------------------
 function send(msg) {
+    // stdout is reserved for newline-delimited JSON-RPC; diagnostics use stderr.
     process.stdout.write(JSON.stringify(msg) + "\n");
 }
 
-// --- notices: NOT here -------------------------------------------------------
-// Notices are injected by mcp-notice-shim, which proxies every MCP server.
-// Appending them to this server's results alone would reach only the board's
-// share of tool calls (~15%, against ~45% for gitea+board+mattermost), leaving
-// many tool calls between drains instead of almost none.
-//
-// Do NOT reintroduce a drain here: the shim wraps this server too, so a second
-// appender would deliver every notice twice.
 
 async function handle(msg) {
     const { id, method, params } = msg;
@@ -310,7 +267,7 @@ async function handle(msg) {
         });
         return;
     }
-    if (method === "notifications/initialized") return;  // no reply
+    if (method === "notifications/initialized") return;
     if (method === "tools/list") {
         send({
             jsonrpc: "2.0",
@@ -356,7 +313,6 @@ async function handle(msg) {
         setImmediate(() => process.exit(0));
         return;
     }
-    // Unknown method — return an error only if it had an id (was a request).
     if (id !== undefined && id !== null) {
         send({ jsonrpc: "2.0", id, error: { code: -32601, message: `method not found: ${method}` } });
     }

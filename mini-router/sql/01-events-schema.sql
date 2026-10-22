@@ -1,5 +1,5 @@
--- mini-router schema (R7 sidecar). Loaded by docker-entrypoint-initdb.d
--- on first MySQL boot, and by EventStore.ensureSchema() at every connect.
+-- Durable worker event queue. Listener event IDs are deduplicated per agent.
+-- Keep this seed schema aligned with EventStore.ensureSchema() in src/state.ts.
 CREATE TABLE IF NOT EXISTS events (
   id BIGINT PRIMARY KEY AUTO_INCREMENT,
   dedup_key VARCHAR(255) NOT NULL,
@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS events (
   KEY ix_batch_state (batch_id, state)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
+-- Source ingestion watermarks advance after the corresponding events are stored.
 CREATE TABLE IF NOT EXISTS cursors (
   agent VARCHAR(128) NOT NULL,
   source VARCHAR(64) NOT NULL,

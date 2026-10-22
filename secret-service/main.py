@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
-"""omcgitea secret-service.
+# Serve bootstrap-issued worker tokens to routers on the private service network.
+# Token reads require X-Internal-Auth; the health endpoint is unauthenticated.
 
-Tiny stdlib HTTP server that serves per-agent tokens to mini-router
-sidecars from the read-only /data/tokens mount. Auth
-is a shared header secret; only reachable on the docker network.
-"""
 from __future__ import annotations
 
 import os
@@ -19,6 +16,7 @@ NAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 
 
 def _token_path(name: str) -> str:
+    # Check the entire identifier and resolved path, including existing symlinks.
     if not NAME_RE.fullmatch(name):
         raise ValueError("bad agent name")
     root = os.path.realpath(TOKENS_DIR)
@@ -32,9 +30,6 @@ def _token_path(name: str) -> str:
 
 
 class Handler(BaseHTTPRequestHandler):
-    # Speak HTTP/1.1 so modern fetch clients (undici) can keep-alive and
-    # parse the response cleanly. Requires Content-Length on every reply,
-    # which _send always sets.
     protocol_version = "HTTP/1.1"
 
     def log_message(self, fmt: str, *args) -> None:
@@ -45,8 +40,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "text/plain")
         self.send_header("Content-Length", str(len(body)))
         if code >= 400:
-            # End rejected requests without parsing trailing bytes as a new
-            # request and including them in error logs.
+            # Rejected requests must not leave unread bytes on a reusable connection.
             self.close_connection = True
             self.send_header("Connection", "close")
         self.end_headers()
@@ -74,7 +68,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send(400, b"bad agent name\n")
             return None
 
-    def do_GET(self) -> None:  # noqa: N802
+    def do_GET(self) -> None:
         if self.path == "/healthz":
             self._send(200, b"ok\n")
             return
@@ -88,7 +82,6 @@ class Handler(BaseHTTPRequestHandler):
             return
         with open(path, "rb") as f:
             self._send(200, f.read())
-
 
 
 def main() -> None:

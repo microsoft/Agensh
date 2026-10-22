@@ -1,4 +1,7 @@
-"""Exercise the standalone driver with real native ACP; only the model is a fixture."""
+# Docker integration check for native Copilot tools, immediate continuation,
+# source export and shutdown archives, using a local Responses API fixture.
+# Requires prebuilt worker/cleanroom images and access to the Docker host gateway.
+
 import datetime
 import http.server
 import json
@@ -16,6 +19,7 @@ REQUESTS = []
 
 
 class Model(http.server.BaseHTTPRequestHandler):
+    # Request one real shell action, then end turns so the resume loop is exercised.
     tool_sent = False
 
     def log_message(self, *_):
@@ -148,6 +152,7 @@ class ResumeIntegration(unittest.TestCase):
         self.assertLess(max(gaps), 3, 'Completed prompts must resume without a watchdog delay')
         self.assertTrue(REQUESTS)
         for request in REQUESTS:
+            # Inspect actual model requests to verify the standalone tool/model setup.
             self.assertEqual(request['model'], 'gpt-5.6-sol')
             self.assertEqual(request.get('reasoning', {}).get('effort'), 'high')
             names = {tool.get('name') for tool in request.get('tools', [])}
@@ -155,7 +160,7 @@ class ResumeIntegration(unittest.TestCase):
             self.assertFalse([name for name in names if any(part in name.lower() for part in ('gitea', 'mattermost', 'board_'))])
         self.assertFalse((run / 'data/agents/single-agent/home/.claude').exists(), 'Unused Claude settings must not be installed')
         deployed_resume = (run / 'data/agents/single-agent/home/.pbench/resume.txt').read_text()
-        self.assertEqual(deployed_resume, (SOURCE / 'prompts/single-agent/resume.md').read_text().rstrip('\n'))
+        self.assertEqual(deployed_resume, (SOURCE / 'prompts/single-agent/resume.txt').read_text().rstrip('\n'))
         checks = json.loads((run / 'preflight.json').read_text())
         self.assertEqual(checks['uid'], 10000)
         self.assertFalse(checks['reference_readable'])

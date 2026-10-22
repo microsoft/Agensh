@@ -1,9 +1,13 @@
+/**
+ * Keep the latest 32 group messages inline and save larger backlogs as JSONL.
+ * The saved file contains every queued group message, including full post text.
+ */
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, open, rename, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import type { EventRow, UEMLike } from "./state.ts";
 
-/** Public/private channel posts and group DMs; direct messages stay separate. */
+// Keep SQL selection aligned with isGroupMessage(), including edits and deletions.
 export const GROUP_CHAT_SQL = `COALESCE(source = 'mattermost' AND (
   JSON_UNQUOTE(JSON_EXTRACT(payload, '$.kind')) IN ('post', 'group')
   OR (JSON_UNQUOTE(JSON_EXTRACT(payload, '$.kind')) IN ('post_edited', 'post_deleted')
@@ -24,12 +28,11 @@ function messageText(payload: UEMLike): string {
     try {
       const post = JSON.parse(raw.data.post) as { message?: unknown };
       if (typeof post.message === "string") return post.message;
-    } catch { /* Retain the existing summary for a malformed upstream post. */ }
+    } catch {   }
   }
   return String(payload.summary ?? "");
 }
 
-/** Save the full backlog before delivery; acknowledgment waits for ACP success. */
 export async function groupMessagePayloads(batch: EventRow[], directory: string, username: string): Promise<UEMLike[]> {
   const limit = 32;
   const messages = batch.filter((row) => isGroupMessage(row.payload));
@@ -51,6 +54,7 @@ export async function groupMessagePayloads(batch: EventRow[], directory: string,
       await file.close();
     }
     await rename(temporary, path);
+    // Seal the file and its directory entry before advertising the path to Copilot.
     const parent = await open(directory, "r");
     try { await parent.sync(); } finally { await parent.close(); }
   } catch (error) {
@@ -58,6 +62,7 @@ export async function groupMessagePayloads(batch: EventRow[], directory: string,
     throw error;
   }
   const handle = "@" + username.replace(/^@/, "");
+  // Match the complete handle so worker1 does not count mentions of worker10.
   const escaped = handle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const mention = new RegExp(`(?<![a-zA-Z0-9_.@-])${escaped}(?![a-zA-Z0-9_-]|\\.[a-zA-Z0-9_.-])`, "gi");
   const count = earlier.reduce((n, row) => n + (messageText(row.payload).match(mention)?.length ?? 0), 0);

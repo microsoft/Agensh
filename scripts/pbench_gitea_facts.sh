@@ -1,28 +1,6 @@
 #!/usr/bin/env bash
-# pbench_gitea_facts.sh — exact issue/PR facts for one archived ProgramBench trajectory,
-# read straight out of Gitea's own database.
-#
-# Usage:
-#   scripts/pbench_gitea_facts.sh <traj-dir> [--json]
-#   for d in ~/pbench-trajectories/*/; do
-#       scripts/pbench_gitea_facts.sh "$d"; done
-#
-# WHY THIS EXISTS
-# Every git-derived proxy for "how many PRs merged" misleads, each in a different direction and
-# each on the run you most need to inspect:
-#
-#   transcript regex for POST /pulls     UNDER  a lead's loop script creates N issues per call
-#   `Merge pull request` commit grep     UNDER  misses squash/rebase merges
-#   PR head is-ancestor-of-main          OVER   superseded PRs land via another branch
-#   `from <branch>` in merge commits     UNDER  same squash/rebase bias, a third time
-#
-# Gitea keeps the answer in SQLite: data-root/gitea/gitea/gitea.db, tables `issue` (is_pull
-# separates sub-issues from PRs) and `pull_request` (has_merged, merged_unix). No proxy, no
-# container, no credentials, no bias. Everything below is EXACT.
-#
-# The database is opened READ-ONLY (mode=ro). These archives are the only copy of several runs,
-# and a read-write open lets sqlite create -wal/-shm files or replay a journal, which would
-# silently alter the evidence.
+# Read issue/PR counts and integration timings from an archived Gitea SQLite DB.
+# Accept a trajectory directory and optional --json; the database is opened read-only.
 set -u
 
 TRAJ="${1:-}"
@@ -47,25 +25,19 @@ con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
 q = lambda s, *a: con.execute(s, a).fetchall()
 one = lambda s, *a: (q(s, *a) or [[0]])[0][0]
 
-# is_pull separates the two things sharing Gitea's numbering sequence. Counting `issue` rows
-# without it conflates sub-issues and PRs, which is why the numbering looked inconsistent.
 sub_open   = one("select count(*) from issue where is_pull=0")
 sub_closed = one("select count(*) from issue where is_pull=0 and is_closed=1")
 prs        = one("select count(*) from pull_request")
 merged     = one("select count(*) from pull_request where has_merged=1")
-# A PR is closed-unmerged when its issue row is closed but has_merged is not set.
 closed_unmerged = one("""select count(*) from pull_request p join issue i on i.id=p.issue_id
                          where p.has_merged!=1 and i.is_closed=1""")
 still_open      = one("""select count(*) from pull_request p join issue i on i.id=p.issue_id
                          where p.has_merged!=1 and i.is_closed=0""")
 
-# open -> merge latency, the thing no git proxy can reach at all.
 lat = [(m - c) / 60.0 for m, c in q("""select p.merged_unix, i.created_unix
                                        from pull_request p join issue i on i.id=p.issue_id
                                        where p.has_merged=1 and p.merged_unix>0""")]
 lat.sort()
-# Sub-issue lifetime: how long an assignment stays open. Directly measures whether workers are
-# finishing what they are given, which `landed` counts cannot distinguish from bundling.
 life = [(cl - cr) / 60.0 for cl, cr in q("""select closed_unix, created_unix from issue
                                             where is_pull=0 and is_closed=1 and closed_unix>0""")]
 life.sort()

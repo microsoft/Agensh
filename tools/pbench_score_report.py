@@ -1,33 +1,7 @@
 #!/usr/bin/env python3
-"""Report BOTH scores ProgramBench can produce for one eval.json, using the
-tool's OWN functions rather than re-deriving either.
-
-WHY THIS EXISTS
-The CLI prints one number and the leaderboard computes a different one from the
-same file, and they are far apart -- the raw/CLI figure can be about twice
-the canonical-kept one. Quoting the wrong one, or
-hand-rolling the arithmetic from a partial read of the source, is
-how a run gets reported as roughly twice as good as it is.
-
-  RAW / CLI      programbench.eval.eval_batch._summary_from_existing
-                 -> n_resolved / n_tests over TEST ROWS, after active-branch and
-                    ignored-branch/test filtering. This is what `programbench
-                    eval` prints in its summary table.
-
-  CANONICAL-KEPT programbench.submission.score_instance
-                 -> the same filtering, then keyed into a dict by
-                    "<branch>/<test_name>". The dict COLLAPSES DUPLICATE
-                    full_names, so a test that appears on many rows counts once.
-                    This is the leaderboard's basis (score_run -> score_instance).
-
-The gap is entirely that dedup: rows >> canonical names. Neither is "wrong";
-they answer different questions. Report the canonical one for anything that gets
-compared across runs.
-
-Usage:
-  uv run --project "${PROGRAMBENCH_REPO:-$HOME/programbench}" \
-    python tools/pbench_score_report.py <run_dir> [instance_id ...]
-"""
+# Report raw attempt-row and canonical-kept scores using ProgramBench's own helpers.
+# Run in the evaluator's Python environment so registry filtering and deduplication
+# match the recorded ProgramBench revision used for cross-run comparisons.
 
 import sys
 from pathlib import Path
@@ -54,7 +28,6 @@ def report(run_dir: Path, iid: str, inst: dict) -> None:
         print(f"{iid}: ERROR {raw.error_code}: {str(raw.error_details)[:120]}")
         return
 
-    # --- exactly what the CLI summary table prints -------------------------
     branches = get_active_branches(inst)
     bdata = inst.get("branches", {})
     summary = _summary_from_existing(
@@ -66,8 +39,8 @@ def report(run_dir: Path, iid: str, inst: dict) -> None:
         ignored_branches=get_ignored_branches(inst),
     )
 
-    # --- exactly what the leaderboard computes -----------------------------
     kept = test_results_map(ej, inst)
+    # Canonical names collapse repeated attempts that remain separate in the raw view.
     canon = score_instance(ej, inst)
 
     print(f"{iid}")
@@ -79,7 +52,7 @@ def report(run_dir: Path, iid: str, inst: dict) -> None:
 
 def main() -> int:
     if len(sys.argv) < 2:
-        print(__doc__)
+        print('Report BOTH scores ProgramBench can produce for one eval.json, using the\ntool\'s OWN functions rather than re-deriving either.\n\nWHY THIS EXISTS\nThe CLI prints one number and the leaderboard computes a different one from the\nsame file, and they are far apart -- the raw/CLI figure can be about twice\nthe canonical-kept one. Quoting the wrong one, or\nhand-rolling the arithmetic from a partial read of the source, is\nhow a run gets reported as roughly twice as good as it is.\n\n  RAW / CLI      programbench.eval.eval_batch._summary_from_existing\n                 -> n_resolved / n_tests over TEST ROWS, after active-branch and\n                    ignored-branch/test filtering. This is what `programbench\n                    eval` prints in its summary table.\n\n  CANONICAL-KEPT programbench.submission.score_instance\n                 -> the same filtering, then keyed into a dict by\n                    "<branch>/<test_name>". The dict COLLAPSES DUPLICATE\n                    full_names, so a test that appears on many rows counts once.\n                    This is the leaderboard\'s basis (score_run -> score_instance).\n\nThe gap is entirely that dedup: rows >> canonical names. Neither is "wrong";\nthey answer different questions. Report the canonical one for anything that gets\ncompared across runs.\n\nUsage:\n  uv run --project "${PROGRAMBENCH_REPO:-$HOME/programbench}"     python tools/pbench_score_report.py <run_dir> [instance_id ...]\n')
         return 2
     run_dir = Path(sys.argv[1])
     wanted = sys.argv[2:]

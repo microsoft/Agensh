@@ -1,5 +1,4 @@
-# mini-router (R7 sidecar) — one process per agent.
-# Multi-stage: TS build → minimal runtime.
+# Compile the TypeScript sidecar, then copy only runtime code and dependencies.
 FROM node:20-alpine AS build
 WORKDIR /build
 COPY package.json package-lock.json tsconfig.json ./

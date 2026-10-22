@@ -1,10 +1,6 @@
 /**
- * GiteaListener — wake-driven cursor pull, one listener per agent.
- *
- * No periodic polling fallback; SSE is the sole wake. One catch-up
- * pollOnce on boot drains backlog. Listener writes ingested events into
- * MySQL via EventStore.ingest (idempotent on dedup_key). Dispatcher is
- * woken via onIngest callback.
+ * Use SSE wakeups to fetch Gitea notifications into the durable worker queue.
+ * Save the source cursor only after ingesting the fetched notifications.
  */
 import {
   advanceCursor,
@@ -22,32 +18,25 @@ export interface GiteaListenerOptions {
   agent: string;
   state: EventStore;
   baseUrl: string;
-  /** PAT — REST notifications. */
   token: string;
-  /** Form-session cookie auth for SSE. */
   auth: GiteaFormAuth;
   hostHeader?: string;
   onIngest?: (insertedCount: number) => void;
 }
 
-/** Upper bound on pages per poll, so a runaway backlog cannot pin the loop. */
 const MAX_PAGES = 20;
 
 export class GiteaListener {
   private wakers: Array<() => void> = [];
-  /** A trigger() that arrived while no poll was waiting; the next wait returns at once. */
   private wakePending = false;
   sse: GiteaSSE | null = null;
 
   constructor(private opts: GiteaListenerOptions) {}
 
-  /** Run one pull cycle: read cursor → fetch → ingest → advance cursor. */
   async pollOnce(): Promise<void> {
     const { agent, state } = this.opts;
     const since = await state.getCursor(agent, "gitea");
-    // Gitea returns the newest first, and the cursor jumps to the newest seen,
-    // so anything past the first page would never be fetched again. Page until
-    // a short page; overlap between pages is collapsed by ingest's dedup.
+    // Keep one lower bound across pages; advancing it mid-fetch could skip results.
     const items: GiteaNotificationRaw[] = [];
     let maxUpdatedAt: string | null = null;
     for (let n = 1; n <= MAX_PAGES; n++) {
@@ -116,9 +105,7 @@ export class GiteaListener {
   trigger(): void {
     const ws = this.wakers;
     this.wakers = [];
-    // SSE is the only wake, so one that lands mid-poll (after the fetch, before
-    // the next wait) must not be dropped: its notification would sit unread
-    // until some later, unrelated trigger.
+    // Remember notifications that arrive while a fetch is already in progress.
     if (ws.length === 0) this.wakePending = true;
     for (const w of ws) w();
   }
@@ -128,10 +115,6 @@ export class GiteaListener {
       this.wakePending = false;
       return Promise.resolve();
     }
-    // Always remove the abort listener on resolve. A `{once:true}` listener
-    // only auto-removes on abort, so a wake() that resolves without removing
-    // it leaks one listener per tick of the polling loop, and a long-running
-    // listener hits MaxListenersExceededWarning.
     return new Promise<void>((resolve) => {
       let done = false;
       const finish = () => {

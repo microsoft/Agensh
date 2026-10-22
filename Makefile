@@ -1,17 +1,9 @@
-# Agensh — single-node ProgramBench fleet Makefile
-#
-# Every compose target runs PROFILE=pbench-single-node-* with sudo
-# (the dev box has docker.sock owned by root:docker; the user is not in the
-# docker group). Override SUDO= to skip sudo.
-
+# Profile-scoped lifecycle commands for the generated single-node fleet stack.
+# Runtime settings come from .env.<profile>; generated Compose files are disposable.
 SHELL := /bin/bash
 
-# Profile selector. Each pbench-single-node-* profile has its own .env.<profile>, data
-# dir (${DATA_ROOT}/<profile>, default .claude-team-data/<profile>), compose
-# project name (omcgitea-<profile>) and host ports. There is no default: the
-# only stack this repo runs is the pbench one, and a mistyped or missing
-# PROFILE must not silently act on some other compose project.
 PROFILE ?=
+# Restrict every lifecycle command to one explicitly named single-node profile.
 ifneq (,$(PROFILE))
 ifneq (1,$(words $(PROFILE)))
 $(error PROFILE="$(PROFILE)" must be a single word)
@@ -23,37 +15,18 @@ endif
 ENV_FILE := .env.$(PROFILE)
 PROJECT  := omcgitea-$(PROFILE)
 
-# The compose template uses ${DATA_ROOT}/${PROFILE}; read DATA_ROOT from the env
-# file so prep-mm-dirs / clean chown the right directory.
-# compose keeps the last DATA_ROOT line, so this does too. `clean` hands
-# DATA_DIR to rm -rf, so a value that splits into two words is refused.
 ENV_DATA_ROOT := $(shell grep -E '^DATA_ROOT=' $(ENV_FILE) 2>/dev/null | tail -n1 | cut -d= -f2-)
 DATA_DIR := $(if $(ENV_DATA_ROOT),$(ENV_DATA_ROOT),.claude-team-data)/$(PROFILE)
 ifneq (1,$(words $(DATA_DIR)))
 $(error DATA_DIR "$(DATA_DIR)" must be a single path; check DATA_ROOT in $(ENV_FILE))
 endif
 
-# host.docker.internal:host-gateway needs Docker 20.10+; we already have 29.x.
-# We deliberately strip the user's shell ANTHROPIC_* / GITEA_* / AGENT_KIND
-# vars before invoking compose so .env.<profile> is the single source of
-# truth — the user's ~/.bashrc may set ANTHROPIC_BASE_URL=http://localhost:4141
-# (works only on the host, not inside containers) and we must not let it leak in.
-# The -E is load-bearing: PBENCH_RUN_START_MS is exported by
-# scripts/pbench_run.sh, not written into any .env file, so plain `sudo` would
-# strip it and each mini-router would fall back to its own process start as the
-# run-clock origin, and event ages would disagree with each other and with the
-# board. If you change SUDO, keep -E or move the anchor into the env-file.
 SUDO ?= sudo -E
 
-# The base is rendered per profile by tools/gen-compose-prod.py into
-# docker/_gen-prod.<profile>.yml (infra + PBENCH_WORKERS_PER_TEAM peer coders),
-# then layered with docker-compose.pbench.yml -- the egress-lock overlay
-# (internal:true default net + egress-proxy). Every per-worker setting (resource
-# guard, prompt mounts, board env, board-service) is emitted by the generator, so
-# there is no per-N overlay to keep in step with the worker count.
 COMPOSE_BASE := docker/_gen-prod.$(PROFILE).yml
 COMPOSE_OVERLAY := -f docker/docker-compose.pbench.yml
 
+# Keep inherited model and identity variables from overriding the selected profile.
 COMPOSE ?= env -u ANTHROPIC_BASE_URL -u ANTHROPIC_MODEL -u ANTHROPIC_API_KEY \
             -u AGENT_KIND -u COPILOT_PROVIDER_TYPE \
             -u GITEA_HOST -u GITEA_TOKEN \
@@ -61,84 +34,80 @@ COMPOSE ?= env -u ANTHROPIC_BASE_URL -u ANTHROPIC_MODEL -u ANTHROPIC_API_KEY \
             --project-name $(PROJECT) --env-file $(ENV_FILE) \
             --profile $(PROFILE)
 
-
 .PHONY: help up down logs ps build pull rebuild clean wipe \
         bootstrap-rerun reset-tokens check-env require-profile prep-mm-dirs render-pbench-base compose-services
 
 help:
-	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | sed 's/:.*## /\t/'
+	@printf '%s\t%s\n' \
+	    check-env 'Verify .env.<profile> has the required keys' \
+	    up 'Start the pbench stack for PROFILE (build if needed)' \
+	    compose-services 'Print every service name for PROFILE (used to split infra from agents)' \
+	    down 'Stop containers (keep data)' \
+	    logs 'Tail logs' \
+	    ps 'List service status' \
+	    build '(Re)build images' \
+	    pull 'Pull base images' \
+	    rebuild 'Force rebuild + restart' \
+	    clean 'Stop containers and wipe THIS profile'"'"'s data dir (DESTRUCTIVE)' \
+	    wipe 'Alias for clean' \
+	    bootstrap-rerun 'Re-run bootstrap (idempotent)' \
+	    reset-tokens 'Wipe tokens but keep gitea data (forces token rotation)'
 
 require-profile:
 	@test -n "$(PROFILE)" || (echo "ERROR: PROFILE is required, e.g. make up PROFILE=pbench-single-node-pandoc" >&2 && exit 1)
 
-check-env: require-profile ## Verify .env.<profile> has the required keys
+check-env: require-profile
 	@test -f $(ENV_FILE) || (echo "ERROR: $(ENV_FILE) missing — generate it with scripts/pbench_gen_env.sh" && exit 1)
 	@grep -q '^GITEA_ADMIN_PASSWORD=.\+' $(ENV_FILE) || (echo "ERROR: GITEA_ADMIN_PASSWORD not set in $(ENV_FILE)" && exit 1)
 
-
-# Render the per-profile pbench base compose from tools/gen-compose-prod.py,
-# passing PBENCH_WORKERS_PER_TEAM (+ optional mounts) from .env.<profile>.
-# Every target that runs $(COMPOSE) depends on it, so COMPOSE_BASE always exists.
 render-pbench-base: require-profile
 	@PBENCH_WORKERS_PER_TEAM="$$(grep -E '^PBENCH_WORKERS_PER_TEAM=' $(ENV_FILE) 2>/dev/null | cut -d= -f2)" \
 	python3 tools/gen-compose-prod.py > docker/_gen-prod.$(PROFILE).yml \
 	&& echo "[render-pbench-base] wrote docker/_gen-prod.$(PROFILE).yml" >&2
 
-up: check-env prep-mm-dirs render-pbench-base ## Start the pbench stack for PROFILE (build if needed)
+up: check-env prep-mm-dirs render-pbench-base
 	$(COMPOSE) up -d --build $(UP_FLAGS) $(SERVICES)
 
-# SERVICES limits `up` to a subset; empty means the whole stack.
-# pbench_run.sh brings infra up first and then starts the agent containers on a
-# stagger: started all at once, many copilot CLIs unpacking their package
-# together never finish, and an agent that does not exist yet cannot be woken
-# early by a peer's channel post.
 SERVICES ?=
 
-# UP_FLAGS passes extra flags to `compose up`. The staggered per-agent bringup
-# uses --no-deps: `compose up <agent>` otherwise starts and may recreate that
-# service's depends_on chain, restarting gitea/mysql/mattermost and re-running
-# bootstrap on every agent start, which loses the agents' Mattermost accounts.
 UP_FLAGS ?=
 
-compose-services: render-pbench-base ## Print every service name for PROFILE (used to split infra from agents)
+compose-services: render-pbench-base
 	@$(COMPOSE) config --services
 
-# Mattermost runs as uid 2000; on a fresh profile its bind-mount dirs
-# don't exist yet and would be auto-created by docker as root, which
-# then makes the container fail with "permission denied" on
-# /mattermost/config/config.json. Pre-create + chown so first `make up`
-# works without manual intervention.
+# Mattermost writes its host-mounted directories as container UID/GID 2000.
 prep-mm-dirs: require-profile
 	@$(SUDO) mkdir -p $(DATA_DIR)/mattermost/data $(DATA_DIR)/mattermost/logs $(DATA_DIR)/mattermost/config $(DATA_DIR)/mattermost/plugins
 	@$(SUDO) chown -R 2000:2000 $(DATA_DIR)/mattermost
 
-down: render-pbench-base ## Stop containers (keep data)
+down: render-pbench-base
 	$(COMPOSE) down
 
-logs: render-pbench-base ## Tail logs
+logs: render-pbench-base
 	$(COMPOSE) logs -f --tail=200
 
-ps: render-pbench-base ## List service status
+ps: render-pbench-base
 	$(COMPOSE) ps
 
-build: render-pbench-base ## (Re)build images
+build: render-pbench-base
 	$(COMPOSE) build
 
-pull: render-pbench-base ## Pull base images
+pull: render-pbench-base
 	$(COMPOSE) pull
 
-rebuild: down build up ## Force rebuild + restart
+rebuild: down build up
 
-clean: down ## Stop containers and wipe THIS profile's data dir (DESTRUCTIVE)
+# Explicitly destructive: stop the selected profile and delete its persistent data.
+clean: down
 	@test -n "$(PROFILE)"
 	$(SUDO) rm -rf $(DATA_DIR)
 	@echo "Cleaned $(DATA_DIR)/"
 
-wipe: clean ## Alias for clean
+wipe: clean
 
-bootstrap-rerun: render-pbench-base ## Re-run bootstrap (idempotent)
+bootstrap-rerun: render-pbench-base
 	$(SUDO) rm -f $(DATA_DIR)/tokens/.bootstrap-done
 	$(COMPOSE) up bootstrap
 
-reset-tokens: require-profile ## Wipe tokens but keep gitea data (forces token rotation)
+reset-tokens: require-profile
 	$(SUDO) rm -rf $(DATA_DIR)/tokens
