@@ -8,6 +8,7 @@ team runs and exchange artifacts with ProgramBench.
 | `gen-compose-prod.py` | Emits the shared-service base and one worker/router pair per configured agent |
 | `pbench_submission.py` | Extracts cleanroom workspace assets and exports committed source as `submission.tar.gz` |
 | `pbench_score_report.py` | Reports raw/CLI and canonical-kept scores through ProgramBench's own helpers |
+| `coordination_probe.py` | Offline synthetic shared-context portability probe; no model or service execution |
 
 The generator reads `PBENCH_WORKERS_PER_TEAM` (default 16 when called directly)
 and leaves Compose `${…}` placeholders for profile substitution. Make writes
@@ -31,3 +32,13 @@ uv run --project "$PROGRAMBENCH_REPO" \
 
 Its canonical-kept result collapses repeated test identities and is the score
 used for comparisons. Record the evaluator revision alongside that result.
+
+## Proposed coordination portability experiment
+
+The [proposed ADR](../docs/adrs/adr-001-coordination-portability-validation.md)
+describes a bounded experiment for reusing coordination patterns in another
+agent stack. Run `python3 tools/coordination_probe.py` from the repository root
+with Python 3.11 or newer. All nine cases must execute with zero failures,
+errors or skips. The probe uses the actual in-process board implementations and
+synthetic inputs; it does not qualify distributed recovery, task quality, AWS
+deployment or the paper's scaling results.
