@@ -69,7 +69,7 @@ const TOOLS = [
     {
         name: "board_read",
         description:
-            `Read the shared context board. Returns the WHOLE board — every admitted gist ` +
+            `Read the shared context board. Returns the full recent board ` +
             `(FACT / OBSERVED / FAIL / PATCH_SUMMARY / CLAIM), newest ${MAX_BOARD_ENTRIES} if the ` +
             `board is larger than that. ` +
             `For anything older than the board still holds, use board_grep. ` +

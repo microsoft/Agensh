@@ -40,7 +40,7 @@ export class BoardClient {
       const body = down
         ? "(the shared board could not be reached this turn — its contents are UNKNOWN, not empty)"
         : empty
-          ? "(nothing published yet — you are the first to write here)"
+          ? "(no unread shared notes)"
           : rendered;
       blocks.push(`${header}\n${body}`);
     }
@@ -48,13 +48,13 @@ export class BoardClient {
       ? "\n\nThe shared board could not be reached this turn, so the view above is " +
         "INCOMPLETE — treat it as unknown, not empty. Do NOT assume you are first: " +
         "peers may already have recorded facts, dead ends and fixes you cannot see " +
-        "here. Publish what you find as usual; it will land once the board recovers."
+        "here. Publish what you find as usual; retry failed writes once the board recovers."
       : anyContent
-        ? "\n\nThe entries above are verified notes published by your peers. " +
+        ? "\n\nThe entries above are verified notes published by your team. " +
           "Read them BEFORE acting: do not re-derive a FACT someone already " +
           "established, do not repeat a path recorded as FAIL, and check " +
           "PATCH_SUMMARY entries before proposing your own fix."
-        : "\n\nNothing has been published yet. Whatever you discover this turn is " +
+        : "\n\nNo unread shared notes. Whatever you discover this turn is " +
           "what your peers will see, so publish concrete findings rather than plans.";
     return blocks.join("\n\n") + guidance + "\n==== END SHARED CONTEXT ====\n";
   }
@@ -134,7 +134,7 @@ export class BoardClient {
       "==== SHARED CONTEXT: ANYTHING TO PUBLISH? ====\n" +
       "This turn produced no board entry. If you established something your " +
       "peers can build on, publish it now; if you are still mid-task, refresh " +
-      "your `CLAIM` so peers and your lead can see the work is live.\n\n" +
+      "your `CLAIM` so peers can see the work is live.\n\n" +
       `\`board_write\` on board \`${primary}\`:\n` +
       "  FACT <objective discovery, <=100 chars>\n" +
       "  OBSERVED <what you ran and what it printed, <=100 chars>\n" +

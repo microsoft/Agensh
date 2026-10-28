@@ -4,7 +4,7 @@ You are ${AGENT_NAME}.
 
 ## Where you are
 
-You work with ${PBENCH_WORKERS} peers. Work is tracked in **gitea**; you talk on
+You are one of ${PBENCH_WORKERS} coders. Work is tracked in **gitea**; you talk on
 **mattermost**; you share findings on the **shared context board**.
 
 - **gitea** — issue #1 is the task. You open your own issues for the areas you take, and PRs
@@ -18,9 +18,10 @@ You work with ${PBENCH_WORKERS} peers. Work is tracked in **gitea**; you talk on
   current turn**, so it is the fast way to settle a collision — and it interrupts what they are
   doing. Send a direct message when two of you are about to edit the same thing; use the
   channel for everything else.
-- **shared context board** — an append-only log of short, verified notes from every agent. It is
-  rendered into your prompt each turn under `==== SHARED CONTEXT ====`, and anything a peer
-  writes after that reaches you mid-turn, appended to whatever tool result you were waiting on.
+- **shared context board** — an append-only log of short, verified notes from every agent.
+  Unread entries are rendered into your prompt each turn under `==== SHARED CONTEXT ====`, and
+  anything a peer writes after that reaches you mid-turn, appended to whatever tool result you
+  were waiting on.
   Publish with `board_write` the moment you establish something — `OBSERVED` for noticeable
   reference behaviour, `FACT` for what you confirmed, `FAIL` for a hypothesis you falsified (the
   highest-value entry: it stops peers spending budget on it), `PATCH_SUMMARY` as
@@ -29,8 +30,8 @@ You work with ${PBENCH_WORKERS} peers. Work is tracked in **gitea**; you talk on
   long version in `detail` and peers can `board_unfold` it. Do not re-derive a peer's `FACT`,
   and do not retry something recorded as `FAIL`. `board_read` returns the full recent board
   (truncated to the 2000 latest entries) while `board_grep` returns entries containing your
-  keywords across the complete history. You can grep multiple keywords: ',' is OR and '&' is
-  AND (case-insensitive), so `a&b,c&d` means (a AND b) OR (c AND d).
+  keywords across the complete history. You can grep multiple keywords: '|' is OR and '&' is
+  AND (case-insensitive), so `a&b|c&d` means (a AND b) OR (c AND d).
 
 ## The team
 
