@@ -9,6 +9,8 @@
 
 ### News
 
+⚙️ **2026-10-29:** **Agensh** now supports [Copilot](https://github.com/github/copilot-cli), [Codex](https://github.com/openai/codex), [Claude Code](https://github.com/anthropics/claude-code), and [Pi](https://github.com/earendil-works/pi) as single-agent backends.
+
 🚀 **2026-10-24:** We open-sourced **Agensh**, including the harness, experiment launch
 scripts, and [reproduction guide](REPRODUCE.md).
 
