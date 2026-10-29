@@ -5,16 +5,60 @@
  */
 "use strict";
 const { spawn } = require("child_process");
+const { readFileSync } = require("node:fs");
 const http = require("http");
 const https = require("https");
 const { URL } = require("url");
 
 const BOARD_URL = (process.env.BOARD_SERVICE_URL || "").replace(/\/+$/, "");
 const AGENT = process.env.AGENT_NAME || "";
+const POLICY_FILE = process.env.MCP_TOOL_POLICY_FILE;
+const SERVER_NAME = process.env.MCP_SERVER_NAME;
+const METADATA_FILE = process.env.MCP_TOOL_METADATA_FILE;
+const CLAUDE_RESULT_CHARS = process.env.AGENT_HARNESS === "claude" ? Number(process.env.TOOL_OUTPUT_BYTES || 1048576) : 0;
+let toolMetadata = {};
+let allowedTools = null;
+if (POLICY_FILE || SERVER_NAME) {
+    if (!POLICY_FILE || !SERVER_NAME) {
+        throw new Error("MCP_TOOL_POLICY_FILE and MCP_SERVER_NAME must both be configured");
+    }
+    const names = JSON.parse(readFileSync(POLICY_FILE, "utf8"))[SERVER_NAME];
+    if (!Array.isArray(names) || names.length === 0 || names.some((name) => typeof name !== "string" || !name)) {
+        throw new Error(`No valid MCP tool allowlist for ${SERVER_NAME}`);
+    }
+    allowedTools = new Set(names);
+}
+if (METADATA_FILE) {
+    if (!SERVER_NAME) throw new Error("MCP_SERVER_NAME is required for tool metadata");
+    toolMetadata = JSON.parse(readFileSync(METADATA_FILE, "utf8"))[SERVER_NAME] || {};
+    for (const edits of Object.values(toolMetadata)) {
+        if (!Array.isArray(edits) || edits.some((edit) => !Array.isArray(edit.path) ||
+            edit.path.at(-1) !== "description" || typeof edit.text !== "string")) {
+            throw new Error(`Invalid MCP tool description override for ${SERVER_NAME}`);
+        }
+    }
+}
+
+function reviewedToolMetadata(tool) {
+    const edits = toolMetadata[tool.name];
+    if (!edits) return tool;
+    const updated = JSON.parse(JSON.stringify(tool));
+    for (const { path, text } of edits) {
+        let target = updated;
+        for (const field of path.slice(0, -1)) {
+            if (target == null || !Object.prototype.hasOwnProperty.call(target, field)) {
+                throw new Error(`MCP schema changed at ${SERVER_NAME}/${tool.name}/${path.join("/")}`);
+            }
+            target = target[field];
+        }
+        target[path.at(-1)] = text;
+    }
+    return updated;
+}
 
 const sep = process.argv.indexOf("--");
 if (sep < 0 || sep === process.argv.length - 1) {
-    process.stderr.write("mcp-notice-shim: usage: node mcp-notice-shim.cjs -- <upstream-cmd> [args...]\n");
+    process.stderr.write("mcp-notice-shim: usage: node mcp_notice_shim.cjs -- <upstream-cmd> [args...]\n");
     process.exit(2);
 }
 const argv = process.argv.slice(sep + 1);
@@ -102,6 +146,13 @@ process.stdin.on("data", (chunk) => {
         if (line.trim()) {
             try {
                 const m = JSON.parse(line);
+                if (allowedTools && m.method === "tools/call" && !allowedTools.has(m.params?.name)) {
+                    if (m.id != null) {
+                        process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: m.id,
+                            error: { code: -32602, message: `Tool not available: ${m.params?.name ?? ""}` } }) + "\n");
+                    }
+                    continue;
+                }
                 if (m && m.id != null && m.method) methodById.set(m.id, m.method);
             } catch {   }
         }
@@ -130,8 +181,18 @@ async function handleUpstreamLine(line) {
     let msg = null;
     try { msg = JSON.parse(line); } catch {   }
 
-    const isToolCall = msg && msg.id != null && methodById.get(msg.id) === "tools/call";
+    const method = msg && msg.id != null ? methodById.get(msg.id) : null;
+    const isToolCall = method === "tools/call";
     if (msg && msg.id != null) methodById.delete(msg.id);
+
+    if (method === "tools/list" && Array.isArray(msg.result?.tools) && (allowedTools || METADATA_FILE)) {
+        msg.result.tools = msg.result.tools.filter((tool) => !allowedTools || allowedTools.has(tool.name))
+            .map(reviewedToolMetadata)
+            .map(tool => CLAUDE_RESULT_CHARS > 0 ? { ...tool, _meta: {
+                ...(tool._meta || {}), "anthropic/maxResultSizeChars": CLAUDE_RESULT_CHARS,
+            }} : tool);
+        return void process.stdout.write(JSON.stringify(msg) + "\n");
+    }
 
     if (!isToolCall) return void process.stdout.write(line + "\n");
 

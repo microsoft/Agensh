@@ -38,8 +38,35 @@ export PBENCH_BIN="$BIN_PATH"
 log() { echo "[pbench] $*" >&2; }
 die() { echo "[pbench] FATAL: $*" >&2; exit 1; }
 
-source "$ROOT/scripts/lib_prompts.sh"
 source "$ROOT/scripts/lib_pbench_images.sh"
+
+PROMPTS_DIR="$ROOT/prompts"
+
+render_prompt() {
+    local file="$1" names="" kv
+    shift
+    [ -s "$file" ] || { echo "render_prompt: $file is missing" >&2; return 1; }
+    # Restrict envsubst so shell examples and unrelated placeholders stay literal.
+    for kv in "$@"; do names+="\${${kv%%=*}}"; done
+    env "$@" envsubst "$names" < "$file"
+}
+
+# Scan private native journals with sudo before traversing their directories.
+worker_last_activity() {
+    sudo -n find "$1" -type f -name '*.jsonl' -printf '%T@\n' 2>/dev/null \
+        | awk 'BEGIN { latest = 0 } $1 > latest { latest = $1 }
+               END { if (latest > 0) printf "%.0f\n", int(latest) }'
+}
+
+worker_idle_phase() {
+    local total_seconds="$1" remaining_seconds="$2" delivery_seconds=300
+    [ "$total_seconds" -gt 2700 ] && delivery_seconds=2700
+    if [ "$remaining_seconds" -le "$delivery_seconds" ]; then
+        printf '%s\n' delivery
+    else
+        printf '%s\n' development
+    fi
+}
 command -v envsubst >/dev/null 2>&1 || die "envsubst not found (apt install gettext-base); it renders the prompts under prompts/"
 
 ORCH="$(grep -E '^PBENCH_ORCHESTRATOR=' "$ENV_FILE" 2>/dev/null | cut -d= -f2- | tr -d ' \r' || true)"
@@ -167,6 +194,20 @@ quiesce_agents() {
     sudo -n python3 "$ROOT/agent/archive.py" check "$PROFILE_DATA_DIR"
 }
 
+save_service_logs() {
+    # Preserve router/proxy stdout before Compose removes the container records.
+    local directory="$OUT_DIR/$TASK/service-logs" container service
+    mkdir -p "$directory"
+    while read -r container service; do
+        [ -n "$container" ] && [ -n "$service" ] || continue
+        sudo docker logs --timestamps "$container" >"$directory/$service.log" 2>&1 \
+            || log "WARN: could not save $service logs for $PROFILE"
+    done < <(sudo docker ps -a --filter "label=com.docker.compose.project=omcgitea-$PROFILE" \
+        --format '{{.ID}} {{.Label "com.docker.compose.service"}}')
+    date -u +%FT%TZ >"$directory/captured-at.txt"
+    log "saved service stdout/stderr to $directory"
+}
+
 teardown() {
     # The exit trap also preserves recoverable state when the main path fails early.
     local rc=$? archives_ok=1
@@ -175,6 +216,7 @@ teardown() {
     dump_board_lifecycle || true
     quiesce_agents || archives_ok=0
     export_submission || true
+    save_service_logs || true
     if [ "$archives_ok" = 1 ]; then
         make down PROFILE="$PROFILE" >/dev/null 2>&1 || true
     else
@@ -327,7 +369,7 @@ mm_ensure_task_channel() {
 }
 
 task_brief() {
-    render_prompt "$PROMPTS_DIR/task-brief.txt" \
+    render_prompt "$PROMPTS_DIR/task_brief.txt" \
         TASK="$TASK" REPO="$REPO" MM_TEAM_ID="$MM_TEAM_ID" TASK_CHANNEL_ID="$TASK_CHANNEL_ID"
 }
 
@@ -338,14 +380,14 @@ deadline_reminder_loop() {
     local t5=$((  secs - 5  * 60 ))
     if [ "$t45" -gt 0 ]; then
         sleep "$t45"
-        mm_post "$TASK_CHANNEL_ID" "$(render_prompt "$PROMPTS_DIR/deadline-45m.txt")" \
+        mm_post "$TASK_CHANNEL_ID" "$(render_prompt "$PROMPTS_DIR/deadline_45m.txt")" \
             || log "WARN: T-45m reminder failed"
         log "posted T-45m reminder"
     fi
     local rest=$(( t5 - (t45 > 0 ? t45 : 0) ))
     if [ "$rest" -gt 0 ]; then
         sleep "$rest"
-        mm_post "$TASK_CHANNEL_ID" "$(render_prompt "$PROMPTS_DIR/deadline-5m.txt")" \
+        mm_post "$TASK_CHANNEL_ID" "$(render_prompt "$PROMPTS_DIR/deadline_5m.txt")" \
             || log "WARN: T-5m reminder failed"
         log "posted T-5m reminder"
     fi
@@ -510,7 +552,12 @@ watchdog_consider() {
         return 0
     fi
 
-    local idle_msg; idle_msg="$(render_prompt "$PROMPTS_DIR/idle.txt")"
+    local idle_msg
+    if [ "${WORKER_IDLE_PHASE:-development}" = delivery ]; then
+        idle_msg="$(render_prompt "$PROMPTS_DIR/idle_delivery.txt")"
+    else
+        idle_msg="$(render_prompt "$PROMPTS_DIR/idle.txt")"
+    fi
     local pinged=0 dm=""
     dm="$(mm_dm_channel "$worker_name" 2>/dev/null)" || dm=""
     if [ -n "$dm" ]; then
@@ -530,11 +577,18 @@ worker_watchdog_loop() {
     local total_secs="$1"
     local agents_root="${DATA_ROOT}/${PROFILE}/agents"
     local dedup_dir="${OUT_DIR}/${TASK}/_watchdog"
+    local session_subdir
+    case "$(awk -F= '$1=="AGENT_HARNESS"{print $2;exit}' "$ENV_FILE")" in
+        copilot) session_subdir=home/.copilot/session-state ;;
+        codex) session_subdir=home/.codex/sessions ;;
+        claude) session_subdir=home/.claude/projects ;;
+        *) session_subdir=home/.pi/agent/sessions ;;
+    esac
     mkdir -p "$dedup_dir"
     local start now elapsed
     start=$(date +%s)
     if ! sudo -n true 2>/dev/null; then
-        log "WARN: watchdog cannot sudo -n; agent turn logs are 0700 ACP_CHILD_UID, so every worker will read as busy and NO idle nudge will ever fire"
+        log "WARN: watchdog cannot sudo -n; private native journals cannot be scanned, so idle nudges will be skipped"
     fi
     local MYSQL_CONTAINER MYSQL_ROOT_PW
     MYSQL_CONTAINER=$(sudo docker ps --filter "name=omcgitea-$PROFILE-mysql" \
@@ -547,18 +601,16 @@ worker_watchdog_loop() {
         now=$(date +%s)
         elapsed=$((now - start))
         [ "$elapsed" -ge "$total_secs" ] && break
+        local WORKER_IDLE_PHASE
+        WORKER_IDLE_PHASE="$(worker_idle_phase "$total_secs" "$((total_secs - elapsed))")"
         if [ ! -d "$agents_root" ]; then sleep "$WORKER_CHECK_INTERVAL"; continue; fi
         local agent_dir worker_name last_mtime idle
         for agent_dir in "$agents_root"/${ORG_NAME}-*worker*; do
             [ -d "$agent_dir" ] || continue
             worker_name="$(basename "$agent_dir")"
-            local copilot_dir="$agent_dir/home/.copilot/session-state"
+            local session_dir="$agent_dir/$session_subdir"
             # Native session-log modification times are the liveness signal.
-            local scan=()
-            [ -d "$copilot_dir" ] && scan+=("$copilot_dir")
-            [ ${#scan[@]} -gt 0 ] || continue
-            last_mtime=$(sudo -n find "${scan[@]}" -type f -name '*.jsonl' \
-                -printf '%T@\n' 2>/dev/null | sort -rn | head -1 | cut -d. -f1 || true)
+            last_mtime=$(worker_last_activity "$session_dir" || true)
             [ -n "$last_mtime" ] || continue
             idle=$((now - last_mtime))
             watchdog_consider "$worker_name" "$idle" "$now" "$dedup_dir"
@@ -594,7 +646,7 @@ main() {
     log "bringing up $PROFILE stack"
     make -s render-pbench-base PROFILE="$PROFILE" >/dev/null 2>&1 \
         || die "render-pbench-base failed for $PROFILE"
-    local _want_w _got_w _base="$ROOT/docker/_gen-prod.$PROFILE.yml"
+    local _want_w _got_w _base="$ROOT/docker/_gen_prod.$PROFILE.yml"
     _want_w="$(grep -E '^PBENCH_WORKERS_PER_TEAM=' "$ROOT/.env.$PROFILE" 2>/dev/null | cut -d= -f2 | tr -d ' ')"
     if [ -n "$_want_w" ]; then
         [ -f "$_base" ] || die "compose base not rendered: $_base"
@@ -648,7 +700,11 @@ main() {
 
     trap - EXIT
     export_submission || true
-    quiesce_agents || die "incomplete shutdown archives; preserving containers and DATA_ROOT for recovery"
+    quiesce_agents || {
+        save_service_logs || true
+        die "incomplete shutdown archives; preserving containers and DATA_ROOT for recovery"
+    }
+    save_service_logs
     make down PROFILE="$PROFILE" >/dev/null 2>&1 || true
 
     if [ "${SKIP_EVAL:-0}" = "1" ]; then
@@ -657,7 +713,7 @@ main() {
     fi
     log "running programbench eval on $OUT_DIR"
     # The Docker shim applies evaluator limits without changing ProgramBench itself.
-    export PROGRAMBENCH_DOCKER_EXECUTABLE="${PROGRAMBENCH_DOCKER_EXECUTABLE:-$ROOT/scripts/pbench-docker-sudo.sh}"
+    export PROGRAMBENCH_DOCKER_EXECUTABLE="${PROGRAMBENCH_DOCKER_EXECUTABLE:-$ROOT/scripts/pbench_docker_sudo.sh}"
     local pbench_tmp="$OUT_DIR/$TASK/_evaltmp"
     rm -rf "$pbench_tmp"; mkdir -p "$pbench_tmp"
     export TMPDIR="$pbench_tmp"

@@ -1,0 +1,37 @@
+{
+  "gitea": [
+    "actions_run_read",
+    "get_me",
+    "issue_read",
+    "issue_write",
+    "list_issues",
+    "list_my_repos",
+    "list_pull_requests",
+    "pull_request_read",
+    "pull_request_review_write",
+    "pull_request_write",
+    "search_issues",
+    "search_repos",
+    "search_users"
+  ],
+  "mattermost": [
+    "create_direct_channel",
+    "get_channel",
+    "get_channel_by_name",
+    "get_channel_messages",
+    "get_me",
+    "get_thread",
+    "get_user",
+    "get_user_by_username",
+    "list_my_channels",
+    "list_teams",
+    "post_message",
+    "search_messages"
+  ],
+  "board": [
+    "board_grep",
+    "board_read",
+    "board_unfold",
+    "board_write"
+  ]
+}

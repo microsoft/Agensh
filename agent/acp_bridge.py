@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Bridge one Unix-socket ACP connection at a time to a non-root Copilot process.
+# Bridge one Unix-socket ACP connection at a time to a non-root harness process.
 # Disconnects cancel active prompts; shutdown saves the worker's HOME and /work.
 
 import json
@@ -15,7 +15,7 @@ import time
 from archive import begin, save
 
 if len(sys.argv) < 6 or sys.argv[4] != '--':
-    sys.exit('usage: acp-bridge.py <socket> <uid> <gid> -- <child-command...>')
+    sys.exit('usage: acp_bridge.py <socket> <uid> <gid> -- <child-command...>')
 sock_path = sys.argv[1]
 sock_uid, sock_gid = int(sys.argv[2]), int(sys.argv[3])
 child_cmd = sys.argv[5:]
@@ -141,7 +141,7 @@ def serve(client, peer):
             with condition:
                 sessions = set(pending.values())
             if sessions:
-                # Let Copilot settle native cancellation before terminating its tools.
+                # Let the harness settle native cancellation before terminating its tools.
                 try:
                     with writer:
                         for session in sessions:

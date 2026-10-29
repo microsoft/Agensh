@@ -15,6 +15,6 @@ matching `SECRET_SERVICE_INTERNAL_AUTH` and reads `agent-<agent>.token` from
 stay inside that directory. Error responses close the HTTP connection.
 
 The service listens on `SECRET_SERVICE_PORT` (default 8650), requires the auth
-secret at startup, and receives the [bootstrap](../docker/bootstrap/README.md)
+secret at startup, and receives the [bootstrap](../docker/README.md#bootstrap)
 token directory as a read-only mount. Routers request their Gitea token and,
 when chat is enabled, the corresponding `<agent>-mm` token.

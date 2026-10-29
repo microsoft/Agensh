@@ -3,6 +3,8 @@
 # JOBS bounds concurrent builds; individual logs and a summary are written under out/.
 set -u
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"; cd "$ROOT" || exit 1
+harness_env=$(python3 "$ROOT/agent/harness_config.py" shell "$@") || exit $?
+eval "$harness_env"
 JOBS="${JOBS:-6}"
 TAG="${TAG:-pbench}"
 LOGDIR="$ROOT/out/pertask-build"; mkdir -p "$LOGDIR"
@@ -33,17 +35,22 @@ short() { t="${1#*__}"; echo "${t%%.*}" | tr -cd 'a-z0-9-'; }
 build_one() {
     local t="$1"
     local base="programbench/${t/__/_1776_}:task_cleanroom_v6"
-    local name="omcgitea-agent-$(short "$t"):$TAG"
+    local name="omcgitea-agent-$(short "$t")-$AGENT_HARNESS:$TAG"
     local lg="$LOGDIR/$(short "$t").log"
     if sudo docker build -f agent/Dockerfile \
-         --build-arg TASK_IMAGE="$base" -t "$name" . >"$lg" 2>&1; then
+         --build-arg TASK_IMAGE="$base" --build-arg AGENT_HARNESS="$AGENT_HARNESS" \
+         --build-arg "${AGENT_HARNESS^^}_CLI_VERSION=$HARNESS_VERSION" -t "$name" . >"$lg" 2>&1; then
         local ok
+        if ! sudo docker run --rm --network none --entrypoint python3 "$name" \
+            /opt/omcgitea/check_harness.py "$AGENT_HARNESS" "$HARNESS_VERSION" >>"$lg" 2>&1; then
+            echo "FAIL $name (harness check; see $lg)" >> "$SUMMARY"
+            return
+        fi
         ok=$(sudo docker run --rm --network none --entrypoint sh "$name" -c '
             b=$(ls /usr/local/cargo/registry/cache/*/ 2>/dev/null | grep -cE "^clap-4\.6\.1")
             n=$(command -v node >/dev/null && echo onpath || echo private)
             m=$(python3 -c "import json;print(\"board\" in json.load(open(\"/opt/omcgitea/config/mcp.json.tmpl\"))[\"mcpServers\"])" 2>/dev/null)
-            a=$([ -x /usr/local/bin/copilot-wrapped ] && echo yes || echo NO)
-            echo "clap461=$b node=$n board=$m copilot=$a"' 2>/dev/null)
+            echo "clap461=$b node=$n board=$m harness=$AGENT_HARNESS"' 2>/dev/null)
         echo "OK   $name  $ok" >> "$SUMMARY"
     else
         echo "FAIL $name  (see $lg)" >> "$SUMMARY"
@@ -59,4 +66,6 @@ done
 wait
 log "=== done ==="
 sort "$SUMMARY"
-echo "  ok=$(grep -c '^OK' "$SUMMARY")  failed=$(grep -c '^FAIL' "$SUMMARY")"
+failed=$(grep -c '^FAIL' "$SUMMARY" || true)
+echo "  ok=$(grep -c '^OK' "$SUMMARY" || true)  failed=$failed"
+[ "$failed" -eq 0 ]

@@ -1,10 +1,24 @@
-# Keep credentials, private experiment state and generated artifacts out of builds.
-.git
-.env*
-.claude*
-**/node_modules
-**/__pycache__
-mini-router/dist
-out
-docker/_gen-prod.*.yml
-*.log
+# The root build context is used only by agent/Dockerfile.
+# Include its source inputs; local credentials, results and media stay outside.
+**
+!agent/
+!agent/Dockerfile
+!agent/Dockerfile.base
+!agent/*.py
+!agent/*.sh
+!agent/copilot/
+!agent/copilot/*.sh
+!agent/pi/
+!agent/pi/*.py
+!agent/codex/
+!agent/codex/*.py
+!agent/claude/
+!agent/claude/*.py
+!agent/config/
+!agent/config/*.json
+!agent/config/*.tmpl
+!board-service/
+!board-service/mcp.cjs
+!prompts/
+!prompts/agents.txt
+!prompts/pbench_brief.txt

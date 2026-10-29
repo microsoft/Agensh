@@ -33,7 +33,7 @@ to **50.94% with 128 agents** and **55.06% with 1,024 agents** under the same
 six-hour budget. We find that self-organized peer coordination, integration
 workflows and specialized roles gradually emerge as the team grows.
 
-With the latest GPT-6.1-sol at high reasoning effort, the six-hour Pandoc test-pass
+With GPT-6.1-sol at high reasoning effort, the six-hour Pandoc test-pass
 rate rises from **56.19% with 1 agent** to **79.59% with 32 agents**, a relative
 improvement of **41.64%**.
 
@@ -41,7 +41,7 @@ improvement of **41.64%**.
 
 ## Watch 1,024 agents work together
 
-[![Animated replay of 1,024 agents cooperating through Gitea, Mattermost and shared context](demo/agensh-demo-1024.gif)](https://agens-harness.github.io/project/replay.html)
+[![Animated replay of 1,024 agents cooperating through Gitea, Mattermost and shared context](demo/agensh_demo_1024.gif)](https://agens-harness.github.io/project/replay.html)
 
 ## How it works
 
@@ -55,17 +55,28 @@ infrastructure.
 [Gitea](https://about.gitea.com/) provides the shared workspace,
 [Mattermost](https://mattermost.com/) provides the messaging interface, and the
 shared context mechanism is adapted from [DeLM](https://github.com/yuzhenmao/DeLM).
-In our experiments, we integrate Agensh on top of the per-agent agentic loop
+In our 1.0 experiments, we integrate Agensh on top of the per-agent agentic loop
 of [Copilot harness](https://github.com/github/copilot-cli).
+We also support [Pi](https://github.com/earendil-works/pi),
+[Codex](https://github.com/openai/codex), and
+[Claude Code](https://github.com/anthropics/claude-code) as underlying single-agent harnesses.
 
 ## Reproducing the experiments
 
 This release includes a single-node team setup using Docker Compose and a
-standalone single-agent baseline, both using native Copilot ACP sessions.
+standalone single-agent baseline. Copilot is the default. Select Pi, Codex, or
+Claude Code with `--agent-harness pi`, `--agent-harness codex`, or `--agent-harness claude`
+when preparing and launching runs.
+Pass `--harness-version VERSION` to choose a harness release.
+Each worker image includes only the selected harness. All expose ACP to the
+existing infrastructure; Pi, Codex, and Claude Code use adapters to their native runtimes.
+Copilot is the harness used for the 1.0 experiments.
 
 - [Reproduction guide](REPRODUCE.md): prerequisites, configuration, image builds,
   launch commands, evaluation, recovery and release differences.
 - [Repository layout](REPRODUCE.md#repository-layout): component and folder guides.
+- [Harness configuration](agent/config/harness.json): model, reasoning effort,
+  prompt/output budgets and compaction settings.
 - [Team launcher](scripts/launch_single_node.sh) and
   [single-agent launcher](scripts/launch_single_agent.py): experiment entrypoints.
 

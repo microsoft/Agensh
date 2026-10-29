@@ -1,0 +1,10 @@
+{
+  "harness": "copilot",
+  "version": "1.0.70",
+  "model": "gpt-5.6-sol",
+  "reasoning_effort": "high",
+  "prompt_tokens": 272000,
+  "output_tokens": null,
+  "tool_output_bytes": 1048576,
+  "compact_fraction": 0.8
+}

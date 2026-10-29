@@ -3,6 +3,8 @@
 # Reuse valid local passwords when regenerating an existing profile.
 set -u
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+harness_env=$(python3 "$ROOT/agent/harness_config.py" shell "$@") || exit $?
+eval "$harness_env"
 ENV_DIR="${ENV_DIR:-$ROOT}"
 umask 077
 
@@ -39,11 +41,9 @@ creds="$HOME/.pbench-upstream.env"
 cred() { [ -r "$creds" ] && awk -F= -v k="$1" '$1==k{print substr($0, length(k) + 2); exit}' "$creds"; }
 LLM_UPSTREAM="${LLM_UPSTREAM:-$(cred LLM_UPSTREAM)}"
 LLM_UPSTREAM_TOKEN="${LLM_UPSTREAM_TOKEN:-$(cred LLM_UPSTREAM_TOKEN)}"
-REASONING_EFFORT="${REASONING_EFFORT:-$(cred REASONING_EFFORT)}"
-REASONING_EFFORT="${REASONING_EFFORT:-high}"
 [ -n "$LLM_UPSTREAM" ] && [ -n "$LLM_UPSTREAM_TOKEN" ] \
     || { echo "FATAL: LLM_UPSTREAM and LLM_UPSTREAM_TOKEN must be set in $creds or the environment" >&2; exit 1; }
-export LLM_UPSTREAM LLM_UPSTREAM_TOKEN REASONING_EFFORT
+export LLM_UPSTREAM LLM_UPSTREAM_TOKEN REASONING_EFFORT LLM_MODEL
 
 mkdir -p "$ENV_DIR"
 for task in $TASKS; do
@@ -104,23 +104,32 @@ keys = [
     ("MATTERMOST_ADMIN_PASSWORD", password("MATTERMOST_ADMIN_PASSWORD", 23)),
     ("ANTHROPIC_BASE_URL", "http://egress-proxy:4180"),
     ("PBENCH_LLM_UPSTREAM", os.environ["LLM_UPSTREAM"]),
-    ("AGENT_KIND", "copilot"),
-    ("COPILOT_PROVIDER_TYPE", "openai"),
-    ("ANTHROPIC_MODEL", "gpt-5.6-sol"),
+    ("AGENT_HARNESS", os.environ["AGENT_HARNESS"]),
+    ("HARNESS_VERSION", os.environ["HARNESS_VERSION"]),
+    ("HARNESS_CONFIG", os.environ["HARNESS_CONFIG"]),
+    ("LLM_MODEL", os.environ["LLM_MODEL"]),
+    ("REASONING_EFFORT", os.environ["REASONING_EFFORT"]),
+    ("PROMPT_TOKENS", os.environ["PROMPT_TOKENS"]),
+    ("OUTPUT_TOKENS", os.environ["OUTPUT_TOKENS"]),
+    ("TOOL_OUTPUT_BYTES", os.environ["TOOL_OUTPUT_BYTES"]),
+    ("COMPACT_FRACTION", os.environ["COMPACT_FRACTION"]),
+    ("ANTHROPIC_MODEL", os.environ["LLM_MODEL"]),
     ("ANTHROPIC_API_KEY", "local-proxy-no-auth"),
     ("UPSTREAM_AUTH_TOKEN", os.environ["LLM_UPSTREAM_TOKEN"]),
     ("PBENCH_WORKERS_PER_TEAM", workers),
     ("REPOS", "main"),
     ("MINI_ROUTER_STUCK_MS", 1200000),
-    ("AGENT_IMAGE", f"omcgitea-agent-{short}:{os.environ.get('AGENT_IMAGE_TAG') or 'pbench'}"),
+    ("AGENT_IMAGE", f"omcgitea-agent-{short}-{os.environ['AGENT_HARNESS']}:{os.environ.get('AGENT_IMAGE_TAG') or 'pbench'}"),
     ("PBENCH_SUBNET_DEFAULT", f"10.{octet}.{sub}.0/{prefix}"),
     ("PBENCH_SUBNET_EGRESS", f"10.{octet}.{sub + units}.0/24"),
     ("PBENCH_SUBNET_EDGE", f"10.{octet}.{sub + units + 1}.0/24"),
-    ("COPILOT_PROVIDER_WIRE_API", "responses"),
-    ("COPILOT_AGENT_REASONING_EFFORT", os.environ["REASONING_EFFORT"]),
-    ("COPILOT_PROVIDER_MAX_PROMPT_TOKENS", 272000),
     ("UPSTREAM_AUTH_STYLE", "bearer"),
 ]
+prefix = os.environ["AGENT_HARNESS"].upper()
+keys.extend([(f"{prefix}_CLI_VERSION", os.environ["HARNESS_VERSION"]),
+             (f"{prefix}_PROVIDER_WIRE_API", "messages" if prefix == "CLAUDE" else "responses")])
+if prefix == "COPILOT":
+    keys.append(("COPILOT_PROVIDER_TYPE", "openai"))
 for key in ("MINI_ROUTER_IMAGE", "BOARD_IMAGE", "BOOTSTRAP_IMAGE", "SECRET_SERVICE_IMAGE"):
     if os.environ.get(key):
         keys.append((key, os.environ[key]))

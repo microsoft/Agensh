@@ -1,4 +1,4 @@
-# Standalone baseline: one Copilot worker and one model proxy, without team services.
+# Standalone baseline: one selected harness and a model proxy, without team services.
 # launch_single_agent.py supplies unique mounts, subnets, images and model credentials.
 services:
   egress-proxy:
@@ -13,8 +13,18 @@ services:
       LISTEN_HOST: 0.0.0.0
       LISTEN_PORT: "4180"
       PYTHONUNBUFFERED: "1"
+      UPSTREAM_DISABLED_TOOLS: functions.request_user_input,functions.request_user_input_async,request_user_input,request_user_input_async
+      UPSTREAM_CODE_MODE_OUTPUT_TOKENS: "${TOOL_OUTPUT_BYTES:-1048576}"
+      UPSTREAM_MAX_OUTPUT_TOKENS: "${OUTPUT_TOKENS:-0}"
+      UPSTREAM_TOOL_OUTPUT_BYTES: "${TOOL_OUTPUT_BYTES:-1048576}"
+      UPSTREAM_AGENT_HARNESS: "${AGENT_HARNESS:-copilot}"
+      UPSTREAM_ANTHROPIC_MODEL: "${LLM_MODEL:-gpt-5.6-sol}"
+      UPSTREAM_ANTHROPIC_EFFORT: "${REASONING_EFFORT:-high}"
+      UPSTREAM_RESPONSE_VERBOSITY: low
+      UPSTREAM_REQUEST_TIMEOUT_SECONDS: "600"
     volumes:
       - ../scripts/strip_metadata_proxy.py:/opt/strip_metadata_proxy.py:ro
+      - ../scripts/code_mode_limits.py:/opt/code_mode_limits.py:ro
     command: [python3, /opt/strip_metadata_proxy.py]
     healthcheck:
       test: [CMD, python3, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:4180/healthz',timeout=2).read()"]
@@ -37,23 +47,20 @@ services:
       egress-proxy:
         condition: service_healthy
     environment:
+      AGENT_HARNESS: "${AGENT_HARNESS:-copilot}"
       AGENT_HOME: /opt/data
       ACP_CHILD_UID: "10000"
       ACP_CHILD_GID: "10000"
       HOME: /home/ccagent
-      COPILOT_HOME: /home/ccagent/.copilot
-      COPILOT_PROVIDER_TYPE: openai
-      COPILOT_PROVIDER_BASE_URL: http://egress-proxy:4180/v1
-      COPILOT_PROVIDER_API_KEY: local-proxy-no-auth
-      OPENAI_API_KEY: local-proxy-no-auth
-      COPILOT_MODEL: gpt-5.6-sol
-      COPILOT_PROVIDER_WIRE_API: responses
-      COPILOT_PROVIDER_MAX_PROMPT_TOKENS: "272000"
-      COPILOT_AGENT_REASONING_EFFORT: high
-      COPILOT_LARGE_OUTPUT_THRESHOLD_BYTES: "1048576"
-      COPILOT_OFFLINE: "true"
-      COPILOT_AUTO_UPDATE: "false"
-      COPILOT_ENABLE_ALT_PROVIDERS: "true"
+      ANTHROPIC_BASE_URL: http://egress-proxy:4180/v1
+      ANTHROPIC_API_KEY: local-proxy-no-auth
+      ANTHROPIC_MODEL: "${LLM_MODEL:-gpt-5.6-sol}"
+      HARNESS_VERSION: "${HARNESS_VERSION:-}"
+      REASONING_EFFORT: "${REASONING_EFFORT:-high}"
+      PROMPT_TOKENS: "${PROMPT_TOKENS:-272000}"
+      OUTPUT_TOKENS: "${OUTPUT_TOKENS:-0}"
+      TOOL_OUTPUT_BYTES: "${TOOL_OUTPUT_BYTES:-1048576}"
+      COMPACT_FRACTION: "${COMPACT_FRACTION-0.8}"
     volumes:
       - "${WORKSPACE_DIR:?}:/workspace"
       # The archive bridge saves /work; both names refer to the same workspace.
@@ -62,25 +69,8 @@ services:
       - "${STATE_DIR:?}:/opt/data"
       - "${HOME_DIR:?}:/home/ccagent"
       - ../scripts/single_agent_stdio.py:/opt/single_agent_stdio.py:ro
-    entrypoint:
-      - python3
-      - /opt/omcgitea/acp-bridge.py
-      - /opt/data/acp.sock
-      - "10000"
-      - "10000"
-      - --
-      - /usr/local/bin/copilot-wrapped
-      - --excluded-tools=task
-      - --excluded-tools=list_agents
-      - --acp
-      - --stdio
-      - --no-auto-login
-      - --no-auto-update
-      - --no-remote
-      - --disable-builtin-mcps
-      - --no-ask-user
-      - --effort
-      - high
+      - ../agent/entrypoint.sh:/opt/omcgitea/entrypoint.sh:ro
+    entrypoint: [bash, /opt/omcgitea/entrypoint.sh, standalone]
     healthcheck:
       test: [CMD, python3, -c, "from pathlib import Path; assert Path('/opt/data/acp.sock').is_socket()"]
       interval: 2s

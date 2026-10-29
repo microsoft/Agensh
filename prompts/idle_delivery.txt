@@ -1,0 +1,4 @@
+The task is in its delivery phase. Verify that root `compile.sh` builds
+`./executable` on the default branch and that completed work is committed,
+pushed and merged. Resolve remaining integration problems and report blockers.
+Keep the existing scope; do not dispatch new features.

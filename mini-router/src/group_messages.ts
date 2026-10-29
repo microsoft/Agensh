@@ -1,5 +1,5 @@
 /**
- * Keep the latest 32 group messages inline and save larger backlogs as JSONL.
+ * Keep the latest 32 group messages in a batch inline; save larger batches as JSONL.
  * The saved file contains every group message in that batch, with full post text.
  */
 import { createHash, randomUUID } from "node:crypto";
@@ -54,7 +54,7 @@ export async function groupMessagePayloads(batch: EventRow[], directory: string,
       await file.close();
     }
     await rename(temporary, path);
-    // Seal the file and its directory entry before advertising the path to Copilot.
+    // Seal the file and its directory entry before advertising the path to the worker.
     const parent = await open(directory, "r");
     try { await parent.sync(); } finally { await parent.close(); }
   } catch (error) {

@@ -4,4 +4,4 @@ node_modules
 dist
 sql
 *.log
-mcp-notice-shim.cjs
+mcp_notice_shim.cjs

@@ -1,5 +1,5 @@
 # Cache the upstream Gitea MCP binary for reuse across per-task worker images.
-# The task cleanroom, Node and Copilot are assembled in agent/Dockerfile.
+# The task cleanroom, Node and selected harness are assembled in agent/Dockerfile.
 ARG GITEA_MCP_SERVER_IMAGE=docker.gitea.com/gitea-mcp-server:latest
 FROM ${GITEA_MCP_SERVER_IMAGE} AS mcp_src
 FROM scratch

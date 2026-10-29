@@ -32,7 +32,7 @@ is 500 matches; the response also reports the total match count and truncation.
 `GET /board/{board_id}/unfold` retrieves details behind short gists.
 
 `GET /pending/{agent}` leases new direct-message posts and unread peer gists
-to the [MCP shim](../mini-router/mcp-notice-shim.cjs). Gist notices use raw
+to the [MCP shim](../mini-router/mcp_notice_shim.cjs). Gist notices use raw
 retained entries rather than the live-read expiry/deduplication filter.
 `POST /shown/{agent}` records emitted event notices and advances board cursors.
 Message edits/deletions and reactions stay on the normal queued-turn path.
@@ -41,4 +41,4 @@ Message edits/deletions and reactions stay on the normal queued-turn path.
 `BOARD_OPERATOR` defaults to `harness` for operator access. Membership uses
 the supplied agent identity within the private network. Startup replays
 persisted rows and applies compatibility migrations; initial tables live in
-[`mini-router/sql/`](../mini-router/sql/README.md).
+the [router's database schema](../mini-router/README.md#database-schema).

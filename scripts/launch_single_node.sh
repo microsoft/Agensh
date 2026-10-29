@@ -5,6 +5,10 @@
 set -u
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT" || { echo "FATAL: cannot cd $ROOT" >&2; exit 1; }
+harness_env=$(python3 "$ROOT/agent/harness_config.py" shell "$@") || exit $?
+eval "$harness_env"
+REQUESTED_AGENT_HARNESS="$AGENT_HARNESS"
+REQUESTED_HARNESS_VERSION="$HARNESS_VERSION"
 
 MODE=single-node
 TASKS="${TASKS:-jgm__pandoc.5caad90 gromacs__gromacs.665ea4c universal-ctags__ctags.243595e php__php-src.c891263 ffmpeg__ffmpeg.360a402}"
@@ -20,6 +24,11 @@ n_tasks=$(wc -w <<<"$TASKS")
 log "preflight over $n_tasks tasks, run $SUFFIX"
 
 for task in $TASKS; do
+    profile_file="$ROOT/.env.$(task_profile "$task")"
+    [ -f "$profile_file" ] || { log "FATAL: $profile_file missing — generate profiles first"; exit 1; }
+    python3 "$ROOT/agent/harness_config.py" --check-profile "$profile_file" || exit 1
+done
+for task in $TASKS; do
     scrub_shadowed_env "$ROOT/.env.$(task_profile "$task")"
 done
 
@@ -34,22 +43,43 @@ for task in $TASKS; do
     [ "${o:-compose}" = "compose" ] || { log "FATAL: .env.$p supports single-node Compose only"; fail=1; }
     [ "${PBENCH_ORCHESTRATOR:-compose}" = "compose" ] || { log "FATAL: PBENCH_ORCHESTRATOR supports single-node Compose only"; fail=1; }
 
+    k="$(pv "$p" AGENT_HARNESS)"
+    case "$k" in
+        pi) prefix=PI ;;
+        copilot) prefix=COPILOT ;;
+        codex) prefix=CODEX ;;
+        claude) prefix=CLAUDE ;;
+        *) log "FATAL: .env.$p AGENT_HARNESS=$k must be pi, copilot, codex or claude"; fail=1; continue ;;
+    esac
+    if [ "$k" != "$REQUESTED_AGENT_HARNESS" ]; then
+        log "FATAL: .env.$p selects $k, but launch requested $REQUESTED_AGENT_HARNESS; regenerate profiles with --agent-harness $REQUESTED_AGENT_HARNESS"
+        fail=1
+        continue
+    fi
+    v="$(pv "$p" HARNESS_VERSION)"
+    if [ "$v" != "$REQUESTED_HARNESS_VERSION" ]; then
+        log "FATAL: .env.$p selects $k $v, but launch requested $REQUESTED_HARNESS_VERSION; regenerate profiles with --harness-version $REQUESTED_HARNESS_VERSION"
+        fail=1
+        continue
+    fi
     img="$(pv "$p" AGENT_IMAGE)"
     [ -n "$img" ] || { log "FATAL: .env.$p AGENT_IMAGE missing"; fail=1; continue; }
     sudo docker image inspect "$img" >/dev/null 2>&1 || { log "FATAL: image missing: $img"; fail=1; }
-    sudo docker run --rm --network none --entrypoint sh "$img" -c 'test -x /usr/local/bin/copilot-wrapped' \
-        2>/dev/null || { log "FATAL: $img has no copilot-wrapped"; fail=1; }
-
-    k="$(pv "$p" AGENT_KIND)"
-    [ "$k" = "copilot" ] || { log "FATAL: .env.$p AGENT_KIND=$k expected copilot"; fail=1; }
+    runtime_env=()
+    for key in AGENT_HARNESS HARNESS_VERSION LLM_MODEL REASONING_EFFORT PROMPT_TOKENS OUTPUT_TOKENS TOOL_OUTPUT_BYTES COMPACT_FRACTION; do
+        runtime_env+=(-e "$key=$(pv "$p" "$key")")
+    done
+    if ! runtime=$(sudo docker run --rm --network none "${runtime_env[@]}" --entrypoint python3 "$img" \
+            /opt/omcgitea/check_harness.py "$k" "$v") \
+        || ! python3 -c 'import json,sys;sys.path.insert(0,"agent");from harness_config import PROFILE;assert json.loads(sys.argv[1]).get("limits_profile")==PROFILE' "$runtime"; then
+        log "FATAL: $img needs a rebuild for the selected $k harness/resource policy"; fail=1
+    fi
     m="$(pv "$p" ANTHROPIC_MODEL)"
-    [ "$m" = "gpt-5.6-sol" ] || { log "FATAL: .env.$p ANTHROPIC_MODEL=$m expected gpt-5.6-sol"; fail=1; }
-    w="$(pv "$p" COPILOT_PROVIDER_WIRE_API)"
-    [ "$w" = "responses" ] || { log "FATAL: .env.$p COPILOT_PROVIDER_WIRE_API='$w' expected responses"; fail=1; }
-    r="$(pv "$p" COPILOT_AGENT_REASONING_EFFORT)"
-    [ "$r" = "high" ] || { log "FATAL: .env.$p COPILOT_AGENT_REASONING_EFFORT='$r' expected high"; fail=1; }
-    m="$(pv "$p" COPILOT_PROVIDER_MAX_PROMPT_TOKENS)"
-    [ "$m" = "272000" ] || { log "FATAL: .env.$p COPILOT_PROVIDER_MAX_PROMPT_TOKENS='$m' expected 272000"; fail=1; }
+    [ "$m" = "$LLM_MODEL" ] || { log "FATAL: .env.$p ANTHROPIC_MODEL=$m expected $LLM_MODEL"; fail=1; }
+    w="$(pv "$p" "${prefix}_PROVIDER_WIRE_API")"
+    expected_wire=responses
+    [ "$k" = claude ] && expected_wire=messages
+    [ "$w" = "$expected_wire" ] || { log "FATAL: .env.$p ${prefix}_PROVIDER_WIRE_API='$w' expected $expected_wire"; fail=1; }
 
     gw="$(pv "$p" PBENCH_WORKERS_PER_TEAM)"
     [ "$gw" = "$WORKERS" ] || { log "FATAL: .env.$p PBENCH_WORKERS_PER_TEAM=$gw expected $WORKERS"; fail=1; }
@@ -127,12 +157,11 @@ else
     if [ "${PBENCH_SKIP_HOST_GUARDS:-0}" = "1" ]; then
         log "WARN: pbench-reboot-guard.service not enabled — skipped by PBENCH_SKIP_HOST_GUARDS=1 (a maintenance reboot will kill stacks mid-run)"
     else
-        log "FATAL: pbench-reboot-guard.service not enabled (see docker/pbench-reboot-guard.service)"; fail=1
+        log "FATAL: pbench-reboot-guard.service not enabled (see docker/pbench_reboot_guard.service)"; fail=1
     fi
 fi
 
-TOOLSPROBE='[{"type":"function","name":"read_file","description":"r","parameters":{"type":"object","properties":{"p":{"type":"string"}}}}]'
-# Exercise the actual Responses route with tools and the configured reasoning level.
+# Probe the selected API family with tool declarations and configured reasoning.
 probed=""
 for task in $TASKS; do
     p="$(task_profile "$task")"
@@ -140,14 +169,37 @@ for task in $TASKS; do
     U="$(pv "$p" PBENCH_LLM_UPSTREAM)"
     K="$(pv "$p" UPSTREAM_AUTH_TOKEN)"
     M="$(pv "$p" ANTHROPIC_MODEL)"
-    R="$(pv "$p" COPILOT_AGENT_REASONING_EFFORT)"
-    case "$probed" in *"|$U|"*) continue;; esac
-    probed="$probed|$U|"
+    case "$(pv "$p" AGENT_HARNESS)" in pi) prefix=PI ;; codex) prefix=CODEX ;; claude) prefix=CLAUDE ;; *) prefix=COPILOT ;; esac
+    R="$(pv "$p" REASONING_EFFORT)"
+    wire_api="$(pv "$p" "${prefix}_PROVIDER_WIRE_API")"
+    probe_output=2000
+    output_limit="$(pv "$p" OUTPUT_TOKENS)"
+    if [ -n "$output_limit" ] && [ "$output_limit" -gt 0 ] && [ "$output_limit" -lt "$probe_output" ]; then
+        probe_output="$output_limit"
+    fi
+    case "$probed" in *"|$U/$wire_api|"*) continue;; esac
+    probed="$probed|$U/$wire_api|"
+    probe_path=responses
+    [ "$wire_api" = messages ] && probe_path=messages
+    probe_body=$(python3 - "$M" "$R" "$probe_output" "$wire_api" <<'PY'
+import json,sys
+model,effort,limit,wire=sys.argv[1:]
+schema={'type':'object','properties':{'p':{'type':'string'}}}
+if wire=='messages':
+    data={'model':model,'messages':[{'role':'user','content':'ok'}],
+          'output_config':{'effort':effort},'max_tokens':int(limit),
+          'tools':[{'name':'read_file','description':'r','input_schema':schema}]}
+else:
+    data={'model':model,'input':'ok','reasoning':{'effort':effort},'max_output_tokens':int(limit),
+          'tools':[{'type':'function','name':'read_file','description':'r','parameters':schema}]}
+print(json.dumps(data))
+PY
+)
     code=$(upstream_auth_header "$(pv "$p" UPSTREAM_AUTH_STYLE)" "$K" \
         | curl -sS -o /dev/null -w '%{http_code}' --max-time 90 \
         -H @- -H 'content-type: application/json' \
-        -X POST "$U/v1/responses" \
-        -d "{\"model\":\"$M\",\"input\":\"ok\",\"reasoning\":{\"effort\":\"$R\"},\"tools\":$TOOLSPROBE,\"max_output_tokens\":2000}" 2>/dev/null)
+        -X POST "$U/v1/$probe_path" \
+        -d "$probe_body" 2>/dev/null)
     host="${U#*://}"
     [ "$code" = "200" ] && log "upstream OK [$p] ${host%%/*} $M effort=$R -> HTTP 200" \
                         || { log "FATAL: upstream [$p] ${host%%/*} $M effort=$R -> HTTP $code"; fail=1; }
@@ -173,9 +225,9 @@ for task in $TASKS; do
     # Render the same Compose inputs that Make will use, then verify worker counts.
     make -s render-pbench-base PROFILE="$p" >/dev/null 2>&1 || true
     make -n up PROFILE="$p" >/dev/null 2>&1 || { log "FATAL: make -n up PROFILE=$p fails"; fail=1; continue; }
-    ovl=$(make -n up PROFILE="$p" 2>/dev/null | grep -oE '\-f docker/docker-compose[^ ]*' | tr '\n' ' ')
-    if ! rendered=$(env -u ANTHROPIC_BASE_URL -u ANTHROPIC_MODEL -u ANTHROPIC_API_KEY -u AGENT_KIND \
-            -u COPILOT_PROVIDER_TYPE sudo docker compose -f "$ROOT/docker/_gen-prod.$p.yml" $ovl \
+    ovl=$(make -n up PROFILE="$p" 2>/dev/null | grep -oE '\-f docker/docker_compose[^ ]*' | tr '\n' ' ')
+    if ! rendered=$(env -u ANTHROPIC_BASE_URL -u ANTHROPIC_MODEL -u ANTHROPIC_API_KEY -u AGENT_HARNESS \
+            -u COPILOT_PROVIDER_TYPE sudo docker compose -f "$ROOT/docker/_gen_prod.$p.yml" $ovl \
             --project-name "omcgitea-$p" --env-file "$ef" config 2>/dev/null); then
         log "FATAL: $p compose config FAILED to render -- tasks would exit in 60s scoring 0.00%"
         fail=1; continue
@@ -192,7 +244,7 @@ for task in $TASKS; do
 done
 
 [ "$fail" = "0" ] || { log "preflight FAILED — nothing launched"; exit 1; }
-log "preflight OK: $n_tasks profiles, copilot path, host guards, /v1/responses tools+high live"
+log "preflight OK: $n_tasks profiles, $REQUESTED_AGENT_HARNESS, host guards and configured model API probe"
 if [ "${PREFLIGHT_ONLY:-0}" = "1" ]; then
     log "PREFLIGHT_ONLY=1 -- not launching"
     exit 0

@@ -1,10 +1,20 @@
 #!/usr/bin/env python3
 # Emit the team Compose base to stdout, expanding one worker/router pair per agent.
-# Make writes this to docker/_gen-prod.<profile>.yml and adds the pbench overlay.
+# Make writes this to docker/_gen_prod.<profile>.yml and adds the pbench overlay.
 
 import os
+from pathlib import Path
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'agent'))
+from harness_config import load_config
+
+SETTINGS = load_config()
 
 WORKERS_PER_TEAM = int(os.environ.get("PBENCH_WORKERS_PER_TEAM") or 16)
+AGENT_HARNESS = SETTINGS.harness
+if AGENT_HARNESS not in ("pi", "copilot", "codex", "claude"):
+    raise ValueError("AGENT_HARNESS must be pi, copilot, codex or claude")
 
 ALL_AGENTS = [f"worker{w}" for w in range(1, WORKERS_PER_TEAM + 1)]
 
@@ -14,6 +24,7 @@ name: omcgitea
 
 x-agent: &agent-base
   init: true
+  working_dir: /work
   stop_grace_period: 10m
   cgroup_parent: pbench.slice
   mem_limit: 64g
@@ -29,11 +40,8 @@ x-agent-env: &agent-env-base
   ANTHROPIC_MODEL: "${ANTHROPIC_MODEL:-gpt-5.6-sol}"
   ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:?ANTHROPIC_API_KEY required}"
   JOBS: "${JOBS:-8}"
-  AGENT_KIND: "${AGENT_KIND:-copilot}"
-  COPILOT_PROVIDER_TYPE: "${COPILOT_PROVIDER_TYPE:-openai}"
-  COPILOT_PROVIDER_WIRE_API: "${COPILOT_PROVIDER_WIRE_API:-}"
-  COPILOT_AGENT_REASONING_EFFORT: "${COPILOT_AGENT_REASONING_EFFORT:-}"
-  COPILOT_PROVIDER_MAX_PROMPT_TOKENS: "${COPILOT_PROVIDER_MAX_PROMPT_TOKENS:-}"
+  AGENT_HARNESS: "${AGENT_HARNESS:-copilot}"
+__HARNESS_ENV__
   GITEA_ORG: "${ORG_NAME:?ORG_NAME required}"
   MATTERMOST_HOST: "http://mattermost:8065"
   ACP_CHILD_UID: "10000"
@@ -52,6 +60,7 @@ x-mini-router: &mini-router-base
     - "host.docker.internal:host-gateway"
 
 x-mini-router-env: &mini-router-env-base
+  AGENT_HARNESS: "${AGENT_HARNESS:-copilot}"
   GITEA_HOST: "http://gitea:3000"
   MYSQL_DSN: "mysql://omcgitea:${MYSQL_PASSWORD}@mysql:3306/omcgitea"
   SECRET_SERVICE_URL: "http://secret-service:8650"
@@ -333,13 +342,17 @@ AGENT_BLOCK = '''
       - ${DATA_ROOT:-../.claude-team-data}/${PROFILE}/tokens/agent-${ORG_NAME}-__SHORT__-mm.token:/run/omcgitea/tokens/agent-${ORG_NAME}-__SHORT__-mm.token:ro
       - ${PBENCH_BIN:-/dev/null}:/opt/pbench/executable:ro
       - ../prompts/agents.txt:/opt/omcgitea/prompts/agents.md:ro
-      - ../prompts/pbench-brief.txt:/opt/omcgitea/prompts/pbench-brief.md:ro
-      - ../agent/config/copilot-deny-tools.json:/opt/omcgitea/config/copilot-deny-tools.json:ro
+      - ../prompts/pbench_brief.txt:/opt/omcgitea/prompts/pbench_brief.md:ro
+      - ../agent/config/mcp_deny_tools.json:/opt/omcgitea/config/mcp_deny_tools.json:ro
+      - ../agent/config/mcp_allowed_tools.json:/opt/omcgitea/config/mcp_allowed_tools.json:ro
+      - ../agent/config/mcp_tool_metadata.json:/opt/omcgitea/config/mcp_tool_metadata.json:ro
       - ../agent/config/mcp.json.tmpl:/opt/omcgitea/config/mcp.json.tmpl:ro
       - ../board-service/mcp.cjs:/opt/mcp-board.cjs:ro
-      - ../mini-router/mcp-notice-shim.cjs:/opt/mcp-notice-shim.cjs:ro
-      - ../agent/acp-bridge.py:/opt/omcgitea/acp-bridge.py:ro
+      - ../mini-router/mcp_notice_shim.cjs:/opt/mcp_notice_shim.cjs:ro
+      - ../agent/acp_bridge.py:/opt/omcgitea/acp_bridge.py:ro
       - ../agent/archive.py:/opt/omcgitea/archive.py:ro
+      - ../agent/harness_config.py:/opt/omcgitea/harness_config.py:ro
+__HARNESS_MOUNTS__
 '''
 
 # Mount the worker's socket/backlog plus its read-only Gitea password, not all HOME.
@@ -373,12 +386,25 @@ def build():
     # Bootstrap identities, board membership and service names use the same worker list.
     agents_csv = ",".join(f"${{ORG_NAME}}-{s}" for s in ALL_AGENTS)
     out = []
-    out.append(HEADER)
+    prefix = AGENT_HARNESS.upper()
+    wire_api = 'messages' if AGENT_HARNESS == 'claude' else 'responses'
+    harness_env = f'  {prefix}_PROVIDER_WIRE_API: "${{{prefix}_PROVIDER_WIRE_API:-{wire_api}}}"'
+    for name, default in SETTINGS.environment().items():
+        if name != 'AGENT_HARNESS':
+            harness_env += f'\n  {name}: "${{{name}-{default}}}"'
+    if AGENT_HARNESS == 'copilot':
+        harness_env += '\n  COPILOT_PROVIDER_TYPE: "${COPILOT_PROVIDER_TYPE:-openai}"'
+    out.append(HEADER.replace('__HARNESS_ENV__', harness_env)
+               .replace('${AGENT_HARNESS:-copilot}', '${AGENT_HARNESS:-' + AGENT_HARNESS + '}'))
     members = ",\n".join(f'          "${{ORG_NAME}}-{s}"' for s in ALL_AGENTS)
     out.append(INFRA.replace("{AGENTS_CSV}", agents_csv)
                .replace("{BOARD_MEMBERS}", members))
     for short in ALL_AGENTS:
-        out.append(AGENT_BLOCK.replace("__SHORT__", short))
+        harness_files = ('config.sh',) if AGENT_HARNESS == 'copilot' else ('acp.py', 'config.py')
+        harness_mounts = '\n'.join(
+            f"      - ../agent/{AGENT_HARNESS}/{name}:/opt/omcgitea/{AGENT_HARNESS}/{name}:ro"
+            for name in harness_files)
+        out.append(AGENT_BLOCK.replace("__SHORT__", short).replace("__HARNESS_MOUNTS__", harness_mounts))
     for short in ALL_AGENTS:
         out.append(ROUTER_BLOCK.replace("__SHORT__", short))
     return "".join(out)

@@ -14,8 +14,11 @@ import signal
 import subprocess
 import sys
 import threading
+from dataclasses import asdict
 
 SOURCE = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(SOURCE / 'agent'))
+from harness_config import PROFILE, version_argument, load_config
 PROMPT_SOURCE_COMMIT = '06e16c27eebad4c7f2843cc730398df2817bf788'
 DOCKER = ['sudo', '-n', '-E', 'docker']
 
@@ -39,15 +42,30 @@ def write_json(path, value):
     temporary.replace(path)
 
 
-def run(config_path):
+def run(config_path, agent_harness=None, harness_version=None, harness_config=None):
     config = json.loads(config_path.read_text())
+    # Reject retired selector keys instead of silently using the shared default.
+    if 'agent_kind' in config or 'agent_version' in config:
+        raise ValueError('Use agent_harness and harness_version in standalone JSON configurations')
     project = config['project']
     if not re.fullmatch(r'omcgitea-pbench-single-agent-[a-z0-9-]+', project):
         raise ValueError('A unique omcgitea-pbench-single-agent-* project is required')
     if not config['cleanroom_image'].endswith(':task_cleanroom_v6'):
         raise ValueError('Only task_cleanroom_v6 is supported')
-    if config['model'] != 'gpt-5.6-sol' or config['reasoning_effort'] != 'high':
-        raise ValueError('This comparison requires GPT-5.6-sol/high')
+    settings_path = harness_config
+    if settings_path is None and config.get('harness_config'):
+        settings_path = Path(config['harness_config']).expanduser()
+        if not settings_path.is_absolute():
+            settings_path = config_path.parent / settings_path
+    overrides = {key: config[key] for key in ('model', 'reasoning_effort', 'prompt_tokens',
+                 'output_tokens', 'tool_output_bytes', 'compact_fraction') if key in config}
+    overrides.update(harness=agent_harness or config.get('agent_harness'),
+                     version=harness_version or config.get('harness_version'))
+    settings = load_config(settings_path, overrides)
+    agent_harness, harness_version = settings.harness, settings.version
+    config.update({key: value for key, value in asdict(settings).items() if key not in ('harness', 'version')})
+    config['agent_harness'] = agent_harness
+    config['harness_version'] = harness_version
     run_dir = Path(config['run_dir']).absolute()
     if run_dir.exists():
         raise ValueError('Refusing to reuse existing experiment state: ' + str(run_dir))
@@ -65,14 +83,15 @@ def run(config_path):
     status = {'status': 'preparing', 'started_at': now(), 'project': project, 'config': config}
     write_json(run_dir / 'status.json', status)
     env = {key: value for key, value in os.environ.items()
-           if not key.startswith(('COPILOT_', 'ANTHROPIC_', 'UPSTREAM_', 'PBENCH_'))}
+           if not key.startswith(('PI_', 'COPILOT_', 'CODEX_', 'CLAUDE_', 'ANTHROPIC_', 'UPSTREAM_', 'PBENCH_'))}
     # Explicit run configuration takes precedence over inherited model/profile state.
     env.update(MODEL_ENV_FILE=config['model_env_file'], SINGLE_AGENT_IMAGE=config['agent_image'],
                WORKSPACE_DIR=str(workspace), REFERENCE_BIN=str(reference), STATE_DIR=str(state),
                HOME_DIR=str(home), SUBNET_DEFAULT=config['subnet_default'], SUBNET_EGRESS=config['subnet_egress'],
                PBENCH_DOCKER='sudo -n docker')
+    env.update(settings.environment())
     compose = DOCKER + ['compose', '--project-name', project, '--file',
-                        str(SOURCE / 'docker/docker-compose.single-agent.yml')]
+                        str(SOURCE / 'docker/docker_compose.single_agent.yml')]
     started = False
     driver = None
     stopped = threading.Event()
@@ -109,6 +128,14 @@ def run(config_path):
     try:
         cleanroom_id = capture(DOCKER + ['image', 'inspect', config['cleanroom_image'], '--format', '{{.Id}}'])
         agent_id = capture(DOCKER + ['image', 'inspect', config['agent_image'], '--format', '{{.Id}}'])
+        env['SINGLE_AGENT_IMAGE'] = agent_id
+        runtime_environment = [argument for key, value in settings.environment().items()
+                               for argument in ('-e', key + '=' + value)]
+        runtime = json.loads(capture(DOCKER + ['run', '--rm', '--network', 'none', *runtime_environment, '--entrypoint', 'python3',
+                                             agent_id, '/opt/omcgitea/check_harness.py', agent_harness, harness_version]))
+        if runtime.get('limits_profile') != PROFILE:
+            raise RuntimeError('Rebuild this image with the current harness configuration profile')
+        write_json(run_dir / 'runtime.json', runtime)
         invoke([sys.executable, SOURCE / 'tools/pbench_submission.py', 'seed', '--image', cleanroom_id,
                 '--into', workspace, '--bin-out', reference], env=env)
         if not reference.is_file():
@@ -134,8 +161,12 @@ def run(config_path):
             prompt_hashes[name] = hashlib.sha256(raw.encode()).hexdigest()
         invoke(['sudo', '-n', 'chown', '-R', '10000:10000', workspace, home])
         write_json(run_dir / 'provenance.json', {'cleanroom_id': cleanroom_id, 'agent_id': agent_id,
+                   'agent_harness': agent_harness, 'harness_version': harness_version,
                    'reference_sha256': reference_hash, 'prompt_source_commit': PROMPT_SOURCE_COMMIT,
                    'driver_sha256': hashlib.sha256((SOURCE / 'scripts/acp_driver.py').read_bytes()).hexdigest(),
+                   'adapter_sha256': (capture(DOCKER + ['run', '--rm', '--network', 'none', '--entrypoint',
+                       'python3', agent_id, '-c', 'import hashlib,sys;print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())',
+                       f'/opt/omcgitea/{agent_harness}/acp.py']) if agent_harness != 'copilot' else None),
                    'prompt_sha256': prompt_hashes})
         started = True
         scoped_compose('up', '-d', '--wait', '--wait-timeout', '120')
@@ -148,20 +179,22 @@ except OSError:
     egress=False
 print(json.dumps({'uid':os.getuid(),'reference_readable':os.access('/opt/pbench/executable',os.R_OK),
 'reference_executable':os.access('/opt/pbench/executable',os.X_OK),'public_egress':egress,
-'output_threshold':os.environ['COPILOT_LARGE_OUTPUT_THRESHOLD_BYTES']}))
+'agent_harness':os.environ['AGENT_HARNESS'],'model':os.environ['ANTHROPIC_MODEL'],
+'max_prompt_tokens':os.environ['PROMPT_TOKENS']}))
 """
         checks = json.loads(capture(DOCKER + ['exec', '-u', '10000:10000', container, 'python3', '-c', probe]))
         # Validate access from the real worker UID rather than the root supervisor.
         write_json(run_dir / 'preflight.json', checks)
         if checks != {'uid': 10000, 'reference_readable': False, 'reference_executable': True,
-                      'public_egress': False, 'output_threshold': '1048576'}:
+                      'public_egress': False, 'agent_harness': agent_harness, 'model': config['model'],
+                      'max_prompt_tokens': str(settings.prompt_tokens)}:
             raise RuntimeError('The real agent failed its isolation/reference preflight')
         invoke(DOCKER + ['exec', '-u', '10000:10000', '-w', '/workspace', container, 'sh', '-c',
                'git config --global user.name cc-agent && git config --global user.email cc@pbench.local '
                '&& git init -q && git add -A && git commit -qm "pbench-single-agent: seed cleanroom workspace"'])
         status.update(status='running', inference_started_at=now(), budget_seconds=config['deadline_seconds'])
         write_json(run_dir / 'status.json', status)
-        print(f"[single-agent] running {project}; budget={config['deadline_seconds']}s; immediate continuation", flush=True)
+        print(f"[single-agent] running {project}; harness={agent_harness}; budget={config['deadline_seconds']}s; immediate continuation", flush=True)
         snapshot_thread = threading.Thread(target=snapshot_loop, args=(container,), daemon=True)
         snapshot_thread.start()
         with (run_dir / 'cc.log').open('w') as output:
@@ -188,7 +221,7 @@ print(json.dumps({'uid':os.getuid(),'reference_readable':os.access('/opt/pbench/
                 driver.kill()
                 driver.wait()
         if started:
-            # Stop Copilot and verify the sealed HOME/work archive before teardown.
+            # Stop the harness and verify the sealed HOME/work archive before teardown.
             scoped_compose('stop', '--timeout', '600', 'cc-agent')
             with (run_dir / 'compose.log').open('w') as output:
                 scoped_compose('logs', '--no-color', stdout=output, stderr=subprocess.STDOUT)
@@ -214,7 +247,7 @@ print(json.dumps({'uid':os.getuid(),'reference_readable':os.access('/opt/pbench/
         write_json(run_dir / 'status.json', status)
         temporary = run_dir / 'evaltmp'
         temporary.mkdir()
-        eval_env = env | {'PROGRAMBENCH_DOCKER_EXECUTABLE': str(SOURCE / 'scripts/pbench-docker-sudo.sh'),
+        eval_env = env | {'PROGRAMBENCH_DOCKER_EXECUTABLE': str(SOURCE / 'scripts/pbench_docker_sudo.sh'),
                           'TMPDIR': str(temporary)}
         if config.get('pytest_addopts'):
             eval_env['PBENCH_EVAL_PYTEST_ADDOPTS'] = config['pytest_addopts']
@@ -234,6 +267,11 @@ print(json.dumps({'uid':os.getuid(),'reference_readable':os.access('/opt/pbench/
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Launch the release single-agent baseline with immediate ACP continuation.')
     parser.add_argument('--config', required=True, type=Path)
+    parser.add_argument('--agent-harness', choices=('copilot', 'pi', 'codex', 'claude'),
+                        help='Underlying harness; overrides agent_harness in JSON or shared settings.')
+    parser.add_argument('--harness-version', type=version_argument, metavar='VERSION',
+                        help='Exact harness release; overrides harness_version in JSON.')
+    parser.add_argument('--harness-config', type=Path, help='Shared harness JSON settings file')
     args = parser.parse_args()
 
     def terminate(*_):
@@ -241,7 +279,7 @@ if __name__ == '__main__':
 
     signal.signal(signal.SIGTERM, terminate)
     try:
-        run(args.config.absolute())
+        run(args.config.absolute(), args.agent_harness, args.harness_version, args.harness_config)
     except BaseException as error:
         config = json.loads(args.config.read_text())
         status_path = Path(config['run_dir']) / 'status.json'

@@ -5,14 +5,14 @@ team runs and exchange artifacts with ProgramBench.
 
 | File | Purpose |
 |---|---|
-| `gen-compose-prod.py` | Emits the shared-service base and one worker/router pair per configured agent |
+| `gen_compose_prod.py` | Emits the shared-service base and one worker/router pair per configured agent |
 | `pbench_submission.py` | Extracts cleanroom workspace assets and exports committed source as `submission.tar.gz` |
 | `pbench_score_report.py` | Reports raw/CLI and canonical-kept scores through ProgramBench's own helpers |
 
 The generator reads `PBENCH_WORKERS_PER_TEAM` (default 16 when called directly)
 and leaves Compose `${…}` placeholders for profile substitution. Make writes
-its output to ignored `docker/_gen-prod.<profile>.yml` and applies the
-[team overlay](../docker/docker-compose.pbench.yml). Profile generation
+its output to ignored `docker/_gen_prod.<profile>.yml` and applies the
+[team overlay](../docker/docker_compose.pbench.yml). Profile generation
 normally supplies the experiment's worker count explicitly.
 
 Submission `seed` copies `/workspace` from a created cleanroom container,

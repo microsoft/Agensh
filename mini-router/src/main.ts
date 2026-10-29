@@ -15,6 +15,7 @@ import { sleep } from "./runtime.ts";
 
 interface Env {
   agent: string;
+  agentKind: "pi" | "copilot" | "codex" | "claude";
   giteaHost: string;
   hostHeader?: string;
   mysqlDsn: string;
@@ -32,8 +33,13 @@ interface Env {
 
 function readEnv(): Env {
   const agent = required("AGENT_NAME");
+  const agentKind = process.env.AGENT_HARNESS ?? "copilot";
+  if (agentKind !== "pi" && agentKind !== "copilot" && agentKind !== "codex" && agentKind !== "claude") {
+    throw new Error("AGENT_HARNESS must be pi, copilot, codex or claude");
+  }
   return {
     agent,
+    agentKind,
     giteaHost: required("GITEA_HOST"),
     hostHeader: process.env.GITEA_HOST_HEADER,
     mysqlDsn: required("MYSQL_DSN"),
@@ -100,8 +106,8 @@ async function main(): Promise<void> {
     cwd: "/work",
     onLog: (lvl, msg, err) => log(`acp.${lvl}`, msg, err),
     sessionStore: {
-      get: () => store.getKv(env.agent, "acp_session_id:copilot"),
-      set: (sessionId) => store.setKv(env.agent, "acp_session_id:copilot", sessionId),
+      get: () => store.getKv(env.agent, `acp_session_id:${env.agentKind}`),
+      set: (sessionId) => store.setKv(env.agent, `acp_session_id:${env.agentKind}`, sessionId),
     },
     stuckMs,
   });

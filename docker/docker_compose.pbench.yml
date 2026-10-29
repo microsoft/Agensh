@@ -37,11 +37,21 @@ services:
       UPSTREAM: "${PBENCH_LLM_UPSTREAM:?PBENCH_LLM_UPSTREAM required (the real LLM VM)}"
       LISTEN_PORT: "4180"
       LISTEN_HOST: "0.0.0.0"
+      UPSTREAM_DISABLED_TOOLS: functions.request_user_input,functions.request_user_input_async,request_user_input,request_user_input_async
+      UPSTREAM_CODE_MODE_OUTPUT_TOKENS: "${TOOL_OUTPUT_BYTES:-1048576}"
+      UPSTREAM_MAX_OUTPUT_TOKENS: "${OUTPUT_TOKENS:-0}"
+      UPSTREAM_TOOL_OUTPUT_BYTES: "${TOOL_OUTPUT_BYTES:-1048576}"
+      UPSTREAM_AGENT_HARNESS: "${AGENT_HARNESS:-copilot}"
+      UPSTREAM_ANTHROPIC_MODEL: "${LLM_MODEL:-gpt-5.6-sol}"
+      UPSTREAM_ANTHROPIC_EFFORT: "${REASONING_EFFORT:-high}"
+      UPSTREAM_RESPONSE_VERBOSITY: low
+      UPSTREAM_REQUEST_TIMEOUT_SECONDS: "600"
       UPSTREAM_AUTH_TOKEN: "${UPSTREAM_AUTH_TOKEN:-}"
       UPSTREAM_AUTH_STYLE: "${UPSTREAM_AUTH_STYLE:-bearer}"
       UPSTREAM_RETRY_ATTEMPTS: "${UPSTREAM_RETRY_ATTEMPTS:-4}"
     volumes:
       - ../scripts/strip_metadata_proxy.py:/opt/strip_metadata_proxy.py:ro
+      - ../scripts/code_mode_limits.py:/opt/code_mode_limits.py:ro
     command: ["python3", "/opt/strip_metadata_proxy.py"]
     healthcheck:
       test: ["CMD-SHELL", "python3 -c \"import urllib.request,sys; urllib.request.urlopen('http://127.0.0.1:4180/healthz', timeout=2); sys.exit(0)\" 2>/dev/null || python3 -c \"import socket,sys; s=socket.socket(); s.settimeout(2); sys.exit(0 if s.connect_ex(('127.0.0.1',4180))==0 else 1)\""]

@@ -23,12 +23,12 @@ endif
 
 SUDO ?= sudo -E
 
-COMPOSE_BASE := docker/_gen-prod.$(PROFILE).yml
-COMPOSE_OVERLAY := -f docker/docker-compose.pbench.yml
+COMPOSE_BASE := docker/_gen_prod.$(PROFILE).yml
+COMPOSE_OVERLAY := -f docker/docker_compose.pbench.yml
 
 # Unset these legacy model/identity keys; the launcher scrubs other profile conflicts.
 COMPOSE ?= env -u ANTHROPIC_BASE_URL -u ANTHROPIC_MODEL -u ANTHROPIC_API_KEY \
-            -u AGENT_KIND -u COPILOT_PROVIDER_TYPE \
+            -u AGENT_HARNESS -u COPILOT_PROVIDER_TYPE \
             -u GITEA_HOST -u GITEA_TOKEN \
             $(SUDO) docker compose -f $(COMPOSE_BASE) $(COMPOSE_OVERLAY) \
             --project-name $(PROJECT) --env-file $(ENV_FILE) \
@@ -62,8 +62,9 @@ check-env: require-profile
 
 render-pbench-base: require-profile
 	@PBENCH_WORKERS_PER_TEAM="$$(grep -E '^PBENCH_WORKERS_PER_TEAM=' $(ENV_FILE) 2>/dev/null | cut -d= -f2)" \
-	python3 tools/gen-compose-prod.py > docker/_gen-prod.$(PROFILE).yml \
-	&& echo "[render-pbench-base] wrote docker/_gen-prod.$(PROFILE).yml" >&2
+	AGENT_HARNESS="$$(grep -E '^AGENT_HARNESS=' $(ENV_FILE) 2>/dev/null | cut -d= -f2)" \
+	python3 tools/gen_compose_prod.py > docker/_gen_prod.$(PROFILE).yml \
+	&& echo "[render-pbench-base] wrote docker/_gen_prod.$(PROFILE).yml" >&2
 
 up: check-env prep-mm-dirs render-pbench-base
 	$(COMPOSE) up -d --build $(UP_FLAGS) $(SERVICES)

@@ -5,13 +5,16 @@
       "timeout": "${MCP_TOOL_TIMEOUT_MS}",
       "command": "${AGENT_NODE}",
       "args": [
-        "/opt/mcp-notice-shim.cjs",
+        "/opt/mcp_notice_shim.cjs",
         "--",
         "/usr/local/bin/gitea-mcp",
         "-t",
         "stdio"
       ],
       "env": {
+        "MCP_SERVER_NAME": "gitea",
+        "MCP_TOOL_POLICY_FILE": "/opt/omcgitea/config/mcp_allowed_tools.json",
+        "MCP_TOOL_METADATA_FILE": "/opt/omcgitea/config/mcp_tool_metadata.json",
         "BOARD_SERVICE_URL": "${BOARD_SERVICE_URL}",
         "AGENT_NAME": "${AGENT_NAME}",
         "GITEA_HOST": "${GITEA_HOST}",
@@ -24,11 +27,14 @@
       "timeout": "${MCP_TOOL_TIMEOUT_MS}",
       "command": "${AGENT_NODE}",
       "args": [
-        "/opt/mcp-notice-shim.cjs",
+        "/opt/mcp_notice_shim.cjs",
         "--",
         "/usr/local/bin/mcp-server-mattermost"
       ],
       "env": {
+        "MCP_SERVER_NAME": "mattermost",
+        "MCP_TOOL_POLICY_FILE": "/opt/omcgitea/config/mcp_allowed_tools.json",
+        "MCP_TOOL_METADATA_FILE": "/opt/omcgitea/config/mcp_tool_metadata.json",
         "BOARD_SERVICE_URL": "${BOARD_SERVICE_URL}",
         "AGENT_NAME": "${AGENT_NAME}",
         "MATTERMOST_URL": "${MATTERMOST_HOST}",
@@ -43,12 +49,15 @@
       "timeout": "${MCP_TOOL_TIMEOUT_MS}",
       "command": "${AGENT_NODE}",
       "args": [
-        "/opt/mcp-notice-shim.cjs",
+        "/opt/mcp_notice_shim.cjs",
         "--",
         "${AGENT_NODE}",
         "/opt/mcp-board.cjs"
       ],
       "env": {
+        "MCP_SERVER_NAME": "board",
+        "MCP_TOOL_POLICY_FILE": "/opt/omcgitea/config/mcp_allowed_tools.json",
+        "MCP_TOOL_METADATA_FILE": "/opt/omcgitea/config/mcp_tool_metadata.json",
         "BOARD_SERVICE_URL": "${BOARD_SERVICE_URL}",
         "AGENT_NAME": "${AGENT_NAME}",
         "BOARD_IDS": "${BOARD_IDS}"

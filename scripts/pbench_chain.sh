@@ -12,7 +12,7 @@ LOG="${LOG:-$ROOT/out/chain-${PROFILE}.log}"
 SUMMARY="${SUMMARY:-$ROOT/out/chain-${PROFILE}.summary}"
 OUT_ROOT="${OUT_ROOT:-$ROOT/out/$PROFILE}"
 PB_REPO="${PROGRAMBENCH_REPO:-$HOME/programbench}"
-DOCKER_SUDO_SHIM="$ROOT/scripts/pbench-docker-sudo.sh"
+DOCKER_SUDO_SHIM="$ROOT/scripts/pbench_docker_sudo.sh"
 ENV_FILE="$ROOT/.env.$PROFILE"
 if [ -z "${DATA_ROOT:-}" ] && [ -f "$ENV_FILE" ]; then
     DATA_ROOT="$(awk -F= '$1=="DATA_ROOT"{sub(/\r$/,"",$2); print $2; exit}' "$ENV_FILE")"

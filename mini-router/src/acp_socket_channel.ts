@@ -1,5 +1,5 @@
 /**
- * Deliver prompts to Copilot over the agent container's Unix socket using ACP.
+ * Deliver prompts to the selected harness over the agent container's ACP Unix socket.
  * Persist session IDs in MySQL so reconnects can restore conversational state.
  */
 import * as acp from "@agentclientprotocol/sdk";

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Drive a standalone Copilot session through the container's stdio/socket adapter.
+# Drive the selected standalone harness through the container's stdio/socket adapter.
 # Resume completed turns while more than 60 seconds remain; a pending prompt is
 # bounded by the deadline. Reload sessions after transport/watchdog failures.
 
@@ -45,12 +45,16 @@ class ACPChild:
     def start(self) -> None:
         stderr_dst = open(self._stderr_path, "ab") if self._stderr_path else subprocess.DEVNULL
         log(f"spawning ACP child: {' '.join(self._cmd)}")
-        self._proc = subprocess.Popen(
-            self._cmd,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=stderr_dst,
-        )
+        try:
+            self._proc = subprocess.Popen(
+                self._cmd,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=stderr_dst,
+            )
+        finally:
+            if self._stderr_path:
+                stderr_dst.close()
         self._reader = threading.Thread(target=self._read_loop, daemon=True)
         self._reader.start()
 
@@ -71,6 +75,10 @@ class ACPChild:
                     self._proc.wait(timeout=5)
                 except Exception:
                     pass
+            if self._reader is not None and self._reader is not threading.current_thread():
+                self._reader.join(timeout=5)
+            if self._proc.stdout:
+                self._proc.stdout.close()
 
     def _read_loop(self) -> None:
         assert self._proc is not None
@@ -436,7 +444,7 @@ def run(args: argparse.Namespace) -> int:
 
 
 def parse_args() -> argparse.Namespace:
-    ap = argparse.ArgumentParser(description='\nacp_driver.py — minimal Python ACP client for the single-agent ProgramBench\nbaseline, using the native Copilot runtime.\n\nDrives one Copilot session through the release ACP bridge over\n    docker exec -i <container> python3 /opt/single_agent_stdio.py\nspeaking JSON-RPC 2.0 (NDJSON framing) on stdio.\n\nProtocol shape (verified against mini-router/src/acp_socket_channel.ts):\n\n    → initialize {protocolVersion: 1, clientCapabilities.fs.{read,write}TextFile: false}\n    ← result {protocolVersion: 1, ...}\n    → session/new {cwd, mcpServers: []}\n    ← result {sessionId}\n    → session/prompt {sessionId, prompt: [{type:"text", text}]}\n    ← notifications session/update ...\n    ← request  session/request_permission   → we reply "allow_once"\n    ← result   {stopReason: "end_turn" | ...}\n\nAn explicit resume loop on the same sessionId, starting another prompt only\nwhile more than 60 seconds remain. First prompt = rules + brief;\nsubsequent prompts = the resume kicker text.\n\nStdlib only.\n')
+    ap = argparse.ArgumentParser(description='\nacp_driver.py — minimal Python ACP client for the single-agent ProgramBench\nbaseline, using the selected Pi, Copilot or Codex runtime.\n\nDrives one native harness session through the release ACP bridge over\n    docker exec -i <container> python3 /opt/single_agent_stdio.py\nspeaking JSON-RPC 2.0 (NDJSON framing) on stdio.\n\nProtocol shape (verified against mini-router/src/acp_socket_channel.ts):\n\n    → initialize {protocolVersion: 1, clientCapabilities.fs.{read,write}TextFile: false}\n    ← result {protocolVersion: 1, ...}\n    → session/new {cwd, mcpServers: []}\n    ← result {sessionId}\n    → session/prompt {sessionId, prompt: [{type:"text", text}]}\n    ← notifications session/update ...\n    ← request  session/request_permission   → we reply "allow_once"\n    ← result   {stopReason: "end_turn" | ...}\n\nAn explicit resume loop on the same sessionId, starting another prompt only\nwhile more than 60 seconds remain. First prompt = rules + brief;\nsubsequent prompts = the resume kicker text.\n\nStdlib only.\n')
     ap.add_argument("--container", required=True,
                     help="cc-agent container name (from `compose ps -q`)")
     ap.add_argument("--workspace-cwd", default="/workspace")

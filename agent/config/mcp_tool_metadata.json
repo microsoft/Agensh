@@ -1,0 +1,22 @@
+{
+  "mattermost": {
+    "list_my_channels": [
+      {
+        "path": ["description"],
+        "text": "List channels you are a member of in a team. Resolve team_id with list_teams. Returns channel IDs, unread counters, and the authenticated user's last_viewed_at marker. Use channel_types [\"O\", \"P\"] for workspace channels or [\"D\"] for direct messages. Use only_unread=True to narrow the listing. Read messages with get_channel_messages: recent history using page/per_page, or incremental history using since=<unix_ms>. For a known task-channel name, get_channel_by_name resolves its ID. Channel membership and provisioning are managed by the experiment infrastructure."
+      }
+    ],
+    "get_channel_messages": [
+      {
+        "path": ["description"],
+        "text": "Read messages from a channel. Three mutually exclusive modes: recent history with page/per_page (reverse chronological); unread_only=True using an existing last_viewed_at marker; or incremental history with since=<unix_ms>, including edits and tombstones. On a never-viewed channel, unread_only may return empty order despite a nonzero unread count: use recent history or since instead. The harness manages delivery acknowledgements. Returns {order, posts, truncated}; posts may also include root posts referenced by replies. Paginate recent history or use smaller since windows when truncated=True. Use search_messages for keyword search and get_thread for full threads."
+      }
+    ],
+    "post_message": [
+      {
+        "path": ["inputSchema", "properties", "file_ids", "anyOf", 0, "description"],
+        "text": "Existing file IDs from message metadata, if needed. Omit for normal text coordination; this worker profile does not provide chat file uploading."
+      }
+    ]
+  }
+}
