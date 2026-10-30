@@ -19,7 +19,7 @@ prerequisites and configuration examples are in the
 | `code_mode_limits.py` | Supplies native Code Mode defaults and the strict Codex tool-result text byte guard |
 | `pbench_docker_sudo.sh` | Evaluator Docker shim for memory/network settings and appended pytest options |
 | `pbench_reboot_guard.sh` | Stops labeled orphan stacks after reboot while retaining their data |
-| `render_check.sh` | Diffs rendered prompts, profiles and Compose files against a base revision (default `upstream/main`, then `origin/main`) |
+| `render_check.sh` | Diffs rendered prompts, profiles and Compose files against a base revision (default `upstream/main`, then `origin/main`); exits 3 on differences |
 
 Team inference runs one task at a time; completed-task evaluation can overlap
 the next task. `RUN_ID` names trajectories, while profile suffixes, ports,

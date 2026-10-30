@@ -9,7 +9,8 @@
   "description": "Per-agent sidecar router (R7). MySQL-backed events + ACP unix socket.",
   "scripts": {
     "build": "tsc",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "tsc && node --test 'test/*.test.mjs'"
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "^0.20.0",

@@ -32,7 +32,10 @@ Group messages wait for a turn boundary. Delivered batches containing more than
 
 For local development, use Node.js 20.10 or newer and run `npm ci`, then
 `npm run typecheck` or `npm run build` in this folder. Docker builds supply
-their own Node runtime.
+their own Node runtime. `npm test` builds `dist/` and runs the unit tests in
+[test/](test/) with Node's built-in test runner. They cover listener
+normalization, group-message backlogs and dispatcher delivery against
+in-memory stand-ins; the MySQL event store is not covered.
 [`tools/gen_compose_prod.py`](../tools/gen_compose_prod.py) supplies service
 URLs, identity, database credentials and socket mounts. `/healthz` on port 8645
 reports Gitea SSE connectivity.

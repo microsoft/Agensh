@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Compare rendered prompts, profiles and Compose files between a base revision and
-# this working tree. Exit status is non-zero when the rendered outputs differ.
+# this working tree. Exit status is 3 when the rendered outputs differ and 1 when
+# rendering itself fails.
 # Usage: render_check.sh [BASE_REF] [render_snapshot.py options...]
 set -euo pipefail
 
@@ -39,5 +40,5 @@ if diff -ru "$OUT/base" "$OUT/head" > "$OUT/render.diff"; then
 else
     echo "[render-check] rendered outputs differ from $BASE_REF; see $OUT/render.diff" >&2
     diff -rq "$OUT/base" "$OUT/head" >&2 || true
-    exit 1
+    exit 3
 fi
