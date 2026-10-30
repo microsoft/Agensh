@@ -40,16 +40,11 @@ die() { echo "[pbench] FATAL: $*" >&2; exit 1; }
 
 source "$ROOT/scripts/lib_pbench_images.sh"
 
+# Core messages (kickoff) are task-neutral; the task pack supplies the brief,
+# idle, delivery and deadline messages.
 PROMPTS_DIR="$ROOT/prompts"
-
-render_prompt() {
-    local file="$1" names="" kv
-    shift
-    [ -s "$file" ] || { echo "render_prompt: $file is missing" >&2; return 1; }
-    # Restrict envsubst so shell examples and unrelated placeholders stay literal.
-    for kv in "$@"; do names+="\${${kv%%=*}}"; done
-    env "$@" envsubst "$names" < "$file"
-}
+TASK_PROMPTS_DIR="$ROOT/tasks/programbench/prompts"
+source "$ROOT/scripts/lib_prompts.sh"
 
 # Scan private native journals with sudo before traversing their directories.
 worker_last_activity() {
@@ -67,7 +62,7 @@ worker_idle_phase() {
         printf '%s\n' development
     fi
 }
-command -v envsubst >/dev/null 2>&1 || die "envsubst not found (apt install gettext-base); it renders the prompts under prompts/"
+command -v envsubst >/dev/null 2>&1 || die "envsubst not found (apt install gettext-base); it renders the prompts under prompts/ and tasks/programbench/prompts/"
 
 ORCH="$(grep -E '^PBENCH_ORCHESTRATOR=' "$ENV_FILE" 2>/dev/null | cut -d= -f2- | tr -d ' \r' || true)"
 ORCH="${PBENCH_ORCHESTRATOR:-${ORCH:-compose}}"
@@ -369,7 +364,7 @@ mm_ensure_task_channel() {
 }
 
 task_brief() {
-    render_prompt "$PROMPTS_DIR/task_brief.txt" \
+    render_prompt "$TASK_PROMPTS_DIR/task_brief.txt" \
         TASK="$TASK" REPO="$REPO" MM_TEAM_ID="$MM_TEAM_ID" TASK_CHANNEL_ID="$TASK_CHANNEL_ID"
 }
 
@@ -380,14 +375,14 @@ deadline_reminder_loop() {
     local t5=$((  secs - 5  * 60 ))
     if [ "$t45" -gt 0 ]; then
         sleep "$t45"
-        mm_post "$TASK_CHANNEL_ID" "$(render_prompt "$PROMPTS_DIR/deadline_45m.txt")" \
+        mm_post "$TASK_CHANNEL_ID" "$(render_prompt "$TASK_PROMPTS_DIR/deadline_45m.txt")" \
             || log "WARN: T-45m reminder failed"
         log "posted T-45m reminder"
     fi
     local rest=$(( t5 - (t45 > 0 ? t45 : 0) ))
     if [ "$rest" -gt 0 ]; then
         sleep "$rest"
-        mm_post "$TASK_CHANNEL_ID" "$(render_prompt "$PROMPTS_DIR/deadline_5m.txt")" \
+        mm_post "$TASK_CHANNEL_ID" "$(render_prompt "$TASK_PROMPTS_DIR/deadline_5m.txt")" \
             || log "WARN: T-5m reminder failed"
         log "posted T-5m reminder"
     fi
@@ -554,9 +549,9 @@ watchdog_consider() {
 
     local idle_msg
     if [ "${WORKER_IDLE_PHASE:-development}" = delivery ]; then
-        idle_msg="$(render_prompt "$PROMPTS_DIR/idle_delivery.txt")"
+        idle_msg="$(render_prompt "$TASK_PROMPTS_DIR/idle_delivery.txt")"
     else
-        idle_msg="$(render_prompt "$PROMPTS_DIR/idle.txt")"
+        idle_msg="$(render_prompt "$TASK_PROMPTS_DIR/idle.txt")"
     fi
     local pinged=0 dm=""
     dm="$(mm_dm_channel "$worker_name" 2>/dev/null)" || dm=""

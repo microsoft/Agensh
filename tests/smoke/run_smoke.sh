@@ -136,6 +136,7 @@ print(f"board entries: {len(entries)}")
 ' "$WORKERS" "$org" >&2 || die "board check failed"
 
     check_usage
+    check_agents_md
 
     local rows
     rows="$("${DOCKER[@]}" exec "$mysql" mysql -N -B -uroot -p"$(profile_value MYSQL_ROOT_PASSWORD)" \
@@ -145,6 +146,19 @@ print(f"board entries: {len(entries)}")
         echo "$rows" | awk -v a="$org-worker$i" '$1==a && $2>0 {found=1} END {exit !found}' \
             || die "$org-worker$i has no delivered events"
     done
+}
+
+check_agents_md() {
+    # The worker's entrypoint must render exactly what the render snapshot predicts.
+    local expected worker
+    python3 tools/render_snapshot.py --out "$OUT/snapshot" --workers "$WORKERS" --harness pi >/dev/null \
+        || die "render snapshot failed"
+    expected="$OUT/snapshot/worker/w$(printf '%02d' "$WORKERS")/AGENTS.md"
+    worker="$(container agent-worker1)"
+    "${DOCKER[@]}" exec "$worker" cat /work/AGENTS.md > "$OUT/agents-worker1.md" \
+        || die "cannot read AGENTS.md from $worker"
+    diff -u "$expected" "$OUT/agents-worker1.md" >&2 || die "worker AGENTS.md differs from the render snapshot"
+    log "worker AGENTS.md matches the render snapshot ($(wc -c < "$expected") bytes)"
 }
 
 check_usage() {

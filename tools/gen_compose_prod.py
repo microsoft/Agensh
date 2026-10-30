@@ -344,7 +344,8 @@ AGENT_BLOCK = '''
       - ${DATA_ROOT:-../.claude-team-data}/${PROFILE}/tokens/agent-${ORG_NAME}-__SHORT__-mm.token:/run/omcgitea/tokens/agent-${ORG_NAME}-__SHORT__-mm.token:ro
       - ${PBENCH_BIN:-/dev/null}:/opt/pbench/executable:ro
       - ../prompts/agents.txt:/opt/omcgitea/prompts/agents.md:ro
-      - ../prompts/pbench_brief.txt:/opt/omcgitea/prompts/pbench_brief.md:ro
+      - ../tasks/programbench/prompts:/opt/omcgitea/task-prompts:ro
+      - ../agent/render_agents.sh:/opt/omcgitea/render_agents.sh:ro
       - ../agent/config/mcp_deny_tools.json:/opt/omcgitea/config/mcp_deny_tools.json:ro
       - ../agent/config/mcp_allowed_tools.json:/opt/omcgitea/config/mcp_allowed_tools.json:ro
       - ../agent/config/mcp_tool_metadata.json:/opt/omcgitea/config/mcp_tool_metadata.json:ro

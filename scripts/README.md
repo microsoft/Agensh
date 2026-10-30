@@ -21,6 +21,7 @@ prerequisites and configuration examples are in the
 | `team_status.py` | Summarizes a running profile: containers, native activity, events, token usage, board entries and PRs |
 | `pbench_docker_sudo.sh` | Evaluator Docker shim for memory/network settings and appended pytest options |
 | `pbench_reboot_guard.sh` | Stops labeled orphan stacks after reboot while retaining their data |
+| `lib_prompts.sh` | `render_prompt`, shared by the runner and the render snapshot |
 | `render_check.sh` | Diffs rendered prompts, profiles and Compose files against a base revision (default `upstream/main`, then `origin/main`); exits 3 on differences |
 
 Team inference runs one task at a time; completed-task evaluation can overlap

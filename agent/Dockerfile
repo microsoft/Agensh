@@ -64,9 +64,10 @@ RUN curl -LsSf https://astral.sh/uv/install.sh | sh \
 
 COPY board-service/mcp.cjs /opt/mcp-board.cjs
 COPY prompts/agents.txt       /opt/omcgitea/prompts/agents.md
-COPY prompts/pbench_brief.txt /opt/omcgitea/prompts/pbench_brief.md
+COPY tasks/programbench/prompts/ /opt/omcgitea/task-prompts/
 COPY agent/config/         /opt/omcgitea/config/
 COPY agent/entrypoint.sh   /opt/omcgitea/entrypoint.sh
+COPY agent/render_agents.sh /opt/omcgitea/render_agents.sh
 COPY agent/acp_bridge.py   /opt/omcgitea/acp_bridge.py
 COPY agent/archive.py      /opt/omcgitea/archive.py
 COPY agent/harness_config.py /opt/omcgitea/harness_config.py

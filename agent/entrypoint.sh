@@ -61,9 +61,9 @@ if [ "$worker_mode" = team ]; then
 EOF
     chmod 600 "$cred" "$git_cfg"
 
-    # Repository .txt templates retain their historical .md names in the image.
-    export PBENCH_BRIEF="$(cat "$TMPL_DIR/prompts/pbench_brief.md")"
-    envsubst < "$TMPL_DIR/prompts/agents.md" > /work/AGENTS.md
+    # The core template keeps its historical .md name in the image; the task
+    # pack's fragments (objective, focus, work cycle, delivery) fill it in.
+    bash "$TMPL_DIR/render_agents.sh" "$TMPL_DIR/prompts/agents.md" "$TMPL_DIR/task-prompts" > /work/AGENTS.md
     cp /work/AGENTS.md /work/CLAUDE.md
     export MCP_TOOL_TIMEOUT_MS=180000
     envsubst < "$CONFIG_DIR/mcp.json.tmpl" > /work/.mcp.json

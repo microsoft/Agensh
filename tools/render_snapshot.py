@@ -63,9 +63,15 @@ def envsubst(text, variables, names=None):
                stdin=text)
 
 
-def render_prompt(path, **variables):
-    # Same restriction as render_prompt() in scripts/pbench_run.sh. The runner captures
-    # the result with $(...), which drops trailing newlines.
+def render_prompt(root, path, **variables):
+    # The runner captures render_prompt with $(...), which drops trailing newlines.
+    library = root / 'scripts/lib_prompts.sh'
+    pairs = [f'{k}={v}' for k, v in variables.items()]
+    if library.is_file():
+        script = 'source "$1"; shift; out="$(render_prompt "$@")"; printf %s "$out"'
+        return run(['bash', '-c', script, 'render', str(library), str(path), *pairs],
+                   env=clean_env(root))
+    # Revisions before scripts/lib_prompts.sh defined render_prompt inside the runner.
     names = ''.join('${%s}' % name for name in variables)
     text = envsubst(path.read_text(), {k: str(v) for k, v in variables.items()}, names)
     return text.rstrip('\n')
@@ -120,26 +126,38 @@ class Snapshot:
             'harness_versions': {name: self.versions[name] for name in self.harnesses},
         }, indent=2) + '\n')
 
+    def task_prompts(self):
+        # Task messages moved from prompts/ into the ProgramBench pack.
+        pack = self.root / 'tasks/programbench/prompts'
+        return pack if pack.is_dir() else self.root / 'prompts'
+
     def prompts(self):
-        prompts = self.root / 'prompts'
-        brief = render_prompt(prompts / 'task_brief.txt', TASK=TASK, REPO=REPO,
+        core, task = self.root / 'prompts', self.task_prompts()
+        brief = render_prompt(self.root, task / 'task_brief.txt', TASK=TASK, REPO=REPO,
                               MM_TEAM_ID=MM_TEAM_ID, TASK_CHANNEL_ID=TASK_CHANNEL_ID)
         self.write('team/task_brief.txt', brief)
         self.write('team/task_issue.json', json.dumps(
             {'title': f'[pbench] {TASK}', 'body': brief}, indent=2) + '\n')
-        self.write('team/kickoff.txt', render_prompt(prompts / 'kickoff.txt', TASK_BRIEF=brief))
+        self.write('team/kickoff.txt', render_prompt(self.root, core / 'kickoff.txt', TASK_BRIEF=brief))
         for name in ('idle', 'idle_delivery', 'deadline_45m', 'deadline_5m'):
-            self.write(f'team/{name}.txt', render_prompt(prompts / f'{name}.txt'))
+            self.write(f'team/{name}.txt', render_prompt(self.root, task / f'{name}.txt'))
+
+    def agents_md(self, variables):
+        # Render as agent/entrypoint.sh does, with the worker's environment.
+        prompts = self.root / 'prompts'
+        renderer = self.root / 'agent/render_agents.sh'
+        if renderer.is_file():
+            return run(['bash', str(renderer), str(prompts / 'agents.txt'), str(self.task_prompts())],
+                       env={'PATH': os.environ.get('PATH', '/usr/bin:/bin'), **variables})
+        # Earlier revisions exported the brief as PBENCH_BRIEF; $(cat) drops trailing newlines.
+        legacy = dict(variables, PBENCH_BRIEF=(prompts / 'pbench_brief.txt').read_text().rstrip('\n'))
+        return envsubst((prompts / 'agents.txt').read_text(), legacy)
 
     def worker_files(self, org, workers):
-        # Mirror agent/entrypoint.sh: unrestricted envsubst over the worker environment.
-        prompts = self.root / 'prompts'
         variables = {
             'AGENT_NAME': f'{org}-worker1',
             'GITEA_ORG': org,
             'PBENCH_WORKERS': str(workers),
-            # $(cat) drops the brief's trailing newlines before it is exported.
-            'PBENCH_BRIEF': (prompts / 'pbench_brief.txt').read_text().rstrip('\n'),
             'GITEA_HOST': 'http://gitea:3000',
             'GITEA_TOKEN': '<GITEA_TOKEN>',
             'MATTERMOST_HOST': 'http://mattermost:8065',
@@ -149,8 +167,7 @@ class Snapshot:
             'MCP_TOOL_TIMEOUT_MS': '180000',
             'AGENT_NODE': '/opt/agentrt/bin/node',
         }
-        self.write(f'worker/w{workers:02d}/AGENTS.md',
-                   envsubst((prompts / 'agents.txt').read_text(), variables))
+        self.write(f'worker/w{workers:02d}/AGENTS.md', self.agents_md(variables))
         mcp = json.loads(envsubst((self.root / 'agent/config/mcp.json.tmpl').read_text(), variables))
         for server in mcp.get('mcpServers', {}).values():
             if 'timeout' in server:
@@ -158,7 +175,7 @@ class Snapshot:
         self.write(f'worker/w{workers:02d}/mcp.json', json.dumps(mcp, indent=2) + '\n')
 
     def single_agent(self):
-        prompts = self.root / 'prompts/single-agent'
+        prompts = self.task_prompts() / 'single-agent'
         rendered = {}
         for name in ('brief', 'rules', 'resume'):
             text = (prompts / f'{name}.txt').read_text()

@@ -32,6 +32,7 @@ Skills remain enabled in every harness.
 | Bootstrap-issued worker tokens | [secret-service/](secret-service/README.md) |
 | Compose, provisioning and host guards | [docker/](docker/README.md) |
 | Runtime instructions and launch messages | [prompts/](prompts/README.md) |
+| ProgramBench prompts and standalone baseline templates | [tasks/programbench/](tasks/programbench/README.md) |
 | Launch and lifecycle scripts | [scripts/](scripts/README.md) |
 | Compose generation, submission export and scoring | [tools/](tools/README.md) |
 
@@ -449,7 +450,7 @@ scale automatically with `WORKERS`; reapply them after profile regeneration.
 baseline from JSON. It handles cleanroom seeding, private prompts, isolation
 checks, snapshots,
 [ACP continuation](scripts/acp_driver.py), export and optional evaluation.
-Use [the standalone prompt guide](prompts/README.md#standalone-baseline) for its timing
+Use [the standalone prompt guide](tasks/programbench/README.md#standalone-baseline) for its timing
 and prompt behavior.
 
 Create a private model environment file, mode 600, with the selected gateway

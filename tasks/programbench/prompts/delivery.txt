@@ -1,0 +1,2 @@
+Commit everything the build needs: the grader builds from a fresh clone of `main` and does not
+invoke your binary from the repo root, so resolve data paths with `dirname(realpath(argv[0]))`.

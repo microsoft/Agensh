@@ -319,10 +319,15 @@ verify → merge → publish). Task-specific content moves to pack fragments:
 
 ```
 prompts/agents.txt (core)
-  ${TASK_OBJECTIVE}     ← pack brief.objective
-  ${TASK_WORK_CYCLE}    ← pack brief.work_cycle
-  ${TASK_DELIVERY}      ← pack-specific delivery contract (e.g. compile.sh)
+  ${TASK_OBJECTIVE}     ← <pack>/prompts/objective.txt
+  ${TASK_FOCUS}         ← <pack>/prompts/focus.txt ("Always focus on …;")
+  ${TASK_WORK_CYCLE}    ← <pack>/prompts/work_cycle.txt
+  ${TASK_DELIVERY}      ← <pack>/prompts/delivery.txt (e.g. the compile.sh contract)
 ```
+
+`agent/render_agents.sh` renders `AGENTS.md` from these at worker start, and
+`scripts/lib_prompts.sh` renders runner messages; the render snapshot calls the
+same code.
 
 Generic work cycle: read the backlog and the board → `CLAIM` referencing an
 issue → implement on the latest `main` → run `acceptance.pr` → open a PR →
@@ -515,8 +520,10 @@ Foundations:
 
 Refactor:
 
-5. **Prompt layering and lifecycle messages**: core template plus
-   ProgramBench fragments under `tasks/programbench/prompts/`.
+5. **Prompt layering**: core template plus ProgramBench fragments under
+   `tasks/programbench/prompts/`, with shared renderers
+   (`agent/render_agents.sh`, `scripts/lib_prompts.sh`). *(done)* Lifecycle
+   messages move to PR 10, where pause, resume and the token budget exist.
 6. **Python core driver and pack loading**: `pack.toml` and project files;
    ProgramBench `prepare/export/evaluate` hooks; ProgramBench-only tools move
    into the pack.

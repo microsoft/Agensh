@@ -218,6 +218,18 @@ else
     log "FATAL: prompts/agents.txt reads '$got' bytes in-container, host has $want -- the mount is not effective"
     fail=1
 fi
+# The task pack's fragments are mounted as a directory; check one through it.
+TSRC="$ROOT/tasks/programbench/prompts"
+want=$(wc -c < "$TSRC/objective.txt" 2>/dev/null)
+got=$(sudo docker run --rm --network none -v "$TSRC:/opt/omcgitea/task-prompts:ro" \
+      --entrypoint sh "$img" -c \
+      "wc -c < /opt/omcgitea/task-prompts/objective.txt" 2>/dev/null | tr -d ' ')
+if [ -n "$want" ] && [ "$got" = "$want" ]; then
+    log "prompt OK: tasks/programbench/prompts/objective.txt = $want bytes (task prompts reach the container)"
+else
+    log "FATAL: task prompt objective.txt reads '$got' bytes in-container, host has $want -- the mount is not effective"
+    fail=1
+fi
 
 for task in $TASKS; do
     p="$(task_profile "$task")"; ef="$ROOT/.env.$p"

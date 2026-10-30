@@ -9,6 +9,7 @@ loop described in [the report](../agensh.pdf).
 | `Dockerfile.base` | Caches the upstream Gitea MCP binary in an artifact image |
 | `Dockerfile` | Extends a v6 cleanroom with one selected harness, private Node and MCP tools |
 | `entrypoint.sh` | Configures team or standalone workers and starts the shared supervisor |
+| `render_agents.sh` | Renders `/work/AGENTS.md` from the core template and the task pack's prompt fragments |
 | [copilot/](copilot/) | Copilot team and standalone setup, using its native ACP runtime |
 | [pi/](pi/) | Pi configuration and native RPC-to-ACP adapter |
 | [codex/](codex/) | Codex configuration and native app-server-to-ACP adapter |

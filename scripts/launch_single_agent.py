@@ -153,7 +153,7 @@ def run(config_path, agent_harness=None, harness_version=None, harness_config=No
         prompt_hashes = {}
         # Hash original templates while installing task/budget substitutions privately.
         for name in ('brief', 'rules', 'resume'):
-            raw = (SOURCE / 'prompts/single-agent' / (name + '.txt')).read_text()
+            raw = (SOURCE / 'tasks/programbench/prompts/single-agent' / (name + '.txt')).read_text()
             text = raw.replace('${TASK}', config['task']).replace('${HOURS}', str(config.get('hours', 6)))
             if name == 'resume':
                 text = text.rstrip('\n')
