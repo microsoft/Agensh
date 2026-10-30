@@ -268,9 +268,13 @@ them.
 package indexes with `environment.allow_domains`; the delivery PR description
 lists any added domains so reviewers see what the team could reach.
 
-- Model credentials stay in the egress proxy in every mode. Each worker gets
-  its own local proxy credential from bootstrap, which the proxy uses for
-  usage metering. The credential is useless outside the private network.
+- Model credentials stay in the egress proxy in every mode. Each worker sends
+  its own proxy key, `local-proxy-<agent>`, which the proxy uses to label
+  requests for usage metering. It is a label, not a credential: the proxy is
+  only reachable on the private network and does not authenticate workers. A
+  worker could claim another label, which matters only for per-agent budgets;
+  issuing secret per-worker keys from bootstrap would close that gap if
+  per-agent budgets are ever enforced.
 - Workers never hold GitHub credentials. Only host-side hooks push branches or
   open PRs.
 - **The repository itself is sensitive.** Workers can read the whole codebase,
@@ -403,17 +407,18 @@ message.
 
 ## Observability and cost
 
-**Usage metering.** `scripts/strip_metadata_proxy.py` caps output tokens but
-records no usage, and every worker currently uses the same proxy credential
-(`local-proxy-no-auth`), so the proxy cannot tell agents apart. With per-worker
-proxy credentials, the proxy parses usage fields from responses (including
-streamed usage events) and accounts them per agent. This is a prerequisite for
-the token budget and for reporting what a feature cost.
+**Usage metering** *(PR 4)*. Every worker used to send the same proxy key
+(`local-proxy-no-auth`), so the proxy could not tell agents apart. Workers now
+send `local-proxy-<agent>`, and `scripts/usage_meter.py` parses the usage fields
+of each buffered response (Responses, Chat Completions and Messages, JSON or
+SSE). The proxy keeps per-agent totals, serves them at `GET /usage` and appends
+one record per request to `$DATA_ROOT/<profile>/usage/usage.jsonl`. This is the
+prerequisite for the token budget and for reporting what a feature cost.
 
-**Run status.** The idle watchdog infers activity from native session-file
-modification times. A `status` command summarizes each agent's state (working,
-idle, stuck), event queue depth, token usage, and open PRs and CI results from
-MySQL, the board and Gitea. A web dashboard can follow later.
+**Run status** *(PR 4)*. `scripts/team_status.py <profile>` summarizes each
+worker's containers, native activity (from the same session journals as the
+idle watchdog), event queue states, token usage, board entries and merged PRs.
+CI results join it with the CI merge gate. A web dashboard can follow later.
 
 **Per-role models (optional).** The proxy forwards to one configured model
 (`UPSTREAM_ANTHROPIC_MODEL`). Selecting the model per worker or per role (for
@@ -506,7 +511,7 @@ Foundations:
 2. **Framework tests and repository CI**: board and router unit tests, plus
    GitHub Actions running them with the typecheck and render check. *(done)*
 3. **Stub-harness smoke test**. *(done)*
-4. **Per-worker proxy credentials, usage metering and `status`**.
+4. **Per-worker proxy identity, usage metering and `status`**. *(done)*
 
 Refactor:
 

@@ -334,6 +334,8 @@ AGENT_BLOCK = '''
     environment:
       <<: *agent-env-base
       AGENT_NAME: "${ORG_NAME}-__SHORT__"
+      # Labels this worker's model requests for usage metering; not a credential.
+      ANTHROPIC_API_KEY: "local-proxy-${ORG_NAME}-__SHORT__"
       GITEA_TOKEN_FILE: "/run/omcgitea/tokens/agent-${ORG_NAME}-__SHORT__.token"
     volumes:
       - ${DATA_ROOT:-../.claude-team-data}/${PROFILE}/agents/${ORG_NAME}-__SHORT__:/opt/data

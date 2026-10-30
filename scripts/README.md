@@ -17,6 +17,8 @@ prerequisites and configuration examples are in the
 | `acp_driver.py`, `single_agent_stdio.py` | Drives immediate ACP continuation through the worker's Unix socket |
 | `strip_metadata_proxy.py` | Relays model HTTP traffic, removes unsupported fields, injects auth and retries selected failures |
 | `code_mode_limits.py` | Supplies native Code Mode defaults and the strict Codex tool-result text byte guard |
+| `usage_meter.py` | Parses token usage from buffered model responses and keeps per-agent totals for the proxy |
+| `team_status.py` | Summarizes a running profile: containers, native activity, events, token usage, board entries and PRs |
 | `pbench_docker_sudo.sh` | Evaluator Docker shim for memory/network settings and appended pytest options |
 | `pbench_reboot_guard.sh` | Stops labeled orphan stacks after reboot while retaining their data |
 | `render_check.sh` | Diffs rendered prompts, profiles and Compose files against a base revision (default `upstream/main`, then `origin/main`); exits 3 on differences |
@@ -73,6 +75,29 @@ tool budgets remain effective. Copilot and Pi keep their native Responses
 tool-output handling; Claude uses the Messages tool-result guard.
 The shared MCP allowlist is in
 [`agent/config/mcp_allowed_tools.json`](../agent/config/mcp_allowed_tools.json).
+
+The proxy accounts token usage per agent. Each team worker sends
+`local-proxy-<agent>` as its proxy key, which labels requests for metering and is
+not a credential; the proxy is reachable only on the private network and
+replaces the key with the upstream credential. Requests with any other key are
+counted as `unlabelled`. Usage comes from the buffered response's `usage` fields
+(Responses, Chat Completions and Anthropic Messages, as JSON or SSE). Responses
+and Chat Completions include cached tokens in `input_tokens`; Messages keep cache
+reads and writes in `cached_input_tokens` and `cache_creation_input_tokens`.
+Team runs append one record per model request, without prompt content, to
+`$DATA_ROOT/<profile>/usage/usage.jsonl`, and the proxy serves current totals at
+`GET /usage` on port 4180. Accounting failures never block forwarding.
+
+While a team runs, summarize it with:
+
+```bash
+python3 scripts/team_status.py "$PROFILE"         # table
+python3 scripts/team_status.py --json "$PROFILE"  # machine-readable
+```
+
+It reads the profile file and queries the containers through `sudo -n docker`
+(set `DOCKER` to override), without changing anything. Idle time comes from the
+same native journals the watchdog scans.
 
 Team runs save each container's timestamped stdout/stderr under the task output's
 `service-logs/` before teardown, including the model proxy and all routers.

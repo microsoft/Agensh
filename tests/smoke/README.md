@@ -15,20 +15,27 @@ bash tests/smoke/run_smoke.sh
 | `run_isolated.sh` | Runs `run_smoke.sh` inside a capped Docker-in-Docker daemon with storage under a given directory |
 | `stub_acp.py` | Scripted ACP harness mounted over the Pi adapter in each worker |
 | `cleanroom.Dockerfile` | Minimal stand-in for a ProgramBench cleanroom with an ELF reference and a README |
+| `fake_upstream.py` | Model upstream returning fixed usage, also used by `tests/unit/test_usage_meter.py` |
 
-Each stub worker, on its first prompt, writes a `CLAIM`, pushes
-`smoke/<worker>.txt` on its own branch, opens and merges a PR through the Gitea
-API, confirms the file on `main` and publishes a `PATCH_SUMMARY`. Later prompts
+Each stub worker, on its first prompt, makes two model requests (streamed and
+not) through the egress proxy with the key from Pi's generated config, writes a
+`CLAIM`, pushes `smoke/<worker>.txt` on its own branch, opens and merges a PR
+through the Gitea API, confirms the file on `main` and publishes a
+`PATCH_SUMMARY`. Later prompts
 end the turn immediately. The worker image is a normal Pi worker; Compose mounts
 `stub_acp.py` over `/opt/omcgitea/pi/acp.py` through `COMPOSE_EXTRA_FILES`, so
 the entrypoint, ACP bridge, router, board, Gitea, Mattermost, bootstrap, token
-service and archives are the production ones.
+service, model proxy and archives are the production ones. The proxy forwards
+to `fake_upstream.py`, added as a Compose service on the egress network.
 
 The test passes when:
 
 - every worker's file reaches `main` and every worker's PR is merged,
 - every worker has `CLAIM` and `PATCH_SUMMARY` entries on the board,
 - the router delivered events to every worker,
+- `scripts/team_status.py` reports every worker's containers running, a merged
+  PR, and token usage that matches the fake upstream exactly (120 input and 30
+  output tokens per request), with no metering errors,
 - the runner exits 0 after its budget, the submission contains every
   contribution plus the seeded README, and each worker sealed a shutdown
   archive that the runner verified.

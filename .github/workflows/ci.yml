@@ -20,6 +20,8 @@ jobs:
         with:
           python-version: "3.13"
       - run: python -m unittest discover -s board-service/tests -v
+      - name: Host tool tests (usage metering through the real proxy)
+        run: python -m unittest discover -s tests/unit -v
 
   router:
     runs-on: ubuntu-latest

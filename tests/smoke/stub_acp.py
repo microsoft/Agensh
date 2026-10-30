@@ -37,7 +37,10 @@ def http(method, url, body=None, headers=None, timeout=30):
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             text = response.read().decode()
-            return response.status, json.loads(text) if text else None
+            try:
+                return response.status, json.loads(text) if text else None
+            except ValueError:  # Streamed model replies are SSE text.
+                return response.status, text
     except urllib.error.HTTPError as error:
         return error.code, error.read().decode(errors='replace')
 
@@ -69,10 +72,27 @@ def retry(action, attempts=12, delay=5):
             time.sleep(delay)
 
 
+def model_requests():
+    # Call the model route the way Pi would, with the key Pi's config was given.
+    models = json.loads((SESSIONS.parent / 'models.json').read_text())
+    provider = models['providers']['agensh']
+    for stream in (True, False):
+        status, reply = http('POST', provider['baseUrl'].rstrip('/') + '/responses',
+                             {'model': provider['models'][0]['id'], 'input': 'smoke', 'stream': stream},
+                             {'Authorization': f"Bearer {provider['apiKey']}"}, timeout=60)
+        if status != 200:
+            raise RuntimeError(f'model request failed: {status} {str(reply)[:200]}')
+
+
 def contribute():
     # One fixed change per worker; repeated prompts after success do nothing.
     if DONE.exists():
         return json.loads(DONE.read_text())
+    model_marker = DONE.parent / 'model-requests.done'
+    if not model_marker.exists():
+        model_requests()
+        model_marker.parent.mkdir(parents=True, exist_ok=True)
+        model_marker.write_text('2\n')
     path = f'smoke/{AGENT}.txt'
     work = Path('/work/smoke-checkout')
     branch = f'smoke/{AGENT}'
