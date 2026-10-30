@@ -24,7 +24,9 @@ endif
 SUDO ?= sudo -E
 
 COMPOSE_BASE := docker/_gen_prod.$(PROFILE).yml
-COMPOSE_OVERLAY := -f docker/docker_compose.pbench.yml
+# COMPOSE_EXTRA_FILES (space-separated, absolute paths) layers further overrides,
+# such as the smoke test's stub harness mounts.
+COMPOSE_OVERLAY := -f docker/docker_compose.pbench.yml $(foreach f,$(COMPOSE_EXTRA_FILES),-f $(f))
 
 # Unset these legacy model/identity keys; the launcher scrubs other profile conflicts.
 COMPOSE ?= env -u ANTHROPIC_BASE_URL -u ANTHROPIC_MODEL -u ANTHROPIC_API_KEY \

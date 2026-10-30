@@ -429,14 +429,20 @@ The repository has no tests and no CI of its own.
   group-message backlogs).
 - **Repository CI** on GitHub Actions: unit tests, the router typecheck, shell
   syntax checks and `render_check.sh` against the PR base.
-- **Stub-harness smoke test.** A fifth harness, `stub`, speaks ACP directly and
-  follows a script: read the kickoff, write a board entry, create a file, push
-  a branch, open and merge a PR. The router talks to every harness through ACP
-  over the worker socket, so the stub exercises the whole team stack (router,
-  board, Gitea, Mattermost, CI, export, shutdown archives) without a model and
-  without emulating the Responses and Messages streaming protocols. A run with
-  two stub workers takes a few minutes locally, which makes the high-risk
-  refactors (splitting `pbench_run.sh`, Compose changes) cheap to verify.
+- **Stub-harness smoke test** (`tests/smoke/`). A scripted ACP harness writes a
+  claim, pushes a file, opens and merges a PR and publishes a patch summary.
+  The router talks to every harness through ACP over the worker socket, so the
+  stub exercises the whole team stack (router, board, Gitea, Mattermost,
+  bootstrap, export, shutdown archives) without a model and without emulating
+  the Responses and Messages streaming protocols. Rather than adding a fifth
+  harness kind, which would touch the harness configuration, image checks,
+  Dockerfile and launch scripts, the test uses a normal Pi worker image and
+  mounts the stub over the Pi adapter through `COMPOSE_EXTRA_FILES`. It runs
+  the real `scripts/pbench_run.sh` against a minimal stand-in cleanroom, so it
+  becomes the regression check when the runner is split. A two-worker run takes
+  about eight minutes, most of it the runner's minimum budget and shutdown.
+  `run_isolated.sh` runs it inside a capped Docker-in-Docker daemon with storage
+  on a chosen disk, for shared hosts.
 - **Real-harness smoke run** for feature PRs: two workers on copilot-api for
   about ten minutes, covering the native harness integration that the stub
   skips.
@@ -498,8 +504,8 @@ Foundations:
 1. **Render-diff harness**: renders prompts, profiles and Compose for every
    harness and 1–16 workers. *(done)*
 2. **Framework tests and repository CI**: board and router unit tests, plus
-   GitHub Actions running them with the typecheck and render check.
-3. **Stub-harness smoke test**.
+   GitHub Actions running them with the typecheck and render check. *(done)*
+3. **Stub-harness smoke test**. *(done)*
 4. **Per-worker proxy credentials, usage metering and `status`**.
 
 Refactor:
