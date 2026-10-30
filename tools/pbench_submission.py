@@ -59,7 +59,8 @@ def _ensure_compile_sh(dest: Path) -> bool:
     roots = {p.lstrip("./").split("/", 1)[0] for p in listing if p.strip()}
     if "compile.sh" in roots or not roots:
         return False
-    with tempfile.TemporaryDirectory(prefix="pbench-compilesh-") as tmp:
+    # Stage beside dest: os.replace cannot move across filesystems (TMPDIR vs out dir).
+    with tempfile.TemporaryDirectory(prefix="pbench-compilesh-", dir=dest.parent) as tmp:
         stage = Path(tmp) / "stage"
         stage.mkdir()
         _run(["tar", "-xzf", str(dest), "-C", str(stage)])
