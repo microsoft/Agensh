@@ -76,6 +76,59 @@ preserve_failure() {
     fi
 }
 
+sessions() {
+    # The ACP session id the router stored for each worker.
+    "${DOCKER[@]}" exec "$(container mysql)" mysql -N -B -uroot -p"$(profile_value MYSQL_ROOT_PASSWORD)" -D omcgitea \
+        -e "SELECT agent, v FROM agent_kv WHERE k LIKE 'acp_session_id:%' ORDER BY agent" 2>/dev/null
+}
+
+project_command() {
+    # Background callers use `exec`, so $! is the driver itself and SIGTERM reaches it.
+    ${PROJECT_EXEC:-} env OUT_DIR="$OUT/run" RUN_ID=smoke COMPOSE_EXTRA_FILES="$OUT/compose_stub.yml" AGENSH_WAKE_STAGGER_S=5 \
+        AGENSH_BRINGUP_SETTLE_S=5 AGENSH_PAUSE_GRACE_S=10 AGENSH_TOKEN_CHECK_S=10 DOCKER="sudo -n docker" \
+        python3 -m agensh.project "$@" "$PROJECT_FILE"
+}
+
+check_lifecycle() {
+    # Pause keeps every piece of state; resume continues with fresh sessions and the
+    # resume message; the resumed segment then finalizes and delivers.
+    local runner="$1" before after resumed rc=0 state
+    grep -q 'token budget at 92%' "$OUT/run.log" || die "no token budget warning at 92% in $OUT/run.log"
+    before="$(sessions)"
+    [ -n "$before" ] || die "no stored ACP sessions before the pause"
+    log "pausing the team"
+    project_command pause >/dev/null || die "pause request failed"
+    wait "$runner" || rc=$?
+    [ "$rc" = 0 ] || die "the paused runner exited $rc; see $OUT/run.log"
+    state="$(project_command status | python3 -c 'import json,sys; print(json.load(sys.stdin)["state"])')"
+    [ "$state" = paused ] || die "run state is $state after the pause"
+    [ -z "$("${DOCKER[@]}" ps -q --filter "label=com.docker.compose.project=omcgitea-$PROFILE")" ] \
+        || die "containers still run after the pause"
+    sudo -n test -d "$(profile_value DATA_ROOT)/$PROFILE/gitea" || die "the pause did not keep the team's state"
+    log "paused: containers stopped, state kept"
+
+    (HOURS="$(python3 -c 'print(3 / 60)')" PROJECT_EXEC=exec project_command resume > "$OUT/resume.log" 2>&1) &
+    resumed=$!
+    for _ in $(seq 1 60); do
+        grep -q 'wake complete' "$OUT/resume.log" && break
+        kill -0 "$resumed" 2>/dev/null || die "resume exited early; see $OUT/resume.log"
+        sleep 5
+    done
+    grep -q 'cleared stored ACP sessions' "$OUT/resume.log" || die "resume did not clear the stored sessions"
+    for _ in $(seq 1 12); do
+        after="$(sessions)"
+        [ -n "$after" ] && [ "$(echo "$after" | wc -l)" = "$WORKERS" ] && [ "$after" != "$before" ] && break
+        sleep 5
+    done
+    [ "$after" != "$before" ] && [ "$(echo "$after" | wc -l)" = "$WORKERS" ] || die "workers did not start fresh sessions"
+    log "resumed: every worker has a fresh session"
+    wait "$resumed" || rc=$?
+    [ "$rc" = 0 ] || die "the resumed runner exited $rc; see $OUT/resume.log"
+    state="$(project_command status | python3 -c 'import json,sys; print(json.load(sys.stdin)["state"])')"
+    [ "$state" = finalized ] || die "run state is $state after the resumed segment"
+    log "the resumed segment finalized"
+}
+
 smoke_env() {
     # The egress proxy forwards to tests/smoke/fake_upstream.py, which reports fixed usage.
     env LLM_UPSTREAM=http://fake-upstream:8080 LLM_UPSTREAM_TOKEN=smoke-unused \
@@ -108,6 +161,9 @@ repo = "$UPSTREAM"
 pr = ["python3 -m unittest -q"]
 [team]
 workers = $WORKERS
+[budget]
+# The stubs make four requests of 150 tokens: 92% of this, enough for the warning.
+max_model_tokens = 650
 [environment]
 base_image = "$BASE_IMAGE"
 EOF
@@ -379,8 +435,8 @@ if missing or not {'widget.py', 'test_widget.py'} <= files:
 if delivery['commits'] < workers:
     sys.exit(f'expected at least {workers} new commits, got {delivery["commits"]}')
 if not interrupted:
-    # The final sync merged the upstream commit pushed during the run.
-    if 'upstream_note.txt' not in files or delivery.get('sync') != 'merged':
+    # The upstream commit pushed during the run arrived through a sync (on resume or final).
+    if 'upstream_note.txt' not in files or delivery.get('sync') not in ('merged', 'up-to-date'):
         sys.exit(f'the final upstream sync is missing: sync={delivery.get("sync")}')
     acceptance = json.loads((task_out / 'acceptance.json').read_text())
     if not acceptance['all_passed'] or acceptance['head'] != delivery['head']:
@@ -408,9 +464,7 @@ main() {
             AGENSH_WAKE_STAGGER_S=5 AGENSH_BRINGUP_SETTLE_S=5 \
             bash scripts/team_run.sh > "$OUT/run.log" 2>&1 &
     else
-        env HOURS="$hours" OUT_DIR="$OUT/run" RUN_ID=smoke COMPOSE_EXTRA_FILES="$OUT/compose_stub.yml" \
-            AGENSH_WAKE_STAGGER_S=5 AGENSH_BRINGUP_SETTLE_S=5 DOCKER="sudo -n docker" \
-            python3 -m agensh.project run "$PROJECT_FILE" > "$OUT/run.log" 2>&1 &
+        (HOURS="$hours" PROJECT_EXEC=exec project_command run > "$OUT/run.log" 2>&1) &
     fi
     local runner=$!
 
@@ -426,7 +480,9 @@ main() {
     check_live_state
 
     local rc=0
-    if [ "$INTERRUPT" = 1 ]; then
+    if [ "$PACK" = software-project ] && [ "$INTERRUPT" != 1 ]; then
+        check_lifecycle "$runner"
+    elif [ "$INTERRUPT" = 1 ]; then
         # The failure path must still export, archive and verify before stopping.
         log "interrupting the runner (SIGTERM) to exercise its teardown"
         kill -TERM "$runner"

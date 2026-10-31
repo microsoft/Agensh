@@ -112,8 +112,9 @@ def free_port():
         return sock.getsockname()[1]
 
 
-class ProxyMeteringTest(unittest.TestCase):
-    """Run the real proxy against the fake upstream and check per-agent totals."""
+class ProxyBase(unittest.TestCase):
+    """The real proxy in front of the fake upstream."""
+    EXTRA_ENV = {}
 
     @classmethod
     def setUpClass(cls):
@@ -124,7 +125,7 @@ class ProxyMeteringTest(unittest.TestCase):
         cls.port = free_port()
         env = dict(os.environ, UPSTREAM=f'http://127.0.0.1:{cls.upstream.server_address[1]}',
                    LISTEN_HOST='127.0.0.1', LISTEN_PORT=str(cls.port), UPSTREAM_USAGE_LOG=cls.log,
-                   UPSTREAM_AUTH_TOKEN='upstream-secret', UPSTREAM_RETRY_ATTEMPTS='1')
+                   UPSTREAM_AUTH_TOKEN='upstream-secret', UPSTREAM_RETRY_ATTEMPTS='1', **cls.EXTRA_ENV)
         cls.proxy = subprocess.Popen([sys.executable, str(ROOT / 'scripts' / 'strip_metadata_proxy.py')],
                                      env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         for _ in range(100):
@@ -153,6 +154,11 @@ class ProxyMeteringTest(unittest.TestCase):
         except urllib.error.HTTPError as error:
             return error.code, error.read()
 
+
+
+class ProxyMeteringTest(ProxyBase):
+    """Run the real proxy against the fake upstream and check per-agent totals."""
+
     def test_requests_are_metered_per_agent(self):
         worker1 = {'Authorization': 'Bearer local-proxy-org-worker1'}
         worker2 = {'x-api-key': 'local-proxy-org-worker2'}
@@ -178,6 +184,22 @@ class ProxyMeteringTest(unittest.TestCase):
         self.assertEqual(len(records), 5)
         self.assertTrue(all('upstream-secret' not in json.dumps(r) for r in records))
         self.assertEqual({r['model'] for r in records}, {'fake'})
+
+
+
+class TokenBudgetTest(ProxyBase):
+    # Each fake Responses reply reports 120 input and 30 output tokens.
+    EXTRA_ENV = {'UPSTREAM_MAX_MODEL_TOKENS': '300'}
+
+    def test_requests_stop_at_the_budget(self):
+        worker = {'Authorization': 'Bearer local-proxy-org-worker1'}
+        self.assertEqual(self.post('/v1/responses', worker, False)[0], 200)
+        self.assertEqual(self.post('/v1/responses', worker, False)[0], 200)
+        status, body = self.post('/v1/responses', worker, False)
+        self.assertEqual(status, 429)
+        self.assertEqual(json.loads(body)['error']['type'], 'budget_exhausted')
+        snapshot = json.load(urllib.request.urlopen(f'http://127.0.0.1:{self.port}/usage', timeout=5))
+        self.assertEqual(snapshot['agents']['org-worker1']['requests'], 2)
 
 
 if __name__ == '__main__':

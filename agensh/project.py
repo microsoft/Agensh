@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 # Projects for packs that work on real repositories: load a project file
 # (.agensh/project.toml), generate its team profile, build its worker image and
-# start a run. Subcommands: profile, build, run.
+# run its team: profile, build, run, then pause, resume, finalize and status.
 
 import argparse
 from dataclasses import dataclass, field
+import json
 import os
 from pathlib import Path
 import re
@@ -52,6 +53,7 @@ class Project:
     base_image: str
     network: str = ''
     allow_domains: tuple = ()
+    max_model_tokens: int = 0
     protected_paths: tuple = ()
     ci_timeout_minutes: int = 15
     extra: dict = field(default_factory=dict)
@@ -138,7 +140,10 @@ def load_project(path):
     if not isinstance(workers, int) or isinstance(workers, bool) or not 1 <= workers <= 128:
         raise ProjectError('[team] workers must be an integer from 1 to 128')
     budget = data.get('budget', {})
-    _known(budget, ('hours',), '[budget]')
+    _known(budget, ('hours', 'max_model_tokens'), '[budget]')
+    max_tokens = budget.get('max_model_tokens', 0)
+    if isinstance(max_tokens, bool) or not isinstance(max_tokens, int) or max_tokens < 0:
+        raise ProjectError('[budget] max_model_tokens must be a non-negative integer (0: no limit)')
     hours = budget.get('hours', 2)
     if isinstance(hours, bool) or not isinstance(hours, (int, float)) or hours <= 0:
         raise ProjectError('[budget] hours must be a positive number')
@@ -158,7 +163,7 @@ def load_project(path):
                    acceptance_pr=_commands(acceptance.get('pr', []), '[acceptance] pr'),
                    acceptance_main=_commands(acceptance.get('main', acceptance.get('pr', [])), '[acceptance] main'),
                    workers=workers, hours=float(hours), base_image=base_image, network=network,
-                   allow_domains=tuple(d.lower() for d in domains),
+                   allow_domains=tuple(d.lower() for d in domains), max_model_tokens=max_tokens,
                    protected_paths=protected, ci_timeout_minutes=timeout)
 
 
@@ -246,6 +251,8 @@ def write_profile(project, args, env_dir=ROOT):
         keys.append(('COPILOT_PROVIDER_TYPE', 'openai'))
     if project.network:
         keys.append(('AGENSH_NETWORK', project.network))
+    if project.max_model_tokens:
+        keys.append(('AGENSH_MAX_MODEL_TOKENS', project.max_model_tokens))
     pack = load_pack(project.pack)
     if pack.ci_gate:
         paths = dict.fromkeys(pack.protected_paths + project.protected_paths)
@@ -280,15 +287,60 @@ def build_image(project, args):
     return image
 
 
+def out_dir():
+    return Path(os.environ.get('OUT_DIR') or ROOT / 'out/projects')
+
+
+def run_state(project):
+    path = out_dir() / project.name / 'run_state.json'
+    return json.loads(path.read_text()) if path.is_file() else {}
+
+
+def driver_alive(state):
+    pid = state.get('pid')
+    if state.get('state') != 'running' or not pid:
+        return False
+    try:
+        os.kill(pid, 0)
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def start_driver(project, mode):
+    env = dict(os.environ, TASK=project.name, PROFILE=project.profile, OUT_DIR=str(out_dir()), AGENSH_MODE=mode,
+               HOURS=os.environ.get('HOURS') or f'{project.hours:g}')
+    os.execvpe('bash', ['bash', str(ROOT / 'scripts/team_run.sh')], env)
+
+
+def control(project, command):
+    # pause and finalize reach a running driver through its control file.
+    state = run_state(project)
+    if driver_alive(state):
+        (out_dir() / project.name / 'control').write_text(command + '\n')
+        print(f'{command} requested; the driver acts within a few seconds (see run_state.json)')
+        return
+    if command == 'finalize' and state.get('state') == 'paused':
+        start_driver(project, 'finalize')
+    raise ProjectError(f'{project.name} is {state.get("state") or "not started"}; {command} needs a running driver'
+                       + (' or a paused run' if command == 'finalize' else ''))
+
+
 def main():
     parser = argparse.ArgumentParser(description='Generate profiles, build images and run project teams.')
     commands = parser.add_subparsers(dest='command', required=True)
     for name, text in (('profile', 'write the .env.<pack>-<name> profile'),
                        ('build', 'build the worker image for the project'),
-                       ('run', 'run one team for the project with scripts/team_run.sh')):
+                       ('run', 'run one team for the project with scripts/team_run.sh'),
+                       ('pause', 'pause a running team, keeping its state for resume'),
+                       ('resume', 'continue a paused team with fresh sessions'),
+                       ('finalize', 'deliver a running or paused team: sync upstream, export, evaluate'),
+                       ('status', 'print the run state')):
         command = commands.add_parser(name, help=text)
         command.add_argument('project', type=Path, help='project file, e.g. path/to/repo/.agensh/project.toml')
-        if name != 'run':
+        if name in ('profile', 'build'):
             command.add_argument('--agent-harness')
             command.add_argument('--harness-version')
             command.add_argument('--harness-config', type=Path)
@@ -303,10 +355,20 @@ def main():
             print(write_profile(project, args, args.env_dir))
         elif args.command == 'build':
             print(build_image(project, args))
+        elif args.command == 'run':
+            start_driver(project, 'run')
+        elif args.command == 'resume':
+            state = run_state(project)
+            if state.get('state') != 'paused':
+                raise ProjectError(f'{project.name} is {state.get("state") or "not started"}; resume needs a paused run')
+            start_driver(project, 'resume')
+        elif args.command in ('pause', 'finalize'):
+            control(project, args.command)
         else:
-            env = dict(os.environ, TASK=project.name, PROFILE=project.profile,
-                       HOURS=os.environ.get('HOURS') or f'{project.hours:g}')
-            os.execvpe('bash', ['bash', str(ROOT / 'scripts/team_run.sh')], env)
+            state = run_state(project)
+            if state and state.get('state') == 'running' and not driver_alive(state):
+                state['state'] = 'running (driver not alive)'
+            print(json.dumps(state or {'state': 'not started'}, indent=2))
     except (ProjectError, PackError, ValueError) as error:
         sys.exit(f'agensh.project: {error}')
 

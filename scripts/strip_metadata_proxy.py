@@ -27,6 +27,9 @@ AGENT_HARNESS = os.environ.get('UPSTREAM_AGENT_HARNESS', '')
 RESPONSE_VERBOSITY = os.environ.get('UPSTREAM_RESPONSE_VERBOSITY', '')
 REQUEST_TIMEOUT_SECONDS = float(os.environ.get('UPSTREAM_REQUEST_TIMEOUT_SECONDS', '600'))
 LEDGER = UsageLedger(os.environ.get('UPSTREAM_USAGE_LOG', '').strip() or None)
+# Team token budget (input + output); 0 means unlimited. At the limit model requests
+# are refused and the team driver pauses the run.
+MAX_MODEL_TOKENS = int(os.environ.get('UPSTREAM_MAX_MODEL_TOKENS', '0') or 0)
 HOP_BY_HOP = {"connection", "keep-alive", "proxy-connection", "te", "trailer",
               "transfer-encoding", "upgrade", "content-length"}
 
@@ -246,6 +249,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
         agent = agent_identity({k.lower(): v for k, v in self.headers.items()})
         metered = is_model_path(self.path)
+        if metered and MAX_MODEL_TOKENS > 0 and LEDGER.budget_tokens() >= MAX_MODEL_TOKENS:
+            refusal = json.dumps({'error': {'type': 'budget_exhausted', 'message':
+                                  f'the team token budget ({MAX_MODEL_TOKENS}) is spent; the run pauses'}}).encode()
+            self.send_response(429)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Length', str(len(refusal)))
+            self.end_headers()
+            self.wfile.write(refusal)
+            return
         request_model = None
         te = self.headers.get("Transfer-Encoding", "").lower()
         length = int(self.headers.get("Content-Length", "0"))

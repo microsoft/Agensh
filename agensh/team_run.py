@@ -191,6 +191,14 @@ class TeamRun:
         self.stop = threading.Event()
         self.threads = []
         self.run_t0 = None
+        # run: a new run; resume: continue a paused run; finalize: deliver a paused run.
+        self.mode = os.environ.get('AGENSH_MODE', 'run')
+        if self.mode not in ('run', 'resume', 'finalize'):
+            raise Fatal(f'AGENSH_MODE={self.mode!r} must be run, resume or finalize')
+        if self.mode != 'run' and not pack.resumable:
+            raise Fatal(f'the {pack.name} pack is not resumable; only AGENSH_MODE=run applies')
+        self.stop_reason = None
+        self.watchdog_started = False
 
     @staticmethod
     def fail_usage(message):
@@ -209,15 +217,25 @@ class TeamRun:
         orchestrator = orchestrator or self.values.get('AGENSH_ORCHESTRATOR', '').strip() or 'compose'
         if orchestrator != 'compose':
             raise Fatal(f"AGENSH_ORCHESTRATOR='{orchestrator}'; this release supports single-node Compose only")
-        if self.task_out.exists():
-            raise Fatal(f'{self.task_out} already exists — leftover output from a prior run would be mixed in. '
-                        f'Remove it (`rm -rf {self.task_out}`) before re-running.')
-        self.task_out.mkdir(parents=True)
         data_root = self.values.get('DATA_ROOT') or '../.claude-team-data'
         self.profile_data = Path(data_root) / self.profile
-        if self.profile_data.exists():
-            raise Fatal(f'{self.profile_data} already exists — leftover state from a prior run would leak into this '
-                        f'one (acp_session_id, gitea repo, mattermost history). Run `make clean PROFILE={self.profile}` first.')
+        if self.mode == 'run':
+            if self.task_out.exists():
+                raise Fatal(f'{self.task_out} already exists — leftover output from a prior run would be mixed in. '
+                            f'Remove it (`rm -rf {self.task_out}`) before re-running.')
+            self.task_out.mkdir(parents=True)
+            if self.profile_data.exists():
+                raise Fatal(f'{self.profile_data} already exists — leftover state from a prior run would leak into '
+                            f'this one (acp_session_id, gitea repo, mattermost history). '
+                            f'Run `make clean PROFILE={self.profile}` first.')
+        else:
+            state = self.read_state().get('state')
+            if state != 'paused' or not self.profile_data.is_dir():
+                raise Fatal(f'{self.mode} needs a paused run in {self.task_out} with its state in '
+                            f'{self.profile_data}; the run is {state or "missing"}')
+            compose_env = self.task_out / 'compose.env'
+            if compose_env.is_file():
+                os.environ.update(read_profile(compose_env))
         v = self.values
         self.org = v.get('ORG_NAME', '')
         self.repo = os.environ.get('AGENSH_REPO', 'main')
@@ -397,26 +415,93 @@ class TeamRun:
             time.sleep(retry)
         log(f'started containers for {name}')
 
-    def drive(self):
-        self.push_seed()
-        if self.pack.ci_gate:
-            self.protect_files()
-            self.start_thread(self.main_health)
-        if self.pack.backlog == 'issues':
-            self.start_thread(self.backlog_sync)
-        team_id, channel = self.mm.ensure_task_channel([f'{self.org}-worker{i}' for i in range(1, self.workers + 1)])
+    def render_brief(self, team_id, channel):
         # The prepare hook may add project variables (goal, checks) for the brief.
         extra = {}
         brief_vars = self.task_out / 'brief_vars.json'
         if brief_vars.is_file():
             extra = {k: str(v) for k, v in json.loads(brief_vars.read_text()).items()
                      if re.fullmatch(r'[A-Z][A-Z0-9_]*', k)}
-        brief = render_prompt(self.pack.task_brief, **extra, TASK=self.task, REPO=self.repo,
-                              MM_TEAM_ID=team_id or '', TASK_CHANNEL_ID=channel or '')
+        return render_prompt(self.pack.task_brief, **extra, TASK=self.task, REPO=self.repo,
+                             MM_TEAM_ID=team_id or '', TASK_CHANNEL_ID=channel or '')
+
+    def start_quality_loops(self):
+        if self.pack.ci_gate:
+            self.start_thread(self.main_health)
+        if self.pack.backlog == 'issues':
+            self.start_thread(self.backlog_sync)
+
+    def drive(self):
+        self.push_seed()
+        if self.pack.ci_gate:
+            self.protect_files()
+        self.start_quality_loops()
+        team_id, channel = self.mm.ensure_task_channel(self.worker_names())
+        brief = self.render_brief(team_id, channel)
         kickoff = render_prompt(ROOT / 'prompts/kickoff.txt', TASK_BRIEF=brief)
         self.open_issue(brief)
+        self.wake(kickoff)
+        if channel:
+            if self.mm.post(channel, kickoff):
+                log(f'task posted to MM channel {self.pack.channel} (record; agents already woken)')
+            else:
+                log('WARN: MM channel post failed')
+        else:
+            log('WARN: no MM channel for the task record (agents were woken by DM)')
 
-        base = env_int('AGENSH_WAKE_STAGGER_S', 30)
+    def resume_drive(self):
+        # Fresh native sessions; workers continue from the repository, issues and board.
+        self.sync('resume')
+        self.fresh_sessions()
+        self.start_quality_loops()
+        team_id, channel = self.mm.ensure_task_channel(self.worker_names())
+        message = render_prompt(ROOT / 'prompts/lifecycle/resume.txt',
+                                TASK_BRIEF=self.render_brief(team_id, channel), STATE_SUMMARY=self.state_summary())
+        self.wake(message)
+
+    def fresh_sessions(self):
+        mysql = next((n for n in self.docker_ps(f'name=omcgitea-{self.profile}-mysql', fmt='{{.Names}}') if n), '')
+        sql = "DELETE FROM agent_kv WHERE k LIKE 'acp_session_id:%';"
+        if not mysql or run([*DOCKER, 'exec', mysql, 'mysql', '-N', '-B', '-uroot',
+                             f'-p{self.values.get("MYSQL_ROOT_PASSWORD", "")}', '-D', 'omcgitea', '-e', sql],
+                            quiet=True).returncode != 0:
+            raise Fatal('could not clear the stored ACP sessions for a fresh resume')
+        log('cleared stored ACP sessions: workers resume with fresh native sessions')
+
+    def state_summary(self):
+        # What a fresh session needs: open work, recent merges, CI and upstream state.
+        lines = []
+        status, issues = self.gitea_api('GET', '/issues?state=open&type=issues&limit=30')
+        if status == 200 and issues:
+            lines.append('Open issues:')
+            for issue in issues:
+                who = ', '.join(a['login'] for a in issue.get('assignees') or []) or 'unassigned'
+                lines.append(f'- #{issue["number"]} {issue["title"]} ({who})')
+        status, pulls = self.gitea_api('GET', '/pulls?state=open&limit=30')
+        if status == 200 and pulls:
+            lines.append('Open PRs:')
+            lines += [f'- #{p["number"]} {p["title"]} by {p["user"]["login"]}' for p in pulls]
+        status, closed = self.gitea_api('GET', '/pulls?state=closed&sort=recentupdate&limit=15')
+        merged = [p for p in closed or [] if p.get('merged')] if status == 200 else []
+        if merged:
+            lines.append('Recently merged:')
+            lines += [f'- #{p["number"]} {p["title"]} by {p["user"]["login"]}' for p in merged[:10]]
+        if self.pack.ci_gate:
+            status, branch = self.gitea_api('GET', '/branches/main')
+            if status == 200:
+                sha = branch['commit']['id']
+                code, combined = self.gitea_api('GET', f'/commits/{sha}/status')
+                state = quality.check_state((combined or {}).get('statuses'), quality.MAIN_CHECK) if code == 200 else None
+                lines.append(f'`main` is at {sha[:12]}; full suite: {state or "not run yet"}.')
+        sync = (json.loads((self.task_out / 'sync.json').read_text()).get('last')
+                if (self.task_out / 'sync.json').is_file() else None)
+        if sync:
+            lines.append(f'Upstream sync on resume: {sync["result"]} at {sync["upstream_sha"][:12]}'
+                         + (f' (issue #{sync["issue"]})' if sync.get('issue') else '') + '.')
+        return '\n'.join(lines) or 'No open issues or PRs.'
+
+    def wake(self, message):
+        base = env_int('AGENSH_WAKE_STAGGER_S', self.pack.wake_stagger)
         fast = env_int('AGENSH_WAKE_FAST_STAGGER_S', 3)
         ramp = env_int('AGENSH_WAKE_RAMP_SUBJ_S', 3600)
         switch_at = ramp // base
@@ -429,6 +514,7 @@ class TeamRun:
         if os.environ.get('AGENSH_WATCHDOG_EARLY', '1') == '1':
             total = schedule.budget_seconds(self.hours or 6)
             self.start_thread(self.watchdog, total)
+            self.watchdog_started = True
             log(f'idle watchdog started BEFORE the ramp ({total}s)')
         woke = 0
         for index in range(1, self.workers + 1):
@@ -439,7 +525,7 @@ class TeamRun:
                 time.sleep(env_int('AGENSH_BRINGUP_SETTLE_S', 20))
             dm = self.mm.dm_channel(name) or self.mm.dm_channel(name)
             if dm:
-                if self.mm.post(dm, kickoff):
+                if self.mm.post(dm, message):
                     woke += 1
                     log(f'woke {name} ({woke}/{self.workers})')
                 else:
@@ -451,13 +537,6 @@ class TeamRun:
                 if remain > 0:
                     time.sleep(remain)
         log(f'wake complete: {woke}/{self.workers} agents')
-        if channel:
-            if self.mm.post(channel, kickoff):
-                log(f'task posted to MM channel {self.pack.channel} (record; agents already woken)')
-            else:
-                log('WARN: MM channel post failed')
-        else:
-            log('WARN: no MM channel for the task record (agents were woken by DM)')
 
     # Background loops.
     def start_thread(self, target, *arguments):
@@ -708,6 +787,141 @@ sys.exit(json.load(urllib.request.urlopen(request, timeout=15)).get('status') !=
                                           'lifted': gate.lifted, 'history': gate.history}, indent=2) + '\n')
             self.stop.wait(interval)
 
+    # Run state and stop conditions (docs/task_pack_design.md, run lifecycle).
+    def read_state(self):
+        path = self.task_out / 'run_state.json'
+        return json.loads(path.read_text()) if path.is_file() else {}
+
+    def write_state(self, state, **details):
+        record = self.read_state()
+        segments = record.setdefault('segments', [])
+        now = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
+        if state == 'running':
+            segments.append({'mode': self.mode, 'started': now})
+        elif segments:
+            segments[-1].update(ended=now, **details)
+        record.update(state=state, pid=os.getpid() if state == 'running' else None)
+        (self.task_out / 'run_state.json').write_text(json.dumps(record, indent=2) + '\n')
+
+    def request_stop(self, reason):
+        if self.stop_reason is None:
+            self.stop_reason = reason
+            log(f'stop requested: {reason}')
+        self.stop.set()
+
+    def control_watch(self):
+        # `python3 -m agensh.project pause|finalize` writes its request here.
+        control = self.task_out / 'control'
+        while not self.stop.wait(5):
+            if control.is_file():
+                request = control.read_text().strip()
+                control.unlink(missing_ok=True)
+                if request in ('pause', 'finalize'):
+                    self.request_stop(request)
+                else:
+                    log(f'WARN: ignoring control request {request!r}')
+
+    def team_tokens(self):
+        proxy = next((n for n in self.docker_ps(f'name=omcgitea-{self.profile}-egress-proxy', fmt='{{.Names}}')
+                      if n), '')
+        if not proxy:
+            return None
+        code, text = output([*DOCKER, 'exec', proxy, 'python3', '-c',
+                             'import sys, urllib.request; sys.stdout.write(urllib.request.urlopen('
+                             '"http://127.0.0.1:4180/usage", timeout=10).read().decode())'])
+        if code != 0:
+            return None
+        agents = json.loads(text).get('agents', {})
+        return sum(a.get('input_tokens', 0) + a.get('output_tokens', 0) for a in agents.values())
+
+    def token_watch(self, limit):
+        # Warn at 90% of the budget; at 100% the proxy refuses requests and the run stops.
+        interval, warned = env_int('AGENSH_TOKEN_CHECK_S', 30), False
+        while not self.stop.wait(interval):
+            used = self.team_tokens()
+            if used is None:
+                continue
+            if used >= limit:
+                log(f'token budget spent: {used} of {limit}')
+                self.request_stop('tokens')
+                return
+            if not warned and used >= 0.9 * limit:
+                warned = True
+                percent = str(100 * used // limit)
+                log(f'token budget at {percent}%: {used} of {limit}; warning every worker')
+                message = render_prompt(ROOT / 'prompts/lifecycle/budget_warning.txt', PERCENT=percent,
+                                        USED=str(used), LIMIT=str(limit))
+                for worker in self.worker_names():
+                    self.direct_message(worker, message)
+
+    def issue_watch(self):
+        while not self.stop.wait(env_int('AGENSH_ISSUE_CHECK_S', 60)):
+            status, issue = self.gitea_api('GET', '/issues/1')
+            if status == 200 and isinstance(issue, dict) and issue.get('state') == 'closed':
+                self.request_stop('issue_closed')
+                return
+
+    def finalize_notice(self, remaining):
+        notice = self.pack.finalize_notice
+        if not self.stop.wait(max(0, remaining - notice)):
+            message = render_prompt(ROOT / 'prompts/lifecycle/before_finalize.txt',
+                                    MINUTES=str(max(1, min(notice, remaining) // 60)))
+            log('telling workers the run is about to finalize')
+            for worker in self.worker_names():
+                self.direct_message(worker, message)
+
+    def start_stop_watchers(self, remaining):
+        self.start_thread(self.control_watch)
+        limit = int(self.values.get('AGENSH_MAX_MODEL_TOKENS', '') or 0)
+        if 'tokens' in self.pack.stop_when and limit > 0:
+            self.start_thread(self.token_watch, limit)
+        if 'issue_closed' in self.pack.stop_when:
+            self.start_thread(self.issue_watch)
+        if self.pack.finalize_notice:
+            self.start_thread(self.finalize_notice, remaining)
+
+    def announce_stop(self, template, grace, **variables):
+        # Workers get the grace period to push and record their work.
+        if grace <= 0:
+            return
+        message = render_prompt(ROOT / f'prompts/lifecycle/{template}', **variables)
+        for worker in self.worker_names():
+            self.direct_message(worker, message)
+        log(f'waiting {grace}s for workers to push and record their work')
+        time.sleep(grace)
+
+    def pause(self, reason):
+        # A spent token budget leaves workers unable to act on a message.
+        grace = 0 if reason == 'tokens' else env_int('AGENSH_PAUSE_GRACE_S', 120)
+        self.announce_stop('before_pause.txt', grace, GRACE=str(grace), REASON='requested')
+        archives_ok = self.quiesce()
+        self.save_service_logs()
+        if not archives_ok:
+            raise Fatal('incomplete shutdown archives; preserving containers and DATA_ROOT for recovery')
+        self.make('down', quiet=True)
+        self.write_state('paused', reason=reason)
+        log(f'paused ({reason}); state kept in {self.profile_data}. Resume with '
+            '`python3 -m agensh.project resume <project file>` (raise [budget] max_model_tokens first if it is spent)')
+
+    def finalize(self, reason, workers_running=True):
+        if workers_running and reason in ('finalize', 'issue_closed'):
+            grace = env_int('AGENSH_PAUSE_GRACE_S', 120)
+            self.announce_stop('before_finalize.txt', grace, MINUTES=str(max(1, grace // 60)))
+        self.sync('final')
+        self.export()
+        if not self.quiesce():
+            self.save_service_logs()
+            raise Fatal('incomplete shutdown archives; preserving containers and DATA_ROOT for recovery')
+        self.save_service_logs()
+        self.make('down', quiet=True)
+        if self.pack.resumable:
+            self.write_state('finalized', reason=reason)
+        if os.environ.get('SKIP_EVAL', '0') == '1':
+            log(f'SKIP_EVAL=1 → deferring programbench eval (submission left at {self.task_out}/submission.tar.gz)')
+            return
+        if not self.run_hook('evaluate'):
+            raise Fatal('evaluate hook failed')
+
     # Upstream sync: the pack's sync hook, before the end and again before export.
     def sync(self, phase):
         if self.pack.hook('sync') is None:
@@ -761,7 +975,11 @@ for b in boards:
 
     def save_service_logs(self):
         # Preserve router/proxy stdout before Compose removes the container records.
-        directory = self.task_out / 'service-logs'
+        # A resumed run keeps each segment's logs: service-logs, service-logs-2, ...
+        directory, segment = self.task_out / 'service-logs', 1
+        while (directory / 'captured-at.txt').is_file():
+            segment += 1
+            directory = self.task_out / f'service-logs-{segment}'
         directory.mkdir(parents=True, exist_ok=True)
         for line in self.docker_ps(self.project(), all_containers=True,
                                    fmt='{{.ID}} {{.Label "com.docker.compose.service"}}'):
@@ -795,47 +1013,57 @@ for b in boards:
             self.make('down', quiet=True)
         else:
             log('ERROR: incomplete shutdown archives; preserving containers and DATA_ROOT for recovery')
+        if self.pack.resumable and self.task_out.is_dir():
+            self.write_state('failed', reason=f'teardown (rc={code})')
 
     def main(self):
-        log(f'TASK={self.task} HOURS={self.hours} OUT_DIR={self.out_dir} PROFILE={self.profile}')
+        log(f'TASK={self.task} HOURS={self.hours} OUT_DIR={self.out_dir} PROFILE={self.profile} MODE={self.mode}')
         self.setup_environment()
+        if self.mode == 'finalize':
+            # Deliver a paused run: services only, no workers.
+            try:
+                self.bring_up()
+            except BaseException:
+                self.make('down', quiet=True)
+                raise
+            self.finalize('finalize', workers_running=False)
+            return
         try:
-            self.prepare()
+            if self.mode == 'run':
+                self.prepare()
             self.bring_up()
-            self.drive()
+            if self.pack.resumable:
+                self.write_state('running')
+            if self.mode == 'run':
+                self.drive()
+            else:
+                self.resume_drive()
             total = schedule.budget_seconds(self.hours)
             elapsed = max(0, int(time.time() - self.run_t0))
             remaining = schedule.remaining_after(total, elapsed)
             log(f'agents working for {self.hours}h ({total}s); {elapsed}s spent waking, sleeping {remaining}s')
-            if self.threads:
+            if self.watchdog_started:
                 log('reusing pre-ramp idle watchdog')
             else:
                 self.start_thread(self.watchdog, remaining)
             self.start_thread(self.reminders, remaining)
             if self.pack.hook('sync'):
                 self.start_thread(self.scheduled_sync, remaining)
+            self.start_stop_watchers(remaining)
             self.stop.wait(remaining)
+            reason = self.stop_reason or 'budget'
             self.stop_background_loops()
-            log('wall-clock budget elapsed; exporting + evaluating')
+            log('wall-clock budget elapsed; exporting + evaluating' if reason == 'budget' else f'stopping: {reason}')
         except BaseException as error:
             if isinstance(error, Fatal):
                 log(f'FATAL: {error}')
             self.teardown(1)
             raise SystemExit(1)
 
-        self.sync('final')
-        self.export()
-        if not self.quiesce():
-            self.save_service_logs()
-            raise Fatal('incomplete shutdown archives; preserving containers and DATA_ROOT for recovery')
-        self.save_service_logs()
-        self.make('down', quiet=True)
-        if os.environ.get('SKIP_EVAL', '0') == '1':
-            log(f'SKIP_EVAL=1 → deferring programbench eval (submission left at {self.task_out}/submission.tar.gz)')
-            return
-        if not self.run_hook('evaluate'):
-            raise Fatal('evaluate hook failed')
-
+        if self.pack.resumable and reason in ('pause', 'tokens'):
+            self.pause(reason)
+        else:
+            self.finalize(reason)
 
 def terminate(signum, _frame):
     raise KeyboardInterrupt(f'signal {signum}')

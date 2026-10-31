@@ -18,6 +18,7 @@ idle_delivery = "prompts/idle_delivery.txt"
 issue_title = "{task}: project goal"
 board_id = "team"
 channel = "team-task"
+wake_stagger = "5s"      # 4-16 workers start within a minute or two
 
 [environment]
 network = "auto"         # open for a public GitHub upstream, allowlist otherwise; a project may choose
@@ -36,3 +37,6 @@ backlog = "issues"       # a CLAIM citing #<n> assigns issue n to its author whi
 
 [lifecycle]
 sync_before_end = "30m"  # sync upstream this long before the end, so conflicts can be resolved; again before export
+resumable = true         # the token budget or `agensh.project pause` pauses; `resume` continues with fresh sessions
+stop_when = ["budget", "tokens", "issue_closed"]
+finalize_notice = "15m"  # tell workers to wrap up this long before a timed finalize

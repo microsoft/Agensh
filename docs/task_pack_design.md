@@ -562,9 +562,15 @@ Features:
      network modes, upstream sync before delivery. Upstream also syncs 30
      minutes before the end, so the team can still resolve a conflict; a
      conflict left at the final sync is reported in the delivery PR.
-10. **Human product owner and resume**: accounts, urgent routing, post-merge
-    review on the delivery PR, progress digest, fresh-session resume with the
-    project-state summary, and the optional planning phase.
+10. **Human product owner and resume**, in two parts:
+    - **10a** *(done)*: `pause`, `resume`, `finalize` and `status` for
+      resumable packs, fresh-session resume with the project-state summary,
+      the token budget (warning at 90%, proxy refusal and pause at 100%),
+      lifecycle messages, stopping when issue #1 closes, and a 5-second wake
+      stagger for software projects.
+    - **10b**: the human product owner (accounts, urgent routing, approval of
+      protected paths, sensitive paths in the delivery PR), the progress
+      digest and the optional planning phase.
 11. **Optional capabilities**: peer review and per-role models.
 
 PRs 1–8 do not change task behavior. 9–11 add features.

@@ -20,7 +20,9 @@ Compose), else `programbench`. Settings come from the environment as before: `TA
 `OUT_DIR`, `SKIP_EVAL`, the `AGENSH_WAKE_*`, `AGENSH_BRINGUP_SETTLE_S`,
 `AGENSH_START_RETRY_S`, `AGENSH_STAGGERED_BRINGUP` and `AGENSH_WATCHDOG_EARLY`
 ramp settings, and the `WORKER_IDLE_*` and `WORKER_CHECK_INTERVAL` watchdog
-settings. Packs with `[acceptance] ci_gate` also run the main-health loop
+settings. `AGENSH_MODE` is `run` (default), or `resume` / `finalize` for a
+paused run of a resumable pack (see [run lifecycle](#run-lifecycle)). Packs with
+`[acceptance] ci_gate` also run the main-health loop
 (`AGENSH_HEALTH_INTERVAL_S`, default 15) described below. On failure or SIGTERM the driver quiesces workers, exports, saves
 service logs and stops the profile only when shutdown archives verify.
 
@@ -76,3 +78,29 @@ With `[coordination] backlog = "issues"`, the driver reads the board every
 driver removes only the assignments it made. Closed issues keep their
 assignees as the record of who did the work. Synchronization is one-way: the
 board stays the source of truth for who is working on what.
+
+## Run lifecycle
+
+A pack with `[lifecycle] resumable = true` keeps its state between run segments.
+A segment ends on the first of its `stop_when` conditions: `budget` (the
+wall-clock `HOURS`), `tokens` (the profile's `AGENSH_MAX_MODEL_TOKENS`, input
+plus output across the team), `issue_closed` (issue #1 closed), or a request
+written to `$AGENSH_TASK_OUT/control` by `python3 -m agensh.project pause` or
+`finalize`.
+
+| Outcome | When | Does |
+|---|---|---|
+| pause | a pause request or the token budget | Tells workers to push and record their work (`AGENSH_PAUSE_GRACE_S`, default 120; none when tokens are spent), seals archives, stops the containers and keeps all data |
+| finalize | the wall clock, issue #1 closed, or a finalize request | Tells workers to wrap up `finalize_notice` before a timed end (or for the grace period otherwise), syncs upstream, exports, stops and evaluates |
+
+At 90% of the token budget every worker gets
+[`prompts/lifecycle/budget_warning.txt`](../prompts/lifecycle/budget_warning.txt);
+at 100% the egress proxy refuses model requests with HTTP 429 and the driver
+pauses. `resume` brings the services back, syncs upstream, clears the stored
+ACP session ids so every worker starts a fresh native session, and wakes each
+worker with [`prompts/lifecycle/resume.txt`](../prompts/lifecycle/resume.txt):
+the task brief plus a state summary of open issues and PRs, recent merges,
+`main`'s CI and the sync result. A crash restart inside a segment still restores
+the stored session, as the router always did. `run_state.json` records each
+segment and the state (`running`, `paused`, `finalized` or `failed`);
+`service-logs-<n>` keeps each later segment's logs.

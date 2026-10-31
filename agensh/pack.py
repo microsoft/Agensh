@@ -9,6 +9,8 @@ import tomllib
 ROOT = Path(__file__).resolve().parents[1]
 DURATION = re.compile(r'^(\d+)([smh])$')
 HOOKS = ('prepare', 'sync', 'export', 'evaluate')
+# Why a run segment ends: the wall-clock budget, the token budget, or issue #1 closed.
+STOP_CONDITIONS = ('budget', 'tokens', 'issue_closed')
 # `auto` is resolved by the pack's prepare hook into AGENSH_RUN_NETWORK (open or allowlist).
 NETWORK_MODES = ('offline', 'open', 'allowlist', 'auto')
 MOUNT_TARGET = re.compile(r'^/[A-Za-z0-9._/-]+$')
@@ -54,6 +56,12 @@ class Pack:
     backlog: str = 'board'
     # The sync hook also runs this long before the end of the budget (and before export).
     sync_before_end: int = 1800
+    # Resumable packs pause (keeping state) on the token budget or a pause request;
+    # others always finalize. finalize_notice warns workers before a timed finalize.
+    resumable: bool = False
+    stop_when: tuple = ('budget',)
+    finalize_notice: int = 0
+    wake_stagger: int = 30
 
     def hook(self, name):
         return self.hooks.get(name)
@@ -112,7 +120,8 @@ def load_pack(name, root=ROOT):
                           'message': inside(reminder['message'], 'reminder message')})
 
     team = data.get('team', {})
-    _known(team, ('issue_title', 'seed_message', 'board_id', 'channel'), '[team]')
+    _known(team, ('issue_title', 'seed_message', 'board_id', 'channel', 'wake_stagger'), '[team]')
+    wake_stagger = parse_duration(team.get('wake_stagger', 30))
     board_id = team.get('board_id', 'team')
     if not re.fullmatch(r'[a-z0-9][a-z0-9-]*', str(board_id)):
         raise PackError(f'invalid board_id {board_id!r}')
@@ -139,8 +148,15 @@ def load_pack(name, root=ROOT):
     if protected_paths and not ci_gate:
         raise PackError('[acceptance] protected_paths needs ci_gate = true')
     lifecycle = data.get('lifecycle', {})
-    _known(lifecycle, ('sync_before_end',), '[lifecycle]')
+    _known(lifecycle, ('sync_before_end', 'resumable', 'stop_when', 'finalize_notice'), '[lifecycle]')
     sync_before_end = parse_duration(lifecycle.get('sync_before_end', '30m'))
+    resumable = lifecycle.get('resumable', False)
+    if not isinstance(resumable, bool):
+        raise PackError('[lifecycle] resumable must be true or false')
+    stop_when = lifecycle.get('stop_when', ['budget'])
+    if not isinstance(stop_when, list) or not set(stop_when) <= set(STOP_CONDITIONS) or 'budget' not in stop_when:
+        raise PackError(f'[lifecycle] stop_when must list some of {", ".join(STOP_CONDITIONS)}, including budget')
+    finalize_notice = parse_duration(lifecycle.get('finalize_notice', 0))
     if 'sync_before_end' in lifecycle and 'sync' not in hooks:
         raise PackError('[lifecycle] sync_before_end needs a sync hook')
     coordination = data.get('coordination', {})
@@ -171,4 +187,5 @@ def load_pack(name, root=ROOT):
         network=network, mounts=tuple(mounts), board_id=board_id,
         task_prompts=task_prompts, import_history=import_history, channel=channel,
         ci_gate=ci_gate, protected_paths=protected_paths, backlog=backlog, sync_before_end=sync_before_end,
+        resumable=resumable, stop_when=tuple(stop_when), finalize_notice=finalize_notice, wake_stagger=wake_stagger,
     )

@@ -90,6 +90,7 @@ class ProjectFileTest(unittest.TestCase):
             PROJECT + '[environment]\nbase_image = "default-cobol"\n': 'unknown default base image',
             PROJECT.replace('[team]', 'protected_paths = ["a;b"]\n[team]'): 'list of path globs',
             PROJECT.replace('[team]', 'timeout_minutes = 0\n[team]'): 'timeout_minutes must be',
+            PROJECT + '[budget]\nmax_model_tokens = -5\n': 'max_model_tokens must be',
         }
         for text, message in cases.items():
             with self.subTest(message=message):
@@ -109,7 +110,8 @@ class ProfileTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             project_file = Path(directory, 'project.toml')
             project_file.write_text(PROJECT.format(upstream='/nowhere').replace(
-                '[team]', 'protected_paths = ["tests/acceptance/**", ".agensh/**"]\ntimeout_minutes = 20\n[team]'))
+                '[team]', 'protected_paths = ["tests/acceptance/**", ".agensh/**"]\ntimeout_minutes = 20\n[team]')
+                + '[budget]\nmax_model_tokens = 5000\n')
             env = {'LLM_UPSTREAM': 'https://gateway.invalid', 'LLM_UPSTREAM_TOKEN': 'unit-test'}
             with unittest.mock.patch.dict(os.environ, env):
                 first = write_profile(load_project(project_file), Args(), directory)
@@ -126,6 +128,7 @@ class ProfileTest(unittest.TestCase):
         self.assertNotIn('PBENCH_CLEANROOM_TAG', values)
         self.assertEqual(values['AGENSH_PROTECTED_FILES'], '.gitea/workflows/**;.agensh/**;tests/acceptance/**')
         self.assertEqual(values['ACT_JOB_TIMEOUT'], '20m')
+        self.assertEqual(values['AGENSH_MAX_MODEL_TOKENS'], '5000')
         for key in ('EDGE_HTTP_PORT', 'AGENSH_SUBNET_DEFAULT', 'GITEA_ADMIN_PASSWORD', 'MYSQL_PASSWORD'):
             self.assertEqual(values[key], second[key], key)
 

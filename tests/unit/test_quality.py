@@ -107,3 +107,30 @@ class PackGateTest(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class LifecycleSettingsTest(unittest.TestCase):
+    def test_packs(self):
+        software, programbench = load_pack('software-project'), load_pack('programbench')
+        self.assertEqual((software.resumable, software.stop_when, software.finalize_notice, software.wake_stagger),
+                         (True, ('budget', 'tokens', 'issue_closed'), 900, 5))
+        self.assertEqual((programbench.resumable, programbench.stop_when, programbench.finalize_notice,
+                          programbench.wake_stagger), (False, ('budget',), 0, 30))
+
+    def test_rejections(self):
+        import tempfile
+        cases = {'[lifecycle]\nresumable = "yes"\n': 'resumable must be',
+                 '[lifecycle]\nstop_when = ["tokens"]\n': 'including budget',
+                 '[lifecycle]\nstop_when = ["budget", "moon"]\n': 'stop_when must list',
+                 '[lifecycle]\nsync_before_end = "10m"\n': 'needs a sync hook'}
+        for body, message in cases.items():
+            with self.subTest(message=message), tempfile.TemporaryDirectory() as directory:
+                pack = Path(directory, 'tasks/demo')
+                (pack / 'prompts').mkdir(parents=True)
+                (pack / 'prompts/x.txt').write_text('x\n')
+                (pack / 'pack.toml').write_text(
+                    'name = "demo"\n[messages]\ntask_brief = "prompts/x.txt"\nidle = "prompts/x.txt"\n'
+                    'idle_delivery = "prompts/x.txt"\n' + body)
+                with self.assertRaises(PackError) as caught:
+                    load_pack('demo', root=directory)
+                self.assertIn(message, str(caught.exception))

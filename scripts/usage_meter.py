@@ -171,6 +171,11 @@ class UsageLedger:
                     print(f'[usage] could not append to {self.path}: {error}', flush=True)
         return entry
 
+    def budget_tokens(self):
+        # The token budget counts input and output tokens across the team.
+        with self.lock:
+            return sum(v['input_tokens'] + v['output_tokens'] for v in self.totals.values())
+
     def snapshot(self):
         with self.lock:
             agents = {name: dict(values) for name, values in self.totals.items()}

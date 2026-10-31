@@ -33,7 +33,8 @@ timeout_minutes = 15                    # per CI job
 workers = 4                             # 1-128
 
 [budget]
-hours = 2
+hours = 2                               # per run segment
+max_model_tokens = 20000000             # team input + output tokens; 0: no limit
 
 [environment]
 base_image = "default-python"           # or an image ref: Debian/Ubuntu with python3
@@ -65,7 +66,23 @@ allocation and passwords. `run` starts [`scripts/team_run.sh`](../../scripts/tea
 with `TASK=<name>`, the profile and `HOURS` from `[budget]` (an exported `HOURS`
 wins). `RUN_ID` names the delivery branch; it defaults to the start time.
 
-## Lifecycle
+## Pause, resume and finalize
+
+```bash
+python3 -m agensh.project pause    path/to/.agensh/project.toml   # keep everything; stop the team
+python3 -m agensh.project resume   path/to/.agensh/project.toml   # fresh sessions, HOURS more
+python3 -m agensh.project finalize path/to/.agensh/project.toml   # sync, deliver, evaluate
+python3 -m agensh.project status   path/to/.agensh/project.toml
+```
+
+A run segment ends when `[budget] hours` elapse (finalize, after a 15-minute
+wrap-up notice), when issue #1 is closed (finalize), or when the token budget is
+spent (pause: raise `max_model_tokens`, rerun `profile`, then `resume`).
+`pause` and `finalize` reach a running driver within seconds; `finalize` also
+delivers a paused run. Outputs go to `out/projects/<name>/` (`OUT_DIR` changes
+it). See the [run lifecycle](../../agensh/README.md#run-lifecycle) for details.
+
+## Lifecycle hooks
 
 | Hook | Does |
 |---|---|
@@ -126,5 +143,5 @@ delivery pull request carries only the team's changes. See the
 
 ## Not yet included
 
-A human product owner and resume follow in the next steps of the
-[task pack design](../../docs/task_pack_design.md).
+A human product owner, the progress digest and the planning phase follow in
+the next step of the [task pack design](../../docs/task_pack_design.md).

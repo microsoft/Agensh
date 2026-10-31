@@ -1,0 +1,9 @@
+The run resumes after a pause. You start with a fresh session: earlier conversations are gone, and what the team did is in the repository, the issues and the board. The task is unchanged:
+
+${TASK_BRIEF}
+
+## State of the project
+
+${STATE_SUMMARY}
+
+Re-read the board and the open issues before you claim anything: earlier claims may be stale.
