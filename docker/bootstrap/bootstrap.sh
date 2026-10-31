@@ -266,10 +266,14 @@ ensure_repo() {
 
 ensure_branch_protection() {
     # Agents integrate through PR merges; direct main pushes are reserved for the admin.
+    # Packs with a CI gate add required status checks. The team driver adds protected
+    # files after the seed push: Gitea 1.22 cannot check them on the push creating main.
     local repo="$1"
-    local body
+    local body checks
+    checks=$(jq -nc --arg c "${AGENSH_REQUIRED_CHECKS:-}" '$c | split(";") | map(select(length > 0))')
     body=$(jq -nc --arg b "main" \
         --arg admin "$GITEA_ADMIN_USER" \
+        --argjson checks "$checks" \
         '{branch_name:$b,
           enable_push:true,
           enable_push_whitelist:true,
@@ -288,8 +292,8 @@ ensure_branch_protection() {
           block_on_official_review_requests:false,
           block_on_outdated_branch:false,
           require_code_owner_review:false,
-          enable_status_check:false,
-          status_check_contexts:[]}')
+          enable_status_check:($checks | length > 0),
+          status_check_contexts:$checks}')
     local code
     code=$(api_token_status GET "/api/v1/repos/${GITEA_ORG}/${repo}/branch_protections/main")
     if [ "$code" = "200" ]; then
@@ -342,11 +346,29 @@ ensure_agent_unwatched() {
     log "Unwatched ${agent} on ${GITEA_ORG}/${repo}"
 }
 
+ensure_labels() {
+    # Labels the team driver reads, such as fix-main for the main-health gate.
+    local repo="$1" label existing
+    existing=$(api_token GET "/api/v1/repos/${GITEA_ORG}/${repo}/labels?limit=50" | jq -r '.[].name' || true)
+    IFS=';' read -r -a wanted <<<"${AGENSH_LABELS:-}"
+    for label in "${wanted[@]}"; do
+        [ -n "$label" ] || continue
+        if grep -qxF "$label" <<<"$existing"; then
+            log "Label ${label} exists on ${GITEA_ORG}/${repo}"
+            continue
+        fi
+        api_token POST "/api/v1/repos/${GITEA_ORG}/${repo}/labels" \
+            "$(jq -nc --arg n "$label" '{name:$n, color:"#d93f0b", description:"Fixes a failing main; may merge while main is red"}')" >/dev/null
+        log "Label ${label} created on ${GITEA_ORG}/${repo}"
+    done
+}
+
 for repo in "${REPO_LIST[@]}"; do
     ensure_repo "$repo"
     # The CODEOWNERS commit would otherwise become part of an imported project's history.
     if [ "${BOOTSTRAP_CODEOWNERS:-true}" = true ]; then ensure_codeowners "$repo"; fi
     ensure_branch_protection "$repo"
+    ensure_labels "$repo"
     for agent in "${AGENT_LIST[@]}"; do
         ensure_agent_unwatched "$repo" "$agent"
     done

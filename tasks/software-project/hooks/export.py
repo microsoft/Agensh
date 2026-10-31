@@ -14,13 +14,26 @@ import tempfile
 from common import context, git, git_url, log, read_json, write_json
 
 GH_CREDENTIAL = ['-c', 'credential.helper=', '-c', 'credential.helper=!gh auth git-credential']
+IDENTITY = ['-c', 'user.name=Agensh', '-c', 'user.email=agensh@localhost']
+WORKFLOW_COMMITS = '^(Add|Remove) the Agensh team workflow$'
+
+
+def remove_workflow(checkout, path):
+    # The team workflow ran Agensh's CI only; upstream should not receive it.
+    if not path or not (checkout / path).exists():
+        return False
+    git('rm', '--quiet', path, cwd=checkout)
+    git(*IDENTITY, 'commit', '--quiet', '-m', 'Remove the Agensh team workflow', cwd=checkout)
+    return True
 
 
 def summary(checkout, base_sha):
     known = subprocess.run(['git', 'cat-file', '-e', f'{base_sha}^{{commit}}'], cwd=checkout).returncode == 0
     if not known:
         return None, ''
-    commits = int(git('rev-list', '--count', f'{base_sha}..HEAD', cwd=checkout, capture=True))
+    # The team's commits, without the workflow bookkeeping that cancels out.
+    commits = int(git('rev-list', '--count', '--invert-grep', '-E', f'--grep={WORKFLOW_COMMITS}',
+                      f'{base_sha}..HEAD', cwd=checkout, capture=True))
     stat = git('diff', '--stat', f'{base_sha}..HEAD', cwd=checkout, capture=True)
     return commits, stat
 
@@ -42,10 +55,13 @@ def main():
     checkout = task_out / '_deliver'
     shutil.rmtree(checkout, ignore_errors=True)
     git('clone', '--quiet', '--branch', 'main', os.environ['AGENSH_GITEA_URL'], str(checkout))
+    team_head = git('rev-parse', 'HEAD', cwd=checkout, capture=True)
+    remove_workflow(checkout, prepare.get('workflow'))
     head = git('rev-parse', 'HEAD', cwd=checkout, capture=True)
     commits, stat = summary(checkout, prepare['base_sha'])
     run_id = prepare['run_id']
-    delivery = {'head': head, 'base_sha': prepare['base_sha'], 'commits': commits, 'run_id': run_id}
+    delivery = {'head': head, 'team_head': team_head, 'base_sha': prepare['base_sha'], 'commits': commits,
+                'run_id': run_id}
     if os.environ.get('AGENSH_DELIVERY', 'on') == 'off':
         delivery['mode'] = 'local (AGENSH_DELIVERY=off)'
     elif project.upstream:

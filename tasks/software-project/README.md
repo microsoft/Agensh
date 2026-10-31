@@ -26,6 +26,8 @@ delivery_branch = "agensh/{run_id}"     # must contain {run_id}
 [acceptance]
 pr = ["python3 -m unittest -q"]         # quick checks before each merge
 main = ["python3 -m unittest"]          # full suite on main; defaults to pr
+protected_paths = ["tests/acceptance/**"]   # added to the pack's protected paths
+timeout_minutes = 15                    # per CI job
 
 [team]
 workers = 4                             # 1-128
@@ -83,9 +85,21 @@ networking, fetched content can carry prompt injection and workers can read the
 whole repository, so use `network = "offline"` for private code until the
 allowlist mode is available, and review every delivered pull request.
 
+## Merge gate
+
+PRs merge only after their checks pass. The prepare hook commits
+`.gitea/workflows/agensh.yml`, generated from `[acceptance]`: PRs run `pr` as
+the required `agensh / pr` check in the worker image, and every push to `main`
+runs `main`. When `main` fails, the author of the breaking merge is alerted and
+only `fix-main` PRs can merge until it passes; after 60 minutes the restriction
+lifts and the run log records a notice. `.gitea/workflows/**`, `.agensh/**` and
+the project's `protected_paths` are Gitea protected files, so no worker PR can
+change the checks that gate its work. Export removes the workflow again, so the
+delivery pull request carries only the team's changes. See the
+[CI merge gate](../../agensh/README.md#ci-merge-gate) for the details.
+
 ## Not yet included
 
-CI as a required merge check, protected acceptance files, the broken-`main`
-alarm, the issue backlog synchronization, the `allowlist` and `auto` network
+The issue backlog synchronization, the `allowlist` and `auto` network
 modes, upstream sync before delivery, a human product owner and resume follow in
 the next steps of the [task pack design](../../docs/task_pack_design.md).

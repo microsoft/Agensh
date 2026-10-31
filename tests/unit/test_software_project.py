@@ -88,6 +88,8 @@ class ProjectFileTest(unittest.TestCase):
             PROJECT + '[budget]\nhours = -1\n': 'hours must be',
             PROJECT.replace('[upstream]', '[upstream]\ndelivery_branch = "agensh"'): 'must contain {run_id}',
             PROJECT + '[environment]\nbase_image = "default-cobol"\n': 'unknown default base image',
+            PROJECT.replace('[team]', 'protected_paths = ["a;b"]\n[team]'): 'list of path globs',
+            PROJECT.replace('[team]', 'timeout_minutes = 0\n[team]'): 'timeout_minutes must be',
         }
         for text, message in cases.items():
             with self.subTest(message=message):
@@ -106,7 +108,8 @@ class ProfileTest(unittest.TestCase):
     def test_profile_keys_and_reuse(self):
         with tempfile.TemporaryDirectory() as directory:
             project_file = Path(directory, 'project.toml')
-            project_file.write_text(PROJECT.format(upstream='/nowhere'))
+            project_file.write_text(PROJECT.format(upstream='/nowhere').replace(
+                '[team]', 'protected_paths = ["tests/acceptance/**", ".agensh/**"]\ntimeout_minutes = 20\n[team]'))
             env = {'LLM_UPSTREAM': 'https://gateway.invalid', 'LLM_UPSTREAM_TOKEN': 'unit-test'}
             with unittest.mock.patch.dict(os.environ, env):
                 first = write_profile(load_project(project_file), Args(), directory)
@@ -121,6 +124,8 @@ class ProfileTest(unittest.TestCase):
         self.assertEqual(values['AGENT_IMAGE'], 'omcgitea-agent-default-python-pi:agensh')
         self.assertTrue(values['AGENSH_SUBNET_DEFAULT'].startswith('10.217.'))
         self.assertNotIn('PBENCH_CLEANROOM_TAG', values)
+        self.assertEqual(values['AGENSH_PROTECTED_FILES'], '.gitea/workflows/**;.agensh/**;tests/acceptance/**')
+        self.assertEqual(values['ACT_JOB_TIMEOUT'], '20m')
         for key in ('EDGE_HTTP_PORT', 'AGENSH_SUBNET_DEFAULT', 'GITEA_ADMIN_PASSWORD', 'MYSQL_PASSWORD'):
             self.assertEqual(values[key], second[key], key)
 
@@ -150,13 +155,19 @@ class HookTest(unittest.TestCase):
         result = self.hook('prepare')
         self.assertEqual(result.returncode, 0, result.stderr)
         clone = Path((self.task_out / '.seed_git').read_text().strip())
-        self.assertEqual(git('rev-parse', 'HEAD', cwd=clone), self.base_sha)
+        # The team workflow is one commit on top of the imported base.
+        self.assertEqual(git('rev-parse', 'HEAD~1', cwd=clone), self.base_sha)
+        self.assertEqual(git('show', '--name-only', '--format=%s', 'HEAD', cwd=clone).splitlines(),
+                         ['Add the Agensh team workflow', '', '.gitea/workflows/agensh.yml'])
+        self.assertIn('python3 -m unittest -q', (clone / '.gitea/workflows/agensh.yml').read_text())
         prompts = self.task_out / 'prompts'
         objective = (prompts / 'objective.txt').read_text()
         self.assertIn('Add a --json flag to the widget CLI.', objective)
         self.assertIn('  - `python3 -m unittest -q`', objective)
         self.assertIn('Use the language, frameworks and tooling the repository already uses.', objective)
         self.assertIn('The network is open', objective)
+        self.assertIn('no PR can change them: `.gitea/workflows/**`, `.agensh/**`.',
+                      (prompts / 'delivery.txt').read_text())
         for name in ('objective', 'focus', 'work_cycle', 'delivery'):
             self.assertNotRegex((prompts / f'{name}.txt').read_text(), r'\$\{[A-Z_]+\}', name)
         self.assertEqual((self.task_out / 'compose.env').read_text(), f'AGENSH_TASK_PROMPTS={prompts}\n')
@@ -186,7 +197,11 @@ class HookTest(unittest.TestCase):
         delivery = json.loads((self.task_out / 'delivery.json').read_text())
         self.assertEqual((delivery['mode'], delivery['branch'], delivery['commits']), ('branch', 'agensh/unit', 1))
         log = git('log', '--format=%s', 'agensh/unit', cwd=self.upstream).splitlines()
-        self.assertEqual(log, ['Add --json flag', 'Initial widget'])
+        self.assertEqual(log, ['Remove the Agensh team workflow', 'Add --json flag', 'Add the Agensh team workflow',
+                               'Initial widget'])
+        # Upstream receives the team's change without the workflow.
+        self.assertEqual(git('diff', '--name-only', self.base_sha, 'agensh/unit', cwd=self.upstream), 'json_flag.py')
+        self.assertNotEqual(delivery['team_head'], delivery['head'])
 
     def test_export_without_upstream_writes_bundle_and_can_stay_local(self):
         self.project_file.write_text(PROJECT.replace('repo = "{upstream}"\n', '') + '[workspace]\nseed = "empty"\n')
@@ -214,6 +229,8 @@ class RenderingTest(unittest.TestCase):
         self.assertIn('BOOTSTRAP_CODEOWNERS: "false"', text)
         self.assertIn('BOARD_IDS: "team"', text)
         self.assertIn('TASK_CHANNEL: "team-task"', text)
+        self.assertIn('AGENSH_REQUIRED_CHECKS: "agensh / pr (pull_request);agensh/main-health"', text)
+        self.assertIn('ACT_JOB_TIMEOUT: "${ACT_JOB_TIMEOUT:-15m}"', text)
         self.assertNotIn('/opt/pbench/executable', text)
 
         with tempfile.TemporaryDirectory() as directory:

@@ -1,0 +1,1 @@
+`main` has failed its full suite for ${MINUTES} minutes, since ${SHA} (${CHANGE}). The fix-main restriction is lifted so the team is not stalled: every PR can merge again once its own checks pass. Fixing `main` stays the first priority; do not build on the failing tests.

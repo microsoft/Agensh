@@ -23,7 +23,7 @@ import time
 import urllib.error
 import urllib.request
 
-from agensh import schedule
+from agensh import quality, schedule
 from agensh.pack import PackError, load_pack
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -359,18 +359,27 @@ class TeamRun:
                 log('WARN: seed push failed (repo may already be seeded)')
                 return
 
-    def open_issue(self, brief):
-        log('opening task issue (no assignee; peers self-select)')
+    def gitea_api(self, method, path, body=None):
+        # Admin calls on the team repository; returns (HTTP status, decoded reply or None).
         credentials = base64.b64encode(f'{self.gitea_user}:{self.gitea_password}'.encode()).decode()
         request = urllib.request.Request(
-            f'http://localhost:{self.edge_port}/api/v1/repos/{self.org}/{self.repo}/issues', method='POST',
-            data=json.dumps({'title': self.pack.issue_title.format(task=self.task), 'body': brief}).encode(),
+            f'http://localhost:{self.edge_port}/api/v1/repos/{self.org}/{self.repo}{path}', method=method,
+            data=None if body is None else json.dumps(body).encode(),
             headers={'Content-Type': 'application/json', 'Authorization': f'Basic {credentials}'})
         try:
-            with urllib.request.urlopen(request, timeout=30):
-                log('task issue opened')
+            with urllib.request.urlopen(request, timeout=30) as response:
+                text = response.read().decode()
+                return response.status, (json.loads(text) if text else None)
+        except urllib.error.HTTPError as error:
+            return error.code, None
         except (OSError, ValueError):
-            log('WARN: could not open task issue')
+            return 0, None
+
+    def open_issue(self, brief):
+        log('opening task issue (no assignee; peers self-select)')
+        status, _ = self.gitea_api('POST', '/issues', {'title': self.pack.issue_title.format(task=self.task),
+                                                       'body': brief})
+        log('task issue opened' if 200 <= status < 300 else 'WARN: could not open task issue')
 
     def start_agent_containers(self, index, name):
         attempt = 1
@@ -390,6 +399,9 @@ class TeamRun:
 
     def drive(self):
         self.push_seed()
+        if self.pack.ci_gate:
+            self.protect_files()
+            self.start_thread(self.main_health)
         team_id, channel = self.mm.ensure_task_channel([f'{self.org}-worker{i}' for i in range(1, self.workers + 1)])
         # The prepare hook may add project variables (goal, checks) for the brief.
         extra = {}
@@ -537,6 +549,117 @@ class TeamRun:
             if not self.mm.post(self.mm.channel_id, render_prompt(reminder['message'])):
                 log(f'WARN: {label} reminder failed')
             log(f'posted {label} reminder')
+
+    # Main-health gate: while main fails its full suite, only fix-main PRs may merge.
+    def worker_names(self):
+        return [f'{self.org}-worker{i}' for i in range(1, self.workers + 1)]
+
+    def protect_files(self):
+        # Only the administrator may change these; set once main exists, because Gitea
+        # 1.22 cannot check protected files on the push that creates the branch.
+        patterns = self.values.get('AGENSH_PROTECTED_FILES', '').strip() or ';'.join(self.pack.protected_paths)
+        if not patterns:
+            return
+        status, _ = self.gitea_api('PATCH', '/branch_protections/main', {'protected_file_patterns': patterns})
+        if status != 200:
+            raise Fatal(f'could not protect {patterns} on main (HTTP {status})')
+        log(f'protected files on main: {patterns}')
+
+    def board_note(self, kind, content):
+        board = next((n for n in self.docker_ps(f'name=omcgitea-{self.profile}-board-service',
+                                                fmt='{{.Names}}') if n), '')
+        script = '''import json, sys, urllib.request
+body = json.dumps({'thread_id': 'harness', 'type': sys.argv[2], 'content': sys.argv[3]}).encode()
+request = urllib.request.Request(f'http://127.0.0.1:8660/board/{sys.argv[1]}/note', data=body,
+                                 method='POST', headers={'Content-Type': 'application/json'})
+sys.exit(json.load(urllib.request.urlopen(request, timeout=15)).get('status') != 'admitted')
+'''
+        if not board or run([*DOCKER, 'exec', board, 'python3', '-c', script, self.pack.board_id, kind,
+                             content[:100]], quiet=True).returncode != 0:
+            log(f'WARN: could not post the {kind} board entry')
+
+    def direct_message(self, worker, message):
+        dm = self.mm.dm_channel(worker)
+        if not dm or not self.mm.post(dm, message):
+            log(f'WARN: main-health DM to {worker} failed')
+
+    def breaking_change(self, sha):
+        # The merged PR whose merge commit is the failing head, if a PR made it.
+        for page in range(1, 4):
+            status, pulls = self.gitea_api('GET', f'/pulls?state=closed&sort=recentupdate&limit=50&page={page}')
+            if status != 200 or not pulls:
+                break
+            for pull in pulls:
+                if pull.get('merged') and pull.get('merge_commit_sha') == sha:
+                    author = (pull.get('merged_by') or pull.get('user') or {}).get('login', '')
+                    return f'PR #{pull["number"]}', author
+        return 'a direct push', ''
+
+    def health_action(self, action, gate, sha, now):
+        minutes = int((now - gate.red_since) / 60) if gate.red else 0
+        variables = {'SHA': sha[:12], 'CHANGE': self.health_change, 'MINUTES': str(minutes)}
+        prompts = ROOT / 'prompts/main_health'
+        if action == 'broken':
+            self.health_change, author = self.breaking_change(sha)
+            variables['CHANGE'] = self.health_change
+            log(f'main-health: main fails at {sha[:12]} after {self.health_change}; only fix-main PRs merge')
+            self.board_note('FAIL', f'main fails its full suite at {sha[:8]} ({self.health_change}); '
+                                    'only fix-main PRs merge')
+            # The author alone is alerted first, so the team does not converge on one failure.
+            recipients = [author] if author in self.worker_names() else self.worker_names()
+            for worker in recipients:
+                self.direct_message(worker, render_prompt(prompts / 'broken.txt', **variables))
+        elif action == 'alert_team':
+            log(f'main-health: main still failing after {minutes}m; alerting every worker')
+            for worker in self.worker_names():
+                self.direct_message(worker, render_prompt(prompts / 'team.txt', **variables))
+        elif action == 'lift':
+            # A human notice: the gate stopped protecting main (see main-health.json).
+            log(f'NOTICE: main has failed for {minutes}m since {gate.broken_sha[:12]}; fix-main restriction lifted')
+            self.mm.post(self.mm.channel_id, render_prompt(prompts / 'lifted.txt', **variables))
+        elif action == 'recovered':
+            log(f'main-health: main passes again at {sha[:12]}')
+            self.board_note('FACT', f'main passes its full suite again at {sha[:8]}')
+            self.mm.post(self.mm.channel_id, render_prompt(prompts / 'recovered.txt', **variables))
+
+    def health_tick(self, gate, posted):
+        status, branch = self.gitea_api('GET', '/branches/main')
+        if status != 200 or not isinstance(branch, dict):
+            return
+        sha = branch['commit']['id']
+        status, combined = self.gitea_api('GET', f'/commits/{sha}/status')
+        state = quality.check_state((combined or {}).get('statuses'), quality.MAIN_CHECK) if status == 200 else None
+        now = time.time()
+        for action in gate.observe(state, sha, now):
+            self.health_action(action, gate, sha, now)
+        for page in range(1, 6):
+            status, pulls = self.gitea_api('GET', f'/pulls?state=open&limit=50&page={page}')
+            if status != 200 or not pulls:
+                break
+            for pull in pulls:
+                head = pull['head']['sha']
+                wanted = gate.pr_status(pull)
+                if posted.get(head) == wanted:
+                    continue
+                code, _ = self.gitea_api('POST', f'/statuses/{head}', {
+                    'state': wanted[0], 'context': quality.HEALTH_CHECK, 'description': wanted[1]})
+                if 200 <= code < 300:
+                    posted[head] = wanted
+
+    def main_health(self):
+        gate, posted = quality.HealthGate(), {}
+        self.health_change = ''
+        interval = env_int('AGENSH_HEALTH_INTERVAL_S', 15)
+        record = self.task_out / 'main-health.json'
+        log(f'main-health gate: checking main and open PRs every {interval}s')
+        while not self.stop.is_set():
+            try:
+                self.health_tick(gate, posted)
+            except Exception as error:  # A failed check never stops the run.
+                log(f'WARN: main-health check failed: {error}')
+            record.write_text(json.dumps({'red': gate.red, 'broken_sha': gate.broken_sha,
+                                          'lifted': gate.lifted, 'history': gate.history}, indent=2) + '\n')
+            self.stop.wait(interval)
 
     # Shutdown.
     def dump_board_lifecycle(self):

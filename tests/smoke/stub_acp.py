@@ -132,7 +132,8 @@ def contribute():
         if status_after == 200 and pull.get('merged'):
             return
         raise RuntimeError(f'merge PR #{number} failed: {status} {reply}')
-    retry(merge)
+    # Packs with a CI gate refuse the merge until the PR's checks pass.
+    retry(merge, attempts=72)
 
     def on_main():
         status, _ = gitea('GET', f'/repos/{ORG}/{REPO}/contents/{path}?ref=main')

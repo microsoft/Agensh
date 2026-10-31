@@ -15,7 +15,7 @@ import sys
 import tomllib
 
 from agensh import allocate
-from agensh.pack import PackError, load_pack
+from agensh.pack import PackError, load_pack, protected_path_list
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'agent'))
@@ -50,6 +50,8 @@ class Project:
     hours: float
     base_image: str
     network: str = ''
+    protected_paths: tuple = ()
+    ci_timeout_minutes: int = 15
     extra: dict = field(default_factory=dict)
 
     @property
@@ -120,7 +122,14 @@ def load_project(path):
         raise ProjectError('[upstream] delivery_branch must contain {run_id}, so runs never share a branch')
 
     acceptance = data.get('acceptance', {})
-    _known(acceptance, ('pr', 'main'), '[acceptance]')
+    _known(acceptance, ('pr', 'main', 'protected_paths', 'timeout_minutes'), '[acceptance]')
+    try:
+        protected = protected_path_list(acceptance.get('protected_paths', []), '[acceptance] protected_paths')
+    except PackError as error:
+        raise ProjectError(str(error)) from None
+    timeout = acceptance.get('timeout_minutes', 15)
+    if not isinstance(timeout, int) or isinstance(timeout, bool) or not 1 <= timeout <= 180:
+        raise ProjectError('[acceptance] timeout_minutes must be an integer from 1 to 180')
     team = data.get('team', {})
     _known(team, ('workers',), '[team]')
     workers = team.get('workers', 4)
@@ -143,7 +152,8 @@ def load_project(path):
                    base_branch=str(upstream.get('base_branch', 'main')), delivery_branch=delivery,
                    acceptance_pr=_commands(acceptance.get('pr', []), '[acceptance] pr'),
                    acceptance_main=_commands(acceptance.get('main', acceptance.get('pr', [])), '[acceptance] main'),
-                   workers=workers, hours=float(hours), base_image=base_image, network=network)
+                   workers=workers, hours=float(hours), base_image=base_image, network=network,
+                   protected_paths=protected, ci_timeout_minutes=timeout)
 
 
 def git_url(repo):
@@ -230,6 +240,11 @@ def write_profile(project, args, env_dir=ROOT):
         keys.append(('COPILOT_PROVIDER_TYPE', 'openai'))
     if project.network:
         keys.append(('AGENSH_NETWORK', project.network))
+    pack = load_pack(project.pack)
+    if pack.ci_gate:
+        paths = dict.fromkeys(pack.protected_paths + project.protected_paths)
+        keys += [('AGENSH_PROTECTED_FILES', ';'.join(paths)),
+                 ('ACT_JOB_TIMEOUT', f'{project.ci_timeout_minutes}m')]
     for key in ('MINI_ROUTER_IMAGE', 'BOARD_IMAGE', 'BOOTSTRAP_IMAGE', 'SECRET_SERVICE_IMAGE', 'WORKER_CPUS', 'WORKER_MEMORY'):
         if os.environ.get(key):
             keys.append((key, os.environ[key]))

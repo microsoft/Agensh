@@ -10,6 +10,7 @@ Template contents are experiment inputs; keep them fixed when comparing runs.
 |---|---|
 | `agents.txt` | Core worker instructions: identity, shared services, events and the observe/claim/build/verify/merge/publish cycle |
 | `kickoff.txt` | Wraps the task brief for initial agent DMs and the task-channel record |
+| `main_health/` | Messages from the CI merge gate when `main` breaks, stays broken, has the restriction lifted, or recovers (packs with `ci_gate` only) |
 
 `agents.txt` leaves four places for the task pack, each filled from a file in
 the pack's prompt directory:

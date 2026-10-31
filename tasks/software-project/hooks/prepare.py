@@ -9,9 +9,13 @@ import shutil
 import sys
 import time
 
-from common import context, git, git_url, log, write_json
+from common import ROOT, context, git, git_url, log, write_json
+
+sys.path.insert(0, str(ROOT))
+from agensh import quality  # noqa: E402
 
 PLACEHOLDER = '${%s}'
+IDENTITY = ['-c', 'user.name=Agensh', '-c', 'user.email=agensh@localhost']
 
 
 def bullets(commands):
@@ -25,6 +29,24 @@ def render(text, values):
     for key, value in values.items():
         text = text.replace(PLACEHOLDER % key, value)
     return text
+
+
+def add_workflow(clone, project):
+    # The team's CI runs from this commit on; export removes it again before delivery.
+    path = clone / quality.WORKFLOW_PATH
+    if path.exists():
+        raise RuntimeError(f'{quality.WORKFLOW_PATH} already exists upstream; rename it so the team workflow can be added')
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(quality.render_workflow(project.acceptance_pr, project.acceptance_main,
+                                            project.ci_timeout_minutes))
+    git(*IDENTITY, 'add', quality.WORKFLOW_PATH, cwd=clone)
+    git(*IDENTITY, 'commit', '--quiet', '-m', 'Add the Agensh team workflow', cwd=clone)
+    return quality.WORKFLOW_PATH
+
+
+def protected_paths(pack, project):
+    paths = list(dict.fromkeys(pack.protected_paths + project.protected_paths))
+    return ', '.join(f'`{p}`' for p in paths) if paths else '(none)'
 
 
 def main():
@@ -41,11 +63,13 @@ def main():
         clone.mkdir(parents=True)
         git('init', '--quiet', '--initial-branch=main', str(clone))
         (clone / 'README.md').write_text(f'# {project.name}\n\n{project.goal}')
-        identity = ['-c', 'user.name=Agensh', '-c', 'user.email=agensh@localhost']
-        git(*identity, 'add', 'README.md', cwd=clone)
-        git(*identity, 'commit', '--quiet', '-m', f'Start {project.name}', cwd=clone)
+        git(*IDENTITY, 'add', 'README.md', cwd=clone)
+        git(*IDENTITY, 'commit', '--quiet', '-m', f'Start {project.name}', cwd=clone)
         source = 'a new, empty repository'
     base_sha = git('rev-parse', 'HEAD', cwd=clone, capture=True)
+    workflow = None
+    if pack.ci_gate:
+        workflow = add_workflow(clone, project)
     (task_out / '.seed_git').write_text(f'{clone}\n')
 
     network = project.network or pack.network
@@ -60,6 +84,7 @@ def main():
         'NETWORK': ('The network is open: install dependencies with the project\'s own package '
                     'manager, and pin what you add.' if network == 'open' else
                     'There is no internet access: use only the toolchain already installed in the container.'),
+        'PROTECTED_PATHS': protected_paths(pack, project),
     }
     prompts = task_out / 'prompts'
     prompts.mkdir(mode=0o755, exist_ok=True)
@@ -72,7 +97,7 @@ def main():
     write_json(task_out / 'prepare.json', {
         'run_id': os.environ.get('RUN_ID') or time.strftime('%Y%m%dt%H%M%Sz', time.gmtime()),
         'seed': project.seed, 'upstream': project.upstream, 'base_branch': project.base_branch,
-        'base_sha': base_sha, 'network': network,
+        'base_sha': base_sha, 'network': network, 'workflow': workflow,
     })
     log(f'seed ready at {base_sha[:12]}; prompts rendered in {prompts}')
 

@@ -47,9 +47,20 @@ class Pack:
     task_prompts: str = 'pack'
     # The prepare hook supplies a git history that becomes the team's main branch.
     import_history: bool = False
+    # Work merges only after the generated CI workflow passes (agensh/quality.py).
+    ci_gate: bool = False
+    protected_paths: tuple = ()
 
     def hook(self, name):
         return self.hooks.get(name)
+
+
+def protected_path_list(value, where):
+    # Gitea protected-file globs, joined with ';' for branch protection.
+    if not isinstance(value, list) or not all(
+            isinstance(p, str) and p.strip() and not any(c in p for c in ';\n"') for p in value):
+        raise PackError(f'{where} must be a list of path globs without ";" or quotes')
+    return tuple(p.strip() for p in value)
 
 
 def _known(table, allowed, where):
@@ -67,7 +78,8 @@ def load_pack(name, root=ROOT):
         raise PackError(f'{path} not found')
     with path.open('rb') as stream:
         data = tomllib.load(stream)
-    _known(data, ('name', 'description', 'hooks', 'messages', 'team', 'environment', 'workspace'), path.name)
+    _known(data, ('name', 'description', 'hooks', 'messages', 'team', 'environment', 'workspace', 'acceptance'),
+           path.name)
     if data.get('name') != name:
         raise PackError(f'{path} declares name {data.get("name")!r}, expected {name!r}')
 
@@ -113,6 +125,14 @@ def load_pack(name, root=ROOT):
     import_history = workspace.get('import_history', False)
     if not isinstance(import_history, bool):
         raise PackError('[workspace] import_history must be true or false')
+    acceptance = data.get('acceptance', {})
+    _known(acceptance, ('ci_gate', 'protected_paths'), '[acceptance]')
+    ci_gate = acceptance.get('ci_gate', False)
+    if not isinstance(ci_gate, bool):
+        raise PackError('[acceptance] ci_gate must be true or false')
+    protected_paths = protected_path_list(acceptance.get('protected_paths', []), '[acceptance] protected_paths')
+    if protected_paths and not ci_gate:
+        raise PackError('[acceptance] protected_paths needs ci_gate = true')
     network = environment.get('network', 'offline')
     if network not in NETWORK_MODES:
         raise PackError(f'network must be one of {", ".join(NETWORK_MODES)}; got {network!r}')
@@ -135,4 +155,5 @@ def load_pack(name, root=ROOT):
         seed_message=team.get('seed_message', 'Seed workspace ({task})'),
         network=network, mounts=tuple(mounts), board_id=board_id,
         task_prompts=task_prompts, import_history=import_history, channel=channel,
+        ci_gate=ci_gate, protected_paths=protected_paths,
     )

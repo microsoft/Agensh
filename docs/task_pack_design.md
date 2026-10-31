@@ -554,8 +554,10 @@ Features:
      rendering; delivery to a GitHub branch and pull request (or a bundle);
      acceptance as the evaluation; `default-python` base image; `open` network;
      the task channel becomes a pack setting.
-   - **9b**: CI as a required merge check, protected acceptance files, the
-     broken-`main` alarm and `fix-main` gate.
+   - **9b** *(done)*: CI as a required merge check, protected acceptance
+     files, the broken-`main` alarm and `fix-main` gate. Until the human
+     product owner arrives in PR 10, protected paths use Gitea protected files
+     (administrator only), as `human.mode = "none"` describes.
    - **9c**: issue backlog synchronization, `allowlist` and `auto` network
      modes, upstream sync before delivery.
 10. **Human product owner and resume**: accounts, urgent routing, post-merge

@@ -24,3 +24,8 @@ task_prompts = "run"     # the prepare hook renders templates/ for each project
 
 [workspace]
 import_history = true    # the upstream branch's history becomes the team's main
+
+[acceptance]
+ci_gate = true           # PRs merge after the generated workflow passes; see agensh/quality.py
+# The workflow and project file need the administrator; a project file may add paths.
+protected_paths = [".gitea/workflows/**", ".agensh/**"]

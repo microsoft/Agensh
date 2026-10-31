@@ -10,7 +10,6 @@ cd "$ROOT"
 
 PACK="${SMOKE_PACK:-programbench}"
 WORKERS="${SMOKE_WORKERS:-2}"
-MINUTES="${SMOKE_MINUTES:-5}"
 KEEP="${SMOKE_KEEP:-0}"
 INTERRUPT="${SMOKE_INTERRUPT:-0}"
 PORT_BASE="${SMOKE_PORT_BASE:-26000}"
@@ -22,6 +21,7 @@ DOCKER=(sudo -n docker)
 case "$PACK" in
     programbench)
         TASK=jgm__pandoc.5caad90
+        MINUTES="${SMOKE_MINUTES:-5}"
         PROFILE=programbench-pandoc-smoke
         CLEANROOM="$IMAGE_ORG/jgm_1776_pandoc.5caad90:task_cleanroom_v6"
         AGENT_IMAGE=omcgitea-agent-pandoc-pi:smoke
@@ -29,6 +29,8 @@ case "$PACK" in
         ;;
     software-project)
         TASK=smoke-widget
+        # The CI gate checks run a broken main and its fix through Actions.
+        MINUTES="${SMOKE_MINUTES:-10}"
         PROFILE=software-project-smoke-widget
         PROJECT_FILE="$OUT/project/.agensh/project.toml"
         UPSTREAM="$OUT/upstream.git"
@@ -212,7 +214,10 @@ print(f"board entries: {len(entries)}")
 
     check_usage
     check_agents_md
-    [ "$PACK" = software-project ] && check_imported_history
+    if [ "$PACK" = software-project ]; then
+        check_imported_history
+        python3 tests/smoke/check_gate.py "$ENV_FILE" "$OUT/run/$TASK" || die "CI gate check failed"
+    fi
 
     local rows
     rows="$("${DOCKER[@]}" exec "$mysql" mysql -N -B -uroot -p"$(profile_value MYSQL_ROOT_PASSWORD)" \
@@ -252,6 +257,7 @@ check_imported_history() {
     git -C "$check" merge-base --is-ancestor "$base" HEAD || die "team main does not descend from upstream $base"
     [ "$(git -C "$check" rev-list --count "$base")" = 2 ] || die "upstream history was not imported in full"
     [ ! -e "$check/.gitea/CODEOWNERS" ] || die "bootstrap added CODEOWNERS to the imported history"
+    [ -f "$check/.gitea/workflows/agensh.yml" ] || die "the team workflow is not on main"
     log "team main descends from upstream ${base:0:12} with its full history"
     rm -rf "$check"
 }
@@ -318,6 +324,8 @@ if git('merge-base', '--is-ancestor', base, branch).returncode != 0:
     sys.exit(f'{branch} does not descend from the upstream base {base}')
 files = set(git('ls-tree', '-r', '--name-only', branch).stdout.split())
 missing = {f'smoke/{org}-worker{i}.txt' for i in range(1, workers + 1)} - files
+if '.gitea/workflows/agensh.yml' in files:
+    sys.exit(f'{branch} still contains the team workflow')
 if missing or not {'widget.py', 'test_widget.py'} <= files:
     sys.exit(f'{branch} lacks {sorted(missing)} or the upstream files: {sorted(files)}')
 if delivery['commits'] < workers:

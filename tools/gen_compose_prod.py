@@ -9,6 +9,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'agent'))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from harness_config import load_config
+from agensh import quality
 from agensh.pack import load_pack
 
 SETTINGS = load_config()
@@ -256,7 +257,7 @@ __BOOTSTRAP_IMPORT__    volumes:
       ACT_JOB_NETWORK: "${ACT_JOB_NETWORK:-omcgitea-${PROFILE}_default}"
       ACT_CAPACITY: "${ACT_CAPACITY:-2}"
       ACT_JOB_LIMITS: "${ACT_JOB_LIMITS:---memory=8g --memory-swap=8g --cpus=4 --pids-limit=512 --cgroup-parent=agensh.slice}"
-    volumes:
+__ACT_RUNNER_ENV__    volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ${DATA_ROOT:-../.claude-team-data}/${PROFILE}/tokens:/run/omcgitea/tokens:ro
       - ${DATA_ROOT:-../.claude-team-data}/${PROFILE}/act-runner:/data
@@ -438,10 +439,17 @@ def build():
     # Imported histories become main as is: no initial commit and no CODEOWNERS commit.
     bootstrap_import = ('      REPO_AUTO_INIT: "false"\n      BOOTSTRAP_CODEOWNERS: "false"\n'
                         if PACK.import_history else '')
+    runner_env = ''
+    if PACK.ci_gate:
+        # Required checks on main (agensh/quality.py); the driver adds protected files.
+        bootstrap_import += (f'      AGENSH_REQUIRED_CHECKS: "{";".join(quality.REQUIRED_CHECKS)}"\n'
+                             f'      AGENSH_LABELS: "{quality.FIX_LABEL}"\n')
+        runner_env = '      ACT_JOB_TIMEOUT: "${ACT_JOB_TIMEOUT:-15m}"\n'
     out.append(INFRA.replace("{AGENTS_CSV}", agents_csv)
                .replace("{BOARD_MEMBERS}", members)
                .replace("__BOARD_ID__", PACK.board_id)
-               .replace("__BOOTSTRAP_IMPORT__", bootstrap_import))
+               .replace("__BOOTSTRAP_IMPORT__", bootstrap_import)
+               .replace("__ACT_RUNNER_ENV__", runner_env))
     for short in ALL_AGENTS:
         harness_files = ('config.sh',) if AGENT_HARNESS == 'copilot' else ('acp.py', 'config.py')
         harness_mounts = '\n'.join(

@@ -1,0 +1,1 @@
+`main` passes its full suite again at ${SHA}. Every PR can merge once its own checks pass.

@@ -1,0 +1,1 @@
+URGENT: `main` fails its full suite (`agensh / main`) at ${SHA}, the merge of ${CHANGE}. You merged it, so you fix it: find the failure in the Actions log for that commit, then open a PR whose title starts with `[fix-main]` (or label it `fix-main`). Until `main` passes, only fix-main PRs can merge. Tell the team in the channel what you found.

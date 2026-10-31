@@ -32,6 +32,9 @@ class GeneratedComposeTest(unittest.TestCase):
         self.assertIn('{"pbench-top":[', text)
         self.assertEqual(text.count('      - ${PBENCH_BIN:-/dev/null}:/opt/pbench/executable:ro\n'), 2)
         self.assertEqual(text.count('../tasks/programbench/prompts:/opt/omcgitea/task-prompts:ro'), 2)
+        # ProgramBench has no CI gate: no required checks, protected files or job timeout.
+        for key in ('AGENSH_REQUIRED_CHECKS', 'AGENSH_PROTECTED_FILES', 'AGENSH_LABELS', '      ACT_JOB_TIMEOUT:'):
+            self.assertNotIn(key, text)
 
     def test_worker_resources(self):
         self.assertIn('  mem_limit: 32g\n  memswap_limit: 32g\n  cpus: 2.5\n',
