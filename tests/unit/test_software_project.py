@@ -130,8 +130,8 @@ class ProfileTest(unittest.TestCase):
             self.assertEqual(values[key], second[key], key)
 
 
-class HookTest(unittest.TestCase):
-    """Run the prepare and export hooks against local repositories."""
+class HookBase(unittest.TestCase):
+    """Local upstream and team repositories for running the pack's hooks."""
 
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
@@ -151,6 +151,24 @@ class HookTest(unittest.TestCase):
         return subprocess.run([sys.executable, str(ROOT / f'tasks/software-project/hooks/{name}.py')],
                               env=env, capture_output=True, text=True)
 
+
+    def team_main(self):
+        # Stand in for the team's Gitea repository: the imported history plus one merge.
+        clone = Path((self.task_out / '.seed_git').read_text().strip())
+        gitea = Path(self.directory.name, 'gitea.git')
+        git('clone', '-q', '--bare', str(clone), str(gitea))
+        work = Path(self.directory.name, 'team')
+        git('clone', '-q', str(gitea), str(work))
+        (work / 'json_flag.py').write_text('FLAG = "--json"\n')
+        git('add', '.', cwd=work)
+        git('commit', '-qm', 'Add --json flag', cwd=work)
+        git('push', '-q', 'origin', 'HEAD:main', cwd=work)
+        return gitea
+
+
+class HookTest(HookBase):
+    """Run the prepare and export hooks against local repositories."""
+
     def test_prepare_imports_history_and_renders_prompts(self):
         result = self.hook('prepare')
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -165,29 +183,19 @@ class HookTest(unittest.TestCase):
         self.assertIn('Add a --json flag to the widget CLI.', objective)
         self.assertIn('  - `python3 -m unittest -q`', objective)
         self.assertIn('Use the language, frameworks and tooling the repository already uses.', objective)
-        self.assertIn('The network is open', objective)
+        # A local upstream's visibility is unknown, so `auto` keeps it on the allowlist.
+        self.assertIn('The network reaches only package registries', objective)
         self.assertIn('no PR can change them: `.gitea/workflows/**`, `.agensh/**`.',
                       (prompts / 'delivery.txt').read_text())
         for name in ('objective', 'focus', 'work_cycle', 'delivery'):
             self.assertNotRegex((prompts / f'{name}.txt').read_text(), r'\$\{[A-Z_]+\}', name)
-        self.assertEqual((self.task_out / 'compose.env').read_text(), f'AGENSH_TASK_PROMPTS={prompts}\n')
+        self.assertEqual((self.task_out / 'compose.env').read_text(),
+                         f'AGENSH_TASK_PROMPTS={prompts}\nAGENSH_RUN_NETWORK=allowlist\nAGENSH_ALLOW_DOMAINS=\n')
+        self.assertIn('HTTPS_PROXY: http://egress-filter:3128', (clone / '.gitea/workflows/agensh.yml').read_text())
         brief = json.loads((self.task_out / 'brief_vars.json').read_text())
         self.assertEqual(brief['UPSTREAM'], str(self.upstream))
         prepare = json.loads((self.task_out / 'prepare.json').read_text())
         self.assertEqual((prepare['base_sha'], prepare['run_id']), (self.base_sha, 'unit'))
-
-    def team_main(self):
-        # Stand in for the team's Gitea repository: the imported history plus one merge.
-        clone = Path((self.task_out / '.seed_git').read_text().strip())
-        gitea = Path(self.directory.name, 'gitea.git')
-        git('clone', '-q', '--bare', str(clone), str(gitea))
-        work = Path(self.directory.name, 'team')
-        git('clone', '-q', str(gitea), str(work))
-        (work / 'json_flag.py').write_text('FLAG = "--json"\n')
-        git('add', '.', cwd=work)
-        git('commit', '-qm', 'Add --json flag', cwd=work)
-        git('push', '-q', 'origin', 'HEAD:main', cwd=work)
-        return gitea
 
     def test_export_pushes_delivery_branch(self):
         self.assertEqual(self.hook('prepare').returncode, 0)
@@ -215,6 +223,135 @@ class HookTest(unittest.TestCase):
         self.assertEqual(self.hook('export', AGENSH_GITEA_URL=str(gitea), AGENSH_DELIVERY='off').returncode, 0)
         self.assertEqual(json.loads((self.task_out / 'delivery.json').read_text())['mode'], 'local (AGENSH_DELIVERY=off)')
         self.assertNotIn('agensh/unit', git('branch', '--list', cwd=self.upstream))
+
+
+class NetworkTest(unittest.TestCase):
+    def setUp(self):
+        os.environ.setdefault('AGENSH_ROOT', str(ROOT))
+        sys.path.insert(0, str(ROOT / 'tasks/software-project/hooks'))
+        import prepare
+        self.prepare = prepare
+        self.pack = __import__('agensh.pack', fromlist=['load_pack']).load_pack('software-project')
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+
+    def project(self, text):
+        path = Path(self.directory.name, 'project.toml')
+        path.write_text(text)
+        return load_project(path)
+
+    def resolve(self, text, private=None):
+        with unittest.mock.patch.object(self.prepare, 'github_visibility', return_value=private) as visibility:
+            result = self.prepare.resolve_network(self.project(text), self.pack)
+        return result[0], visibility.call_args
+
+    def test_auto(self):
+        github = PROJECT.format(upstream='github.com/acme/widget')
+        self.assertEqual(self.resolve(github, private=False)[0], 'open')
+        self.assertEqual(self.resolve(github, private=True)[0], 'allowlist')
+        self.assertEqual(self.resolve(github, private=None)[0], 'allowlist')
+        self.assertEqual(self.resolve(github)[1], unittest.mock.call('acme/widget'))
+        local, call = self.resolve(PROJECT.format(upstream='/srv/repos/widget.git'))
+        self.assertEqual((local, call), ('allowlist', None))
+        empty = 'pack = "software-project"\nname = "n"\ngoal = "g"\n[workspace]\nseed = "empty"\n'
+        self.assertEqual(self.resolve(empty)[0], 'open')
+
+    def test_project_choice_wins(self):
+        text = PROJECT.format(upstream='github.com/acme/widget') + '[environment]\nnetwork = "offline"\n'
+        self.assertEqual(self.resolve(text, private=False)[0], 'offline')
+
+    def test_allow_domains(self):
+        text = PROJECT.format(upstream='u') + '[environment]\nallow_domains = ["PyPI.Internal.example"]\n'
+        self.assertEqual(self.project(text).allow_domains, ('pypi.internal.example',))
+        for bad in ('["*.example.com"]', '["http://x.example"]', '"x.example"'):
+            with self.subTest(bad=bad), self.assertRaises(ProjectError):
+                self.project(PROJECT.format(upstream='u') + f'[environment]\nallow_domains = {bad}\n')
+
+
+class FakeGitea:
+    """Records issues the sync hook opens; answers like Gitea's issue API."""
+
+    def __init__(self):
+        import http.server
+        import threading
+        self.issues = []
+        fake = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                body = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+                fake.issues.append((self.path, body))
+                reply = json.dumps({'number': 40 + len(fake.issues)}).encode()
+                self.send_response(201)
+                self.send_header('Content-Length', str(len(reply)))
+                self.end_headers()
+                self.wfile.write(reply)
+
+            def log_message(self, *_):
+                pass
+
+        self.server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.port = self.server.server_address[1]
+
+
+class SyncTest(HookBase):
+    """The sync hook against local upstream and team repositories."""
+
+    def setUp(self):
+        super().setUp()
+        self.gitea = FakeGitea()
+        self.addCleanup(self.gitea.server.shutdown)
+        self.env_file.write_text(self.env_file.read_text() + f'GITEA_ADMIN_USER=chairman\nGITEA_ADMIN_PASSWORD=x\n'
+                                 f'EDGE_HTTP_PORT={self.gitea.port}\nORG_NAME=team\n')
+        self.assertEqual(self.hook('prepare').returncode, 0)
+        self.team = self.team_main()
+
+    def upstream_commit(self, name, text):
+        work = Path(self.directory.name, 'upstream-work')
+        if not work.exists():
+            git('clone', '-q', str(self.upstream), str(work))
+        (work / name).write_text(text)
+        git('add', '.', cwd=work)
+        git('commit', '-qm', f'Upstream changes {name}', cwd=work)
+        git('push', '-q', 'origin', 'HEAD:main', cwd=work)
+        return git('rev-parse', 'HEAD', cwd=work)
+
+    def sync(self):
+        result = self.hook('sync', AGENSH_GITEA_URL=str(self.team), AGENSH_SYNC_PHASE='final')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return json.loads((self.task_out / 'sync.json').read_text())
+
+    def test_clean_merge_then_delivery(self):
+        self.assertEqual(self.sync()['last']['result'], 'up-to-date')
+        upstream_sha = self.upstream_commit('upstream_note.txt', 'from upstream\n')
+        record = self.sync()
+        self.assertEqual((record['last']['result'], record['last']['phase']), ('merged', 'final'))
+        self.assertEqual(git('rev-parse', 'upstream/main', cwd=self.team), upstream_sha)
+        git('merge-base', '--is-ancestor', upstream_sha, 'main', cwd=self.team)
+        self.assertEqual(self.hook('export', AGENSH_GITEA_URL=str(self.team)).returncode, 0)
+        delivery = json.loads((self.task_out / 'delivery.json').read_text())
+        # Only the team's commit counts; upstream's and the bookkeeping commits do not.
+        self.assertEqual((delivery['commits'], delivery['upstream_sha'], delivery['sync']), (1, upstream_sha, 'merged'))
+        self.assertEqual(git('diff', '--name-only', upstream_sha, 'agensh/unit', cwd=self.upstream), 'json_flag.py')
+
+    def test_conflict_opens_one_issue(self):
+        work = Path(self.directory.name, 'team')
+        (work / 'widget.py').write_text('print("team widget")\n')
+        git('commit', '-qam', 'Team changes widget', cwd=work)
+        git('push', '-q', 'origin', 'HEAD:main', cwd=work)
+        upstream_sha = self.upstream_commit('widget.py', 'print("upstream widget")\n')
+        record = self.sync()
+        self.assertEqual((record['last']['result'], record['last']['files'], record['last']['issue']),
+                         ('conflict', ['widget.py'], 41))
+        path, body = self.gitea.issues[0]
+        self.assertEqual(path, '/api/v1/repos/team/main/issues')
+        self.assertIn('`upstream/main`', body['body'])
+        self.assertEqual(git('rev-parse', 'upstream/main', cwd=self.team), upstream_sha)
+        # main is untouched, and the same conflict does not open a second issue.
+        self.assertEqual(git('log', '-1', '--format=%s', 'main', cwd=self.team), 'Team changes widget')
+        self.assertEqual(self.sync()['last']['issue'], 41)
+        self.assertEqual(len(self.gitea.issues), 1)
 
 
 class RenderingTest(unittest.TestCase):

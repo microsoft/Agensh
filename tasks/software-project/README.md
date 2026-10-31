@@ -37,7 +37,8 @@ hours = 2
 
 [environment]
 base_image = "default-python"           # or an image ref: Debian/Ubuntu with python3
-network = "open"                        # or "offline"; default from pack.toml (open)
+network = "auto"                        # open, allowlist, offline or auto (the default)
+allow_domains = ["pypi.internal.example"]   # added to the allowlist's registries
 ```
 
 `default-python` is `python:3.12-bookworm`. A custom image must be Debian or
@@ -79,11 +80,36 @@ only the team's work. GitHub delivery uses the host's `gh` login; workers never
 hold upstream credentials.
 
 Workers get their instructions from the core template with this pack's
-fragments, the `team-task` channel and the `team` board. The network is open by
-default; the model credential still stays in the egress proxy. With open
-networking, fetched content can carry prompt injection and workers can read the
-whole repository, so use `network = "offline"` for private code until the
-allowlist mode is available, and review every delivered pull request.
+fragments, the `team-task` channel and the `team` board.
+
+## Network
+
+| Mode | Workers and CI jobs reach |
+|---|---|
+| `open` | The internet |
+| `allowlist` | Only PyPI, npm, crates.io, the Go proxy, Debian and Ubuntu mirrors, and `allow_domains`, through `egress-filter`; refusals and grants are logged to `$DATA_ROOT/<profile>/egress/egress.jsonl` |
+| `offline` | Nothing but the team's services and the model |
+| `auto` (default) | `open` for a public GitHub upstream or a new project without one; `allowlist` for a private upstream or one whose visibility cannot be told, such as a local path |
+
+The prepare hook records the chosen mode and why in `prepare.json`, and the
+delivery PR lists it with any added domains. The model credential stays in the
+egress proxy in every mode. Workers can read the whole repository and fetched
+content can carry prompt injection, which is why private code defaults to the
+allowlist; review every delivered pull request.
+
+## Backlog and upstream
+
+Gitea issues are the work items: a worker's `CLAIM` cites an issue as `#<n>`,
+and the driver assigns the issue to the worker while the claim lives (see
+[backlog synchronization](../../agensh/README.md#backlog-synchronization)).
+
+[`hooks/sync.py`](hooks/sync.py) brings the upstream base branch into the team's
+`main` 30 minutes before the end of the budget and again before export. The
+upstream head is always on the team branch `upstream/<base_branch>`. A clean
+merge is pushed to `main` by the administrator; a conflict is never forced:
+an issue lists the conflicting files and asks the team to resolve it in a normal
+PR. A conflict still open at the final sync is reported in the delivery PR.
+`sync.json` records every sync.
 
 ## Merge gate
 
@@ -100,6 +126,5 @@ delivery pull request carries only the team's changes. See the
 
 ## Not yet included
 
-The issue backlog synchronization, the `allowlist` and `auto` network
-modes, upstream sync before delivery, a human product owner and resume follow in
-the next steps of the [task pack design](../../docs/task_pack_design.md).
+A human product owner and resume follow in the next steps of the
+[task pack design](../../docs/task_pack_design.md).

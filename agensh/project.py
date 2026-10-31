@@ -25,6 +25,7 @@ PROJECT_PACKS = ('software-project',)
 # Debian/Ubuntu images with python3, which the worker image needs for its runtime.
 BASE_IMAGES = {'default-python': 'python:3.12-bookworm'}
 NAME = re.compile(r'[a-z0-9][a-z0-9-]*')
+DOMAIN = re.compile(r'(?=.{1,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}')
 # Projects allocate from their own range, clear of the ProgramBench task table.
 PORT_BASE, SUBNET_OCTET = 23000, 217
 SLOT_KEYS = ('EDGE_HTTP_PORT', 'EDGE_MM_PORT', 'AGENSH_SUBNET_DEFAULT', 'AGENSH_SUBNET_EGRESS', 'AGENSH_SUBNET_EDGE')
@@ -50,6 +51,7 @@ class Project:
     hours: float
     base_image: str
     network: str = ''
+    allow_domains: tuple = ()
     protected_paths: tuple = ()
     ci_timeout_minutes: int = 15
     extra: dict = field(default_factory=dict)
@@ -141,18 +143,22 @@ def load_project(path):
     if isinstance(hours, bool) or not isinstance(hours, (int, float)) or hours <= 0:
         raise ProjectError('[budget] hours must be a positive number')
     environment = data.get('environment', {})
-    _known(environment, ('base_image', 'network'), '[environment]')
+    _known(environment, ('base_image', 'network', 'allow_domains'), '[environment]')
     base_image = str(environment.get('base_image', 'default-python'))
     if base_image.startswith('default-') and base_image not in BASE_IMAGES:
         raise ProjectError(f'unknown default base image {base_image!r}; available: {", ".join(BASE_IMAGES)}')
     network = str(environment.get('network', ''))
-    if network and network not in ('open', 'offline'):
-        raise ProjectError(f'[environment] network must be "open" or "offline"; got {network!r}')
+    if network and network not in ('open', 'offline', 'allowlist', 'auto'):
+        raise ProjectError(f'[environment] network must be open, allowlist, offline or auto; got {network!r}')
+    domains = environment.get('allow_domains', [])
+    if not isinstance(domains, list) or not all(isinstance(d, str) and DOMAIN.fullmatch(d.lower()) for d in domains):
+        raise ProjectError('[environment] allow_domains must be a list of domain names, e.g. ["pypi.internal.example"]')
     return Project(path=path, pack=pack, name=name, goal=goal.strip() + '\n', seed=seed, upstream=repo,
                    base_branch=str(upstream.get('base_branch', 'main')), delivery_branch=delivery,
                    acceptance_pr=_commands(acceptance.get('pr', []), '[acceptance] pr'),
                    acceptance_main=_commands(acceptance.get('main', acceptance.get('pr', [])), '[acceptance] main'),
                    workers=workers, hours=float(hours), base_image=base_image, network=network,
+                   allow_domains=tuple(d.lower() for d in domains),
                    protected_paths=protected, ci_timeout_minutes=timeout)
 
 

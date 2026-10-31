@@ -22,6 +22,20 @@ if AGENT_HARNESS not in ("pi", "copilot", "codex", "claude"):
     raise ValueError("AGENT_HARNESS must be pi, copilot, codex or claude")
 
 ALL_AGENTS = [f"worker{w}" for w in range(1, WORKERS_PER_TEAM + 1)]
+# Make passes the resolved mode; `allowlist` sends worker egress through egress-filter.
+NETWORK_MODE = os.environ.get('AGENSH_NETWORK_MODE') or PACK.network
+PROXY = quality.ALLOWLIST_PROXY
+
+
+def proxy_env():
+    if NETWORK_MODE != 'allowlist':
+        return ''
+    internal = ['localhost', '127.0.0.1', 'gitea', 'mattermost', 'board-service', 'egress-proxy',
+                'secret-service', 'mysql', *(f'mini-router-{a}' for a in ALL_AGENTS)]
+    names = ('HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy')
+    lines = [f'  {name}: "{PROXY}"' for name in names]
+    lines += [f'  {name}: "{",".join(internal)}"' for name in ('NO_PROXY', 'no_proxy')]
+    return '\n' + '\n'.join(lines)
 
 
 def worker_cpus(value, workers, host_cpus=None):
@@ -433,7 +447,7 @@ def build():
     out.append(HEADER.replace('__HARNESS_ENV__', harness_env)
                .replace('__WORKER_RESOURCES__', worker_resources())
                .replace('__BOARD_ID__', PACK.board_id)
-               .replace('__TASK_CHANNEL__', PACK.channel)
+               .replace('  TASK_CHANNEL: "__TASK_CHANNEL__"', f'  TASK_CHANNEL: "{PACK.channel}"{proxy_env()}')
                .replace('${AGENT_HARNESS:-copilot}', '${AGENT_HARNESS:-' + AGENT_HARNESS + '}'))
     members = ",\n".join(f'          "${{ORG_NAME}}-{s}"' for s in ALL_AGENTS)
     # Imported histories become main as is: no initial commit and no CODEOWNERS commit.

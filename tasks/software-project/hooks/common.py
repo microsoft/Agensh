@@ -1,10 +1,13 @@
 # Shared helpers for the software-project hooks: run context, project and git.
 
+import base64
 import json
 import os
 from pathlib import Path
 import subprocess
 import sys
+import urllib.error
+import urllib.request
 
 ROOT = Path(os.environ['AGENSH_ROOT'])
 sys.path.insert(0, str(ROOT))
@@ -32,6 +35,32 @@ def context():
     return Path(os.environ['AGENSH_TASK_OUT']), values, project, load_pack(project.pack)
 
 
+# The host's gh login for GitHub upstreams; workers never hold these credentials.
+GH_CREDENTIAL = ['-c', 'credential.helper=', '-c', 'credential.helper=!gh auth git-credential']
+IDENTITY = ['-c', 'user.name=Agensh', '-c', 'user.email=agensh@localhost']
+
+
+def upstream_credentials(repo):
+    import shutil
+    _, github_repo = git_url(repo)
+    return GH_CREDENTIAL if github_repo and shutil.which('gh') else []
+
+
+def gitea_api(values, method, path, body=None):
+    # Admin call on the team repository through the edge port; (HTTP status, reply).
+    credentials = base64.b64encode(f'{values["GITEA_ADMIN_USER"]}:{values["GITEA_ADMIN_PASSWORD"]}'.encode()).decode()
+    request = urllib.request.Request(
+        f'http://localhost:{values["EDGE_HTTP_PORT"]}/api/v1/repos/{values["ORG_NAME"]}/main{path}', method=method,
+        data=None if body is None else json.dumps(body).encode(),
+        headers={'Content-Type': 'application/json', 'Authorization': f'Basic {credentials}'})
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            text = response.read().decode()
+            return response.status, json.loads(text) if text else None
+    except urllib.error.HTTPError as error:
+        return error.code, None
+
+
 def git(*arguments, cwd=None, capture=False, env=None):
     result = subprocess.run(['git', *arguments], cwd=cwd, env=env, text=True,
                             capture_output=capture, check=True)
@@ -47,4 +76,5 @@ def write_json(path, value):
     Path(path).write_text(json.dumps(value, indent=2) + '\n')
 
 
-__all__ = ['ROOT', 'context', 'git', 'git_url', 'log', 'read_json', 'write_json']
+__all__ = ['GH_CREDENTIAL', 'IDENTITY', 'ROOT', 'context', 'git', 'git_url', 'gitea_api', 'log', 'read_json',
+           'upstream_credentials', 'write_json']

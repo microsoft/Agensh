@@ -11,7 +11,8 @@ resources from `WORKER_MEMORY` and `WORKER_CPUS`.
 | Path | Purpose |
 |---|---|
 | `docker_compose.team.yml` | Team network isolation, model egress proxy and MySQL TCP health check |
-| `network_open.yml` | Added after the team overlay when the pack's `network = "open"`: the default network gets general egress |
+| `network_open.yml` | Added after the team overlay when the network mode is `open`: the default network gets general egress |
+| `network_allowlist.yml` | Added when the network mode is `allowlist`: the `egress-filter` proxy joins the egress bridge, and workers (given `HTTP(S)_PROXY` by the generated Compose) reach only package registries and the project's `allow_domains`; decisions are logged to `$DATA_ROOT/<profile>/egress/egress.jsonl` |
 | [bootstrap/](bootstrap/) | One-shot Gitea/Mattermost account and token provisioning |
 | [nginx-edge/](nginx-edge/) | Host-facing HTTP routes for repository and chat services |
 | `agensh.slice` | Host cgroup ceiling: 80% memory, no swap and an aggregate task limit |

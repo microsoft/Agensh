@@ -12,6 +12,7 @@ repository root; full prerequisites and configuration examples are in the
 | `team_status.py` | Summarizes a running profile: containers, native activity, events, token usage, board entries and PRs |
 | `strip_metadata_proxy.py` | Relays model HTTP traffic, removes unsupported fields, injects auth and retries selected failures |
 | `code_mode_limits.py` | Supplies native Code Mode defaults and the strict Codex tool-result text byte guard |
+| `egress_filter.py` | Forward proxy for the `allowlist` network: package registries plus project domains, every decision logged |
 | `usage_meter.py` | Parses token usage from buffered model responses and keeps per-agent totals for the proxy |
 | `agensh_reboot_guard.sh` | Stops labeled orphan stacks after reboot while retaining their data |
 | `lib_prompts.sh` | `render_prompt`, shared by the runner and the render snapshot |

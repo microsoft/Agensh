@@ -558,8 +558,10 @@ Features:
      files, the broken-`main` alarm and `fix-main` gate. Until the human
      product owner arrives in PR 10, protected paths use Gitea protected files
      (administrator only), as `human.mode = "none"` describes.
-   - **9c**: issue backlog synchronization, `allowlist` and `auto` network
-     modes, upstream sync before delivery.
+   - **9c** *(done)*: issue backlog synchronization, `allowlist` and `auto`
+     network modes, upstream sync before delivery. Upstream also syncs 30
+     minutes before the end, so the team can still resolve a conflict; a
+     conflict left at the final sync is reported in the delivery PR.
 10. **Human product owner and resume**: accounts, urgent routing, post-merge
     review on the delivery PR, progress digest, fresh-session resume with the
     project-state summary, and the optional planning phase.

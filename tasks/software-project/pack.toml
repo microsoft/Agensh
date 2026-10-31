@@ -5,6 +5,7 @@ description = "Work on a real repository from a goal; deliver main upstream as a
 
 [hooks]
 prepare = "hooks/prepare.py"    # import upstream history (or start empty), render prompts
+sync = "hooks/sync.py"          # merge the upstream base branch into main (or open a conflict issue)
 export = "hooks/export.py"      # push main to a delivery branch and open a pull request
 evaluate = "hooks/evaluate.py"  # run the full acceptance suite on the delivered main
 
@@ -19,7 +20,7 @@ board_id = "team"
 channel = "team-task"
 
 [environment]
-network = "open"         # a project file may choose "offline"
+network = "auto"         # open for a public GitHub upstream, allowlist otherwise; a project may choose
 task_prompts = "run"     # the prepare hook renders templates/ for each project
 
 [workspace]
@@ -29,3 +30,9 @@ import_history = true    # the upstream branch's history becomes the team's main
 ci_gate = true           # PRs merge after the generated workflow passes; see agensh/quality.py
 # The workflow and project file need the administrator; a project file may add paths.
 protected_paths = [".gitea/workflows/**", ".agensh/**"]
+
+[coordination]
+backlog = "issues"       # a CLAIM citing #<n> assigns issue n to its author while the claim lives
+
+[lifecycle]
+sync_before_end = "30m"  # sync upstream this long before the end, so conflicts can be resolved; again before export

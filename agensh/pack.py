@@ -8,9 +8,9 @@ import tomllib
 
 ROOT = Path(__file__).resolve().parents[1]
 DURATION = re.compile(r'^(\d+)([smh])$')
-HOOKS = ('prepare', 'export', 'evaluate')
-# `allowlist` and `auto` arrive with the software-project pack (docs/task_pack_design.md).
-NETWORK_MODES = ('offline', 'open')
+HOOKS = ('prepare', 'sync', 'export', 'evaluate')
+# `auto` is resolved by the pack's prepare hook into AGENSH_RUN_NETWORK (open or allowlist).
+NETWORK_MODES = ('offline', 'open', 'allowlist', 'auto')
 MOUNT_TARGET = re.compile(r'^/[A-Za-z0-9._/-]+$')
 
 
@@ -50,6 +50,10 @@ class Pack:
     # Work merges only after the generated CI workflow passes (agensh/quality.py).
     ci_gate: bool = False
     protected_paths: tuple = ()
+    # `issues`: claims citing #<n> assign Gitea issues (agensh/backlog.py); `board`: claims only.
+    backlog: str = 'board'
+    # The sync hook also runs this long before the end of the budget (and before export).
+    sync_before_end: int = 1800
 
     def hook(self, name):
         return self.hooks.get(name)
@@ -78,7 +82,8 @@ def load_pack(name, root=ROOT):
         raise PackError(f'{path} not found')
     with path.open('rb') as stream:
         data = tomllib.load(stream)
-    _known(data, ('name', 'description', 'hooks', 'messages', 'team', 'environment', 'workspace', 'acceptance'),
+    _known(data, ('name', 'description', 'hooks', 'messages', 'team', 'environment', 'workspace', 'acceptance',
+                  'coordination', 'lifecycle'),
            path.name)
     if data.get('name') != name:
         raise PackError(f'{path} declares name {data.get("name")!r}, expected {name!r}')
@@ -133,6 +138,16 @@ def load_pack(name, root=ROOT):
     protected_paths = protected_path_list(acceptance.get('protected_paths', []), '[acceptance] protected_paths')
     if protected_paths and not ci_gate:
         raise PackError('[acceptance] protected_paths needs ci_gate = true')
+    lifecycle = data.get('lifecycle', {})
+    _known(lifecycle, ('sync_before_end',), '[lifecycle]')
+    sync_before_end = parse_duration(lifecycle.get('sync_before_end', '30m'))
+    if 'sync_before_end' in lifecycle and 'sync' not in hooks:
+        raise PackError('[lifecycle] sync_before_end needs a sync hook')
+    coordination = data.get('coordination', {})
+    _known(coordination, ('backlog',), '[coordination]')
+    backlog = coordination.get('backlog', 'board')
+    if backlog not in ('board', 'issues'):
+        raise PackError(f'[coordination] backlog must be "board" or "issues"; got {backlog!r}')
     network = environment.get('network', 'offline')
     if network not in NETWORK_MODES:
         raise PackError(f'network must be one of {", ".join(NETWORK_MODES)}; got {network!r}')
@@ -155,5 +170,5 @@ def load_pack(name, root=ROOT):
         seed_message=team.get('seed_message', 'Seed workspace ({task})'),
         network=network, mounts=tuple(mounts), board_id=board_id,
         task_prompts=task_prompts, import_history=import_history, channel=channel,
-        ci_gate=ci_gate, protected_paths=protected_paths,
+        ci_gate=ci_gate, protected_paths=protected_paths, backlog=backlog, sync_before_end=sync_before_end,
     )

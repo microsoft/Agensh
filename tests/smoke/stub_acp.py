@@ -96,7 +96,7 @@ def contribute():
     path = f'smoke/{AGENT}.txt'
     work = Path('/work/smoke-checkout')
     branch = f'smoke/{AGENT}'
-    board_note('CLAIM', f'smoke: adding {path}', delegation_id='smoke')
+    board_note('CLAIM', f'smoke: adding {path} for #1', delegation_id='smoke')
 
     def push():
         if work.exists():

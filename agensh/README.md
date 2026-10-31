@@ -9,6 +9,7 @@ driver. Standard library only; requires Python 3.11 for `tomllib`.
 | `pack.py` | Loads and validates `tasks/<pack>/pack.toml` |
 | `schedule.py` | Budget, staggered wake, idle phase, reminder and nudge timing as pure functions |
 | `allocate.py` | Port and subnet slots for profiles: fixed for listed tasks, first free slot otherwise |
+| `backlog.py` | Backlog synchronization: live board claims citing `#<n>` become issue assignees |
 | `quality.py` | CI merge gate: the Actions workflow generated from acceptance commands, and the main-health timing rules and PR statuses |
 | `project.py` | Project files for repository packs: `profile`, `build` and `run` (see the [software-project pack](../tasks/software-project/README.md)) |
 
@@ -38,7 +39,8 @@ Hooks are named in `pack.toml` and run on the host from the repository root,
 
 | Hook | When | Contract |
 |---|---|---|
-| `prepare` | Before services start | May write the seed tree path to `$AGENSH_TASK_OUT/.seed_path`, or a git clone whose `HEAD` becomes `main` with its history to `.seed_git`; `KEY=VALUE` Compose settings to `compose.env`; extra task-brief variables to `brief_vars.json`; non-zero stops the run |
+| `prepare` | Before services start | May write the seed tree path to `$AGENSH_TASK_OUT/.seed_path`, or a git clone whose `HEAD` becomes `main` with its history to `.seed_git`; `KEY=VALUE` Compose settings to `compose.env` (a pack with `network = "auto"` must set `AGENSH_RUN_NETWORK` there); extra task-brief variables to `brief_vars.json`; non-zero stops the run |
+| `sync` | `[lifecycle] sync_before_end` (default 30m) before the end, and before `export` on the normal path, with `AGENSH_SYNC_PHASE=scheduled` or `final` | Brings upstream changes into the team's `main`; failures are logged, and `main` is delivered as it is |
 | `export` | After the budget, and on the failure path | Delivers the team's result; its exit status is logged, not fatal |
 | `evaluate` | After shutdown unless `SKIP_EVAL=1` | Scores the result; non-zero makes the run exit 1 |
 
@@ -65,3 +67,12 @@ A pack sets `[acceptance] ci_gate = true` and may list `protected_paths`. Then:
   restriction lifts with a `NOTICE` in the run log and a channel message, so a
   flaky suite cannot stall the team. Recovery posts a `FACT` and a channel message.
   The timeline is recorded in `$AGENSH_TASK_OUT/main-health.json`.
+
+## Backlog synchronization
+
+With `[coordination] backlog = "issues"`, the driver reads the board every
+`AGENSH_BACKLOG_INTERVAL_S` (default 30) seconds. A live `CLAIM` whose text cites
+`#<n>` makes its author an assignee of issue `n`; when the claim expires, the
+driver removes only the assignments it made. Closed issues keep their
+assignees as the record of who did the work. Synchronization is one-way: the
+board stays the source of truth for who is working on what.

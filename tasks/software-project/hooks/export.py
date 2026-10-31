@@ -11,10 +11,8 @@ import subprocess
 import sys
 import tempfile
 
-from common import context, git, git_url, log, read_json, write_json
+from common import GH_CREDENTIAL, IDENTITY, context, git, git_url, log, read_json, write_json
 
-GH_CREDENTIAL = ['-c', 'credential.helper=', '-c', 'credential.helper=!gh auth git-credential']
-IDENTITY = ['-c', 'user.name=Agensh', '-c', 'user.email=agensh@localhost']
 WORKFLOW_COMMITS = '^(Add|Remove) the Agensh team workflow$'
 
 
@@ -27,24 +25,62 @@ def remove_workflow(checkout, path):
     return True
 
 
-def summary(checkout, base_sha):
-    known = subprocess.run(['git', 'cat-file', '-e', f'{base_sha}^{{commit}}'], cwd=checkout).returncode == 0
+def summary(checkout, base_sha, upstream_sha=None):
+    # Against the latest upstream merged into main, as the GitHub PR shows it.
+    upstream_sha = upstream_sha or base_sha
+    known = all(subprocess.run(['git', 'cat-file', '-e', f'{sha}^{{commit}}'], cwd=checkout).returncode == 0
+                for sha in (base_sha, upstream_sha))
     if not known:
         return None, ''
-    # The team's commits, without the workflow bookkeeping that cancels out.
+    # The team's commits, without upstream's or the workflow bookkeeping that cancels out.
     commits = int(git('rev-list', '--count', '--invert-grep', '-E', f'--grep={WORKFLOW_COMMITS}',
-                      f'{base_sha}..HEAD', cwd=checkout, capture=True))
-    stat = git('diff', '--stat', f'{base_sha}..HEAD', cwd=checkout, capture=True)
+                      '--grep=^Merge upstream ', 'HEAD', '--not', base_sha, upstream_sha,
+                      cwd=checkout, capture=True))
+    stat = git('diff', '--stat', f'{upstream_sha}..HEAD', cwd=checkout, capture=True)
     return commits, stat
 
 
-def pr_body(project, prepare, commits, stat, run_id):
+def synced_upstream(task_out, checkout):
+    # The newest upstream head that main contains, from the sync hook's record.
+    for entry in reversed((read_json(task_out / 'sync.json') or {}).get('history', [])):
+        sha = entry.get('upstream_sha')
+        if sha and subprocess.run(['git', 'merge-base', '--is-ancestor', sha, 'HEAD'], cwd=checkout,
+                                  capture_output=True).returncode == 0:
+            return sha
+    return None
+
+
+def sync_summary(task_out):
+    last = (read_json(task_out / 'sync.json') or {}).get('last')
+    if not last:
+        return 'Upstream was not synced during the run.'
+    if last['result'] == 'conflict':
+        files = ', '.join(f'`{f}`' for f in last.get('files', []))
+        return (f'**Upstream `{last["upstream_sha"][:12]}` conflicts with this branch** in {files}; the team '
+                'did not resolve it before the end. Resolve it when reviewing.')
+    return f'Upstream `{last["upstream_sha"][:12]}`: {last["result"]}.'
+
+
+def network_summary(prepare):
+    # Reviewers see what the team could reach while it wrote this change.
+    network = prepare.get('network', 'unknown')
+    text = f'The team worked with network mode `{network}` ({prepare.get("network_reason", "")}).'
+    if network == 'allowlist':
+        domains = prepare.get('allow_domains') or []
+        added = ', '.join(f'`{d}`' for d in domains) if domains else 'none'
+        text += f' Package registries plus project domains: {added}.'
+    return text
+
+
+def pr_body(project, prepare, commits, stat, run_id, task_out):
     checks = '\n'.join(f'- `{c}`' for c in project.acceptance_main) or '- (none declared)'
     return (f'Delivered by an Agensh team run (`{run_id}`) for **{project.name}**. Review it like any '
             f'other contribution before merging.\n\n## Goal\n\n{project.goal}\n'
-            f'## Changes\n\n{commits} commit(s) on top of `{prepare["base_branch"]}` at '
+            f'## Changes\n\n{commits} team commit(s) on top of `{prepare["base_branch"]}` at '
             f'`{prepare["base_sha"][:12]}`.\n\n```\n{stat or "(no file changes)"}\n```\n\n'
-            f'## Acceptance on main\n\n{checks}\n\nResults are recorded in the run\'s `acceptance.json`.\n')
+            f'## Acceptance on main\n\n{checks}\n\nResults are recorded in the run\'s `acceptance.json`.\n'
+            f'\n## Upstream\n\n{sync_summary(task_out)}\n'
+            f'\n## Network\n\n{network_summary(prepare)}\n')
 
 
 def main():
@@ -58,22 +94,24 @@ def main():
     team_head = git('rev-parse', 'HEAD', cwd=checkout, capture=True)
     remove_workflow(checkout, prepare.get('workflow'))
     head = git('rev-parse', 'HEAD', cwd=checkout, capture=True)
-    commits, stat = summary(checkout, prepare['base_sha'])
+    upstream_sha = synced_upstream(task_out, checkout)
+    commits, stat = summary(checkout, prepare['base_sha'], upstream_sha)
     run_id = prepare['run_id']
     delivery = {'head': head, 'team_head': team_head, 'base_sha': prepare['base_sha'], 'commits': commits,
-                'run_id': run_id}
+                'run_id': run_id, 'upstream_sha': upstream_sha or prepare['base_sha'],
+                'sync': ((read_json(task_out / 'sync.json') or {}).get('last') or {}).get('result')}
     if os.environ.get('AGENSH_DELIVERY', 'on') == 'off':
         delivery['mode'] = 'local (AGENSH_DELIVERY=off)'
     elif project.upstream:
         url, github_repo = git_url(project.upstream)
         branch = project.delivery_branch.format(run_id=run_id)
-        credentials = GH_CREDENTIAL if github_repo and shutil.which('gh') else []
+        credentials = GH_CREDENTIAL if github_repo and shutil.which('gh') else []  # host gh login
         log(f'pushing main ({head[:12]}) to {project.upstream} as {branch}')
         git(*credentials, 'push', '--quiet', url, f'HEAD:refs/heads/{branch}', cwd=checkout)
         delivery.update(mode='branch', upstream=project.upstream, branch=branch)
         if github_repo and shutil.which('gh') and commits:
             with tempfile.NamedTemporaryFile('w', suffix='.md', delete=False) as body:
-                body.write(pr_body(project, prepare, commits, stat, run_id))
+                body.write(pr_body(project, prepare, commits, stat, run_id, task_out))
             created = subprocess.run(['gh', 'pr', 'create', '--repo', github_repo, '--base', prepare['base_branch'],
                                       '--head', branch, '--title', f'Agensh: {project.name} ({run_id})',
                                       '--body-file', body.name], capture_output=True, text=True)

@@ -28,9 +28,10 @@ COMPOSE_BASE := docker/_gen_prod.$(PROFILE).yml
 # selects the overlay: `offline` keeps workers on the internal network only.
 profile_value = $(shell grep -E '^$(1)=' $(ENV_FILE) 2>/dev/null | tail -n1 | cut -d= -f2-)
 PACK := $(or $(call profile_value,AGENSH_PACK),programbench)
-# A project may override the pack's network mode with AGENSH_NETWORK in its profile.
-NETWORK_MODE := $(or $(call profile_value,AGENSH_NETWORK),$(shell python3 -c 'import sys; from agensh.pack import load_pack; print(load_pack(sys.argv[1]).network)' $(PACK) 2>/dev/null))
-NETWORK_OVERLAY := $(if $(filter open,$(NETWORK_MODE)),-f docker/network_open.yml)
+# A project may override the pack's network mode with AGENSH_NETWORK in its profile;
+# a run's prepare hook resolves `auto` and exports AGENSH_RUN_NETWORK.
+NETWORK_MODE := $(or $(AGENSH_RUN_NETWORK),$(call profile_value,AGENSH_NETWORK),$(shell python3 -c 'import sys; from agensh.pack import load_pack; print(load_pack(sys.argv[1]).network)' $(PACK) 2>/dev/null))
+NETWORK_OVERLAY := $(if $(filter open,$(NETWORK_MODE)),-f docker/network_open.yml)$(if $(filter allowlist,$(NETWORK_MODE)),-f docker/network_allowlist.yml)
 # COMPOSE_EXTRA_FILES (space-separated, absolute paths) layers further overrides,
 # such as the smoke test's stub harness mounts.
 COMPOSE_OVERLAY := -f docker/docker_compose.team.yml $(NETWORK_OVERLAY) $(foreach f,$(COMPOSE_EXTRA_FILES),-f $(f))
@@ -72,12 +73,13 @@ check-env: require-profile
 render-base: require-profile
 	@AGENSH_WORKERS="$$(grep -E '^AGENSH_WORKERS=' $(ENV_FILE) 2>/dev/null | cut -d= -f2)" \
 	AGENT_HARNESS="$$(grep -E '^AGENT_HARNESS=' $(ENV_FILE) 2>/dev/null | cut -d= -f2)" \
-	AGENSH_PACK="$(PACK)" WORKER_MEMORY="$(call profile_value,WORKER_MEMORY)" \
+	AGENSH_PACK="$(PACK)" AGENSH_NETWORK_MODE="$(NETWORK_MODE)" WORKER_MEMORY="$(call profile_value,WORKER_MEMORY)" \
 	WORKER_CPUS="$(call profile_value,WORKER_CPUS)" \
 	python3 tools/gen_compose_prod.py > docker/_gen_prod.$(PROFILE).yml \
 	&& echo "[render-base] wrote docker/_gen_prod.$(PROFILE).yml" >&2
 
 up: check-env prep-mm-dirs render-base
+	@test "$(NETWORK_MODE)" != auto || (echo "ERROR: network mode auto is resolved by the run's prepare hook (AGENSH_RUN_NETWORK); start the team with team_run" >&2 && exit 1)
 	$(COMPOSE) up -d --build $(UP_FLAGS) $(SERVICES)
 
 SERVICES ?=

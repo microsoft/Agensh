@@ -216,7 +216,10 @@ print(f"board entries: {len(entries)}")
     check_agents_md
     if [ "$PACK" = software-project ]; then
         check_imported_history
+        check_backlog
+        check_allowlist
         python3 tests/smoke/check_gate.py "$ENV_FILE" "$OUT/run/$TASK" || die "CI gate check failed"
+        push_upstream_change
     fi
 
     local rows
@@ -260,6 +263,51 @@ check_imported_history() {
     [ -f "$check/.gitea/workflows/agensh.yml" ] || die "the team workflow is not on main"
     log "team main descends from upstream ${base:0:12} with its full history"
     rm -rf "$check"
+}
+
+check_backlog() {
+    # Each stub's claim cites #1, so the driver assigns issue #1 to every worker.
+    local org want got i
+    org="$(profile_value ORG_NAME)"
+    want="$(for i in $(seq 1 "$WORKERS"); do echo "$org-worker$i"; done | sort | tr '\n' ' ')"
+    for _ in $(seq 1 12); do
+        got="$(gitea_api "/repos/$org/main/issues/1" | python3 -c 'import json,sys; print(" ".join(sorted(a["login"] for a in json.load(sys.stdin).get("assignees") or [])) + " ")')"
+        [ "$got" = "$want" ] && break
+        sleep 10
+    done
+    [ "$got" = "$want" ] || die "issue #1 assignees are '$got', expected '$want' from the claims"
+    log "claims citing #1 assigned it to: $got"
+}
+
+check_allowlist() {
+    # A local upstream has unknown visibility, so `auto` chose the allowlist.
+    local worker log_file
+    worker="$(container agent-worker1)"
+    [ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["network"])' "$OUT/run/$TASK/prepare.json")" = allowlist ] \
+        || die "auto did not choose the allowlist for a local upstream"
+    [ "$("${DOCKER[@]}" exec "$worker" curl -sS -o /dev/null -w '%{http_code}' --max-time 60 https://pypi.org/simple/pip/)" = 200 ] \
+        || die "a worker cannot reach PyPI through egress-filter"
+    ! "${DOCKER[@]}" exec "$worker" curl -sS -o /dev/null --max-time 20 https://example.com/ 2>/dev/null \
+        || die "a worker reached example.com on the allowlist network"
+    ! "${DOCKER[@]}" exec "$worker" curl --noproxy '*' -sS -o /dev/null --max-time 10 https://pypi.org/ 2>/dev/null \
+        || die "a worker reached the internet without the proxy"
+    log_file="$(profile_value DATA_ROOT)/$PROFILE/egress/egress.jsonl"
+    sudo -n grep -q '"host": "example.com", "port": 443, "decision": "denied"' "$log_file" \
+        || die "egress-filter did not log the denied request"
+    log "allowlist: PyPI through egress-filter, example.com refused and logged, no direct egress"
+}
+
+push_upstream_change() {
+    # Upstream moves during the run; the final sync must bring it into the delivery.
+    local work="$OUT/upstream-change"
+    rm -rf "$work"
+    git clone -q "$UPSTREAM" "$work"
+    echo "added upstream during the run" > "$work/upstream_note.txt"
+    git -C "$work" add upstream_note.txt
+    git -C "$work" -c user.name=Smoke -c user.email=smoke@localhost commit -qm "Upstream note"
+    git -C "$work" push -q origin HEAD:main
+    rm -rf "$work"
+    log "pushed a new upstream commit for the final sync"
 }
 
 check_usage() {
@@ -331,6 +379,9 @@ if missing or not {'widget.py', 'test_widget.py'} <= files:
 if delivery['commits'] < workers:
     sys.exit(f'expected at least {workers} new commits, got {delivery["commits"]}')
 if not interrupted:
+    # The final sync merged the upstream commit pushed during the run.
+    if 'upstream_note.txt' not in files or delivery.get('sync') != 'merged':
+        sys.exit(f'the final upstream sync is missing: sync={delivery.get("sync")}')
     acceptance = json.loads((task_out / 'acceptance.json').read_text())
     if not acceptance['all_passed'] or acceptance['head'] != delivery['head']:
         sys.exit(f'acceptance did not pass on the delivered head: {acceptance}')

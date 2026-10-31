@@ -23,7 +23,7 @@ import time
 import urllib.error
 import urllib.request
 
-from agensh import quality, schedule
+from agensh import backlog, quality, schedule
 from agensh.pack import PackError, load_pack
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -239,12 +239,12 @@ class TeamRun:
                     AGENSH_GITEA_URL=self.gitea_url(), AGENSH_GITEA_REPO=f'{self.org}/{self.repo}',
                     AGENSH_GITEA_PUBLIC_URL=f'localhost:{self.edge_port}/{self.org}/{self.repo}.git')
 
-    def run_hook(self, name):
+    def run_hook(self, name, **extra):
         hook = self.pack.hook(name)
         if hook is None:
             return True
         interpreter = [sys.executable] if hook.suffix == '.py' else ['bash']
-        return run([*interpreter, str(hook)], cwd=ROOT, env=self.hook_env()).returncode == 0
+        return run([*interpreter, str(hook)], cwd=ROOT, env=dict(self.hook_env(), **extra)).returncode == 0
 
     def make(self, *arguments, quiet=False, check=False):
         return run(['make', *arguments, f'PROFILE={self.profile}'], cwd=ROOT, quiet=quiet, check=check)
@@ -402,6 +402,8 @@ class TeamRun:
         if self.pack.ci_gate:
             self.protect_files()
             self.start_thread(self.main_health)
+        if self.pack.backlog == 'issues':
+            self.start_thread(self.backlog_sync)
         team_id, channel = self.mm.ensure_task_channel([f'{self.org}-worker{i}' for i in range(1, self.workers + 1)])
         # The prepare hook may add project variables (goal, checks) for the brief.
         extra = {}
@@ -565,18 +567,63 @@ class TeamRun:
             raise Fatal(f'could not protect {patterns} on main (HTTP {status})')
         log(f'protected files on main: {patterns}')
 
+    def board_container(self):
+        return next((n for n in self.docker_ps(f'name=omcgitea-{self.profile}-board-service',
+                                               fmt='{{.Names}}') if n), '')
+
     def board_note(self, kind, content):
-        board = next((n for n in self.docker_ps(f'name=omcgitea-{self.profile}-board-service',
-                                                fmt='{{.Names}}') if n), '')
         script = '''import json, sys, urllib.request
 body = json.dumps({'thread_id': 'harness', 'type': sys.argv[2], 'content': sys.argv[3]}).encode()
 request = urllib.request.Request(f'http://127.0.0.1:8660/board/{sys.argv[1]}/note', data=body,
                                  method='POST', headers={'Content-Type': 'application/json'})
 sys.exit(json.load(urllib.request.urlopen(request, timeout=15)).get('status') != 'admitted')
 '''
+        board = self.board_container()
         if not board or run([*DOCKER, 'exec', board, 'python3', '-c', script, self.pack.board_id, kind,
                              content[:100]], quiet=True).returncode != 0:
             log(f'WARN: could not post the {kind} board entry')
+
+    def board_entries(self):
+        board = self.board_container()
+        if not board:
+            return None
+        code, text = output([*DOCKER, 'exec', board, 'python3', '-c',
+                             'import sys, urllib.request; sys.stdout.write(urllib.request.urlopen('
+                             'f"http://127.0.0.1:8660/board/{sys.argv[1]}/read_all?viewer=harness", '
+                             'timeout=15).read().decode())', self.pack.board_id])
+        return json.loads(text).get('entries', []) if code == 0 else None
+
+    # Backlog: a live CLAIM citing #<n> assigns issue n to its author (agensh/backlog.py).
+    def backlog_tick(self, assignments):
+        entries = self.board_entries()
+        if entries is None:
+            return
+        claims = backlog.live_claims(entries, set(self.worker_names()), time.time())
+        for number in assignments.issues(claims):
+            status, issue = self.gitea_api('GET', f'/issues/{number}')
+            if status != 200 or not isinstance(issue, dict):
+                assignments.managed.pop(number, None)
+                continue
+            current = [user['login'] for user in issue.get('assignees') or []]
+            desired = assignments.update(number, claims, current, issue.get('state'))
+            if desired is None:
+                continue
+            status, _ = self.gitea_api('PATCH', f'/issues/{number}', {'assignees': desired})
+            if 200 <= status < 300:
+                log(f'backlog: #{number} assignees {current or "none"} -> {desired or "none"}')
+            else:
+                log(f'WARN: backlog: could not assign #{number} (HTTP {status})')
+
+    def backlog_sync(self):
+        assignments = backlog.Assignments()
+        interval = env_int('AGENSH_BACKLOG_INTERVAL_S', 30)
+        log(f'backlog sync: board claims citing #<issue> assign issues every {interval}s')
+        while not self.stop.is_set():
+            try:
+                self.backlog_tick(assignments)
+            except Exception as error:  # A failed sync never stops the run.
+                log(f'WARN: backlog sync failed: {error}')
+            self.stop.wait(interval)
 
     def direct_message(self, worker, message):
         dm = self.mm.dm_channel(worker)
@@ -660,6 +707,18 @@ sys.exit(json.load(urllib.request.urlopen(request, timeout=15)).get('status') !=
             record.write_text(json.dumps({'red': gate.red, 'broken_sha': gate.broken_sha,
                                           'lifted': gate.lifted, 'history': gate.history}, indent=2) + '\n')
             self.stop.wait(interval)
+
+    # Upstream sync: the pack's sync hook, before the end and again before export.
+    def sync(self, phase):
+        if self.pack.hook('sync') is None:
+            return
+        if not self.run_hook('sync', AGENSH_SYNC_PHASE=phase):
+            log(f'WARN: {phase} upstream sync failed; delivering main as it is')
+
+    def scheduled_sync(self, total_seconds):
+        # Early enough for the team to resolve a conflict in a normal PR.
+        if not self.stop.wait(max(0, total_seconds - self.pack.sync_before_end)):
+            self.sync('scheduled')
 
     # Shutdown.
     def dump_board_lifecycle(self):
@@ -753,6 +812,8 @@ for b in boards:
             else:
                 self.start_thread(self.watchdog, remaining)
             self.start_thread(self.reminders, remaining)
+            if self.pack.hook('sync'):
+                self.start_thread(self.scheduled_sync, remaining)
             self.stop.wait(remaining)
             self.stop_background_loops()
             log('wall-clock budget elapsed; exporting + evaluating')
@@ -762,6 +823,7 @@ for b in boards:
             self.teardown(1)
             raise SystemExit(1)
 
+        self.sync('final')
         self.export()
         if not self.quiesce():
             self.save_service_logs()
