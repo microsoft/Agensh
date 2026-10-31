@@ -91,6 +91,8 @@ python3 -m agensh.project status   path/to/.agensh/project.toml
 A run segment ends when `[budget] hours` elapse (finalize, after a 15-minute
 wrap-up notice), when issue #1 is closed (finalize), or when the token budget is
 spent (pause: raise `max_model_tokens`, rerun `profile`, then `resume`).
+Without a product owner, the team closing issue #1 also finalizes the run; with
+one, only the owner's close does.
 `pause` and `finalize` reach a running driver within seconds; `finalize` also
 delivers a paused run. Outputs go to `out/projects/<name>/` (`OUT_DIR` changes
 it). See the [run lifecycle](../../agensh/README.md#run-lifecycle) for details.

@@ -2,11 +2,15 @@
 # Run the smoke test inside a private Docker-in-Docker daemon whose storage lives
 # under DATA_DIR, so a shared host's daemon, image tags, networks and root disk are
 # left alone. The host only runs one capped, privileged container.
-# Usage: run_isolated.sh DATA_DIR   (SMOKE_* settings are passed through)
+# Usage: run_isolated.sh DATA_DIR [COMMAND...]   (default: the smoke test; SMOKE_* and
+# LIVE_* settings are passed through)
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-DATA_DIR="${1:?usage: run_isolated.sh DATA_DIR}"
+DATA_DIR="${1:?usage: run_isolated.sh DATA_DIR [COMMAND...]}"
+shift
+COMMAND=("$@")
+[ $# -gt 0 ] || COMMAND=(bash tests/smoke/run_smoke.sh)
 IMAGE="${SMOKE_DIND_IMAGE:-docker:dind}"
 CPUS="${SMOKE_DIND_CPUS:-8}"
 MEMORY="${SMOKE_DIND_MEMORY:-16g}"
@@ -56,7 +60,7 @@ log "inner daemon ready: $("${DOCKER[@]}" exec "$NAME" docker version --format '
 env_args=()
 while IFS= read -r setting; do
     env_args+=(-e "$setting")
-done < <(env | grep -E '^SMOKE_(PACK|WORKERS|MINUTES|KEEP|INTERRUPT|HUMAN|PORT_BASE|SUBNET_OCTET)=' || true)
+done < <(env | grep -E '^(SMOKE_(PACK|WORKERS|MINUTES|KEEP|INTERRUPT|HUMAN|PORT_BASE|SUBNET_OCTET)|LIVE_[A-Z_]+)=' || true)
 
-log "running tests/smoke/run_smoke.sh inside $NAME"
-"${DOCKER[@]}" exec "${env_args[@]}" "$NAME" bash tests/smoke/run_smoke.sh
+log "running ${COMMAND[*]} inside $NAME"
+"${DOCKER[@]}" exec "${env_args[@]}" "$NAME" "${COMMAND[@]}"

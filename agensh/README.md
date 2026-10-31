@@ -84,7 +84,9 @@ board stays the source of truth for who is working on what.
 A pack with `[lifecycle] resumable = true` keeps its state between run segments.
 A segment ends on the first of its `stop_when` conditions: `budget` (the
 wall-clock `HOURS`), `tokens` (the profile's `AGENSH_MAX_MODEL_TOKENS`, input
-plus output across the team), `issue_closed` (issue #1 closed), or a request
+plus output across the team), `issue_closed` (issue #1 closed: by the product
+owner when there is one, whose workers' closes are reopened; otherwise by the
+team when it judges the goal done), or a request
 written to `$AGENSH_TASK_OUT/control` by `python3 -m agensh.project pause` or
 `finalize`.
 

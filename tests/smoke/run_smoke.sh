@@ -45,6 +45,9 @@ esac
 ENV_FILE="$ROOT/.env.$PROFILE"
 
 log() { echo "[smoke $(date -u +%H:%M:%S)] $*" >&2; }
+# A command that stops the script under `set -e` names itself in the log.
+set -E
+trap 'echo "[smoke $(date -u +%H:%M:%S)] FAIL: exit $? at line $LINENO: $BASH_COMMAND" >&2' ERR
 die() { log "FAIL: $*"; exit 1; }
 profile_value() { awk -F= -v k="$1" '$1==k {print substr($0, length(k) + 2); exit}' "$ENV_FILE"; }
 
@@ -87,7 +90,8 @@ sessions() {
 project_command() {
     # Background callers use `exec`, so $! is the driver itself and SIGTERM reaches it.
     ${PROJECT_EXEC:-} env OUT_DIR="$OUT/run" RUN_ID=smoke COMPOSE_EXTRA_FILES="$OUT/compose_stub.yml" AGENSH_WAKE_STAGGER_S=5 \
-        AGENSH_BRINGUP_SETTLE_S=5 AGENSH_PAUSE_GRACE_S=10 AGENSH_TOKEN_CHECK_S=10 DOCKER="sudo -n docker" \
+        AGENSH_BRINGUP_SETTLE_S=5 AGENSH_PAUSE_GRACE_S=10 AGENSH_TOKEN_CHECK_S=10 AGENSH_ISSUE_CHECK_S=10 \
+        DOCKER="sudo -n docker" \
         python3 -m agensh.project "$@" "$PROJECT_FILE"
 }
 
@@ -109,7 +113,8 @@ check_lifecycle() {
     sudo -n test -d "$(profile_value DATA_ROOT)/$PROFILE/gitea" || die "the pause did not keep the team's state"
     log "paused: containers stopped, state kept"
 
-    (HOURS="$(python3 -c 'print(3 / 60)')" PROJECT_EXEC=exec project_command resume > "$OUT/resume.log" 2>&1) &
+    : > "$OUT/resume.log"
+    (HOURS="$(python3 -c 'print(3 / 60)')" PROJECT_EXEC=exec project_command resume >> "$OUT/resume.log" 2>&1) &
     resumed=$!
     for _ in $(seq 1 60); do
         grep -q 'wake complete' "$OUT/resume.log" && break
@@ -433,7 +438,19 @@ POST
         sleep 5
     done
     ls "$OUT/run/$TASK/digests/"digest-*.md >/dev/null 2>&1 || die "no progress digest was posted"
-    log "product owner: accounts exist, a mention was urgent for $org-worker1 only, digests posted"
+    # Only the owner ends the run by closing issue #1; a worker's close is reopened.
+    local token state=closed
+    token="$(sudo -n cat "$(profile_value DATA_ROOT)/$PROFILE/tokens/agent-$org-worker1.token")"
+    curl -fsS -X PATCH -H "Authorization: token $token" -H 'Content-Type: application/json' -d '{"state":"closed"}' \
+        "http://localhost:$(profile_value EDGE_HTTP_PORT)/api/v1/repos/$org/main/issues/1" >/dev/null \
+        || die "worker1 could not close issue #1"
+    for _ in $(seq 1 12); do
+        state="$(gitea_api "/repos/$org/main/issues/1" | python3 -c 'import json,sys; print(json.load(sys.stdin)["state"])')"
+        [ "$state" = open ] && break
+        sleep 5
+    done
+    [ "$state" = open ] || die "issue #1 closed by a worker was not reopened"
+    log "product owner: accounts exist, a mention was urgent for $org-worker1 only, digests posted, a worker's close of #1 was reopened"
 }
 
 push_upstream_change() {

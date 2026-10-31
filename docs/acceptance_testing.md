@@ -64,6 +64,17 @@ The smoke test runs two scripted workers through the real services in about 12
 minutes without a model (use `bash tests/smoke/run_isolated.sh /path/to/data-dir`
 to keep it inside a Docker-in-Docker container on a shared host).
 
+[`tests/live/run_live.sh`](../tests/live/run_live.sh) is a scripted run with your
+model: two Copilot workers get 30 minutes for a small CLI feature (JSON output,
+sorting, tests, README) and the script reports delivered commits, acceptance,
+CI timeline and token use per worker. It spends real tokens (about 2M in our
+first run, which finished in 6 minutes):
+
+```bash
+mkdir -p /path/to/data-dir/tmp && install -m 600 ~/.agensh/upstream.env /path/to/data-dir/tmp/upstream.env
+bash tests/smoke/run_isolated.sh /path/to/data-dir bash tests/live/run_live.sh
+```
+
 ## Scenario 1: improve an existing repository
 
 Add `.agensh/project.toml` to your repository (it can stay uncommitted; the path
@@ -173,7 +184,8 @@ password in `.claude-team-data/software-project-<name>/tokens/human-owner.passwo
 - An issue you open is picked up; a comment you leave on a PR reaches its author.
 - A PR touching `.agensh/` or your `protected_paths` waits for your approval.
 - A digest arrives in the channel every hour.
-- Closing issue #1 ends the run and delivers it.
+- Closing issue #1 ends the run and delivers it; a worker closing it is
+  reopened (without a product owner, the team's own close ends the run).
 
 ## Scenario 4: pause, resume, budget
 
