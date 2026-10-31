@@ -548,9 +548,16 @@ Refactor:
 
 Features:
 
-9. **`software-project` pack**: import, sync and delivery; acceptance commands,
-   CI merge gate, protected paths, broken-main alarm, issue backlog, network
-   modes and default base images.
+9. **`software-project` pack**, in three parts:
+   - **9a** *(done)*: project files and `agensh.project` (profile, build,
+     run); import of the upstream branch with its history; per-project prompt
+     rendering; delivery to a GitHub branch and pull request (or a bundle);
+     acceptance as the evaluation; `default-python` base image; `open` network;
+     the task channel becomes a pack setting.
+   - **9b**: CI as a required merge check, protected acceptance files, the
+     broken-`main` alarm and `fix-main` gate.
+   - **9c**: issue backlog synchronization, `allowlist` and `auto` network
+     modes, upstream sync before delivery.
 10. **Human product owner and resume**: accounts, urgent routing, post-merge
     review on the delivery PR, progress digest, fresh-session resume with the
     project-state summary, and the optional planning phase.

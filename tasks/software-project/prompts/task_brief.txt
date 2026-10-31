@@ -1,0 +1,17 @@
+Project: ${TASK}
+
+${GOAL}
+Repository: `${REPO}` on the team Gitea, imported from ${UPSTREAM}. Commit all
+work to its default branch through PRs.
+
+This is FULLY autonomous: there is NO human to ask. Define the remaining
+requirements, split the work, decide, and ship by yourselves. Do not wait for
+instructions.
+
+First step: read the repository and the instructions in AGENTS.md.
+
+Mattermost coordination: your team is `${MM_TEAM_ID}` and the shared task
+channel is `${TASK_CHANNEL_ID}`. Pass those ids straight to the mattermost
+tools — do not guess them and do not go looking them up. If a mattermost call
+returns 403 or 404 you have used a wrong id, not lost access: you are a member
+of that team and that channel.

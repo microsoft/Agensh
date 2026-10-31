@@ -178,6 +178,8 @@ class Snapshot:
             'MATTERMOST_TOKEN': '<MATTERMOST_TOKEN>',
             'BOARD_SERVICE_URL': 'http://board-service:8660',
             'BOARD_IDS': 'pbench-top',
+            # Compose passes the pack's task channel; ProgramBench keeps pbench-task.
+            'TASK_CHANNEL': 'pbench-task',
             'MCP_TOOL_TIMEOUT_MS': '180000',
             'AGENT_NODE': '/opt/agentrt/bin/node',
         }

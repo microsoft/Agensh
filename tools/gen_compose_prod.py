@@ -80,6 +80,7 @@ __HARNESS_ENV__
   AGENSH_WORKERS: "${AGENSH_WORKERS}"
   BOARD_SERVICE_URL: "http://board-service:8660"
   BOARD_IDS: "__BOARD_ID__"
+  TASK_CHANNEL: "__TASK_CHANNEL__"
 
 x-mini-router: &mini-router-base
   cgroup_parent: agensh.slice
@@ -218,7 +219,7 @@ services:
       MATTERMOST_ADMIN_EMAIL: "mmadmin@${ORG_NAME}.local"
       MATTERMOST_TEAM_NAME: "${ORG_NAME}"
       MATTERMOST_TEAM_DISPLAY: "${ORG_NAME}"
-    volumes:
+__BOOTSTRAP_IMPORT__    volumes:
       - ${DATA_ROOT:-../.claude-team-data}/${PROFILE}:/data
 
   secret-service:
@@ -375,7 +376,7 @@ AGENT_BLOCK = '''
       - ${DATA_ROOT:-../.claude-team-data}/${PROFILE}/tokens/agent-${ORG_NAME}-__SHORT__-mm.token:/run/omcgitea/tokens/agent-${ORG_NAME}-__SHORT__-mm.token:ro
 __PACK_MOUNTS__
       - ../prompts/agents.txt:/opt/omcgitea/prompts/agents.md:ro
-      - ../tasks/__PACK__/prompts:/opt/omcgitea/task-prompts:ro
+      - __TASK_PROMPTS__:/opt/omcgitea/task-prompts:ro
       - ../agent/render_agents.sh:/opt/omcgitea/render_agents.sh:ro
       - ../agent/config/mcp_deny_tools.json:/opt/omcgitea/config/mcp_deny_tools.json:ro
       - ../agent/config/mcp_allowed_tools.json:/opt/omcgitea/config/mcp_allowed_tools.json:ro
@@ -431,11 +432,16 @@ def build():
     out.append(HEADER.replace('__HARNESS_ENV__', harness_env)
                .replace('__WORKER_RESOURCES__', worker_resources())
                .replace('__BOARD_ID__', PACK.board_id)
+               .replace('__TASK_CHANNEL__', PACK.channel)
                .replace('${AGENT_HARNESS:-copilot}', '${AGENT_HARNESS:-' + AGENT_HARNESS + '}'))
     members = ",\n".join(f'          "${{ORG_NAME}}-{s}"' for s in ALL_AGENTS)
+    # Imported histories become main as is: no initial commit and no CODEOWNERS commit.
+    bootstrap_import = ('      REPO_AUTO_INIT: "false"\n      BOOTSTRAP_CODEOWNERS: "false"\n'
+                        if PACK.import_history else '')
     out.append(INFRA.replace("{AGENTS_CSV}", agents_csv)
                .replace("{BOARD_MEMBERS}", members)
-               .replace("__BOARD_ID__", PACK.board_id))
+               .replace("__BOARD_ID__", PACK.board_id)
+               .replace("__BOOTSTRAP_IMPORT__", bootstrap_import))
     for short in ALL_AGENTS:
         harness_files = ('config.sh',) if AGENT_HARNESS == 'copilot' else ('acp.py', 'config.py')
         harness_mounts = '\n'.join(
@@ -444,7 +450,10 @@ def build():
         block = AGENT_BLOCK.replace("__SHORT__", short).replace("__HARNESS_MOUNTS__", harness_mounts)
         mounts = pack_mounts()
         block = block.replace("__PACK_MOUNTS__\n", mounts + "\n" if mounts else "")
-        out.append(block.replace("__PACK__", PACK.name))
+        # Per-run prompts are rendered by the pack's prepare hook (see agensh/README.md).
+        prompts = ('${AGENSH_TASK_PROMPTS:?AGENSH_TASK_PROMPTS is set by the prepare hook}'
+                   if PACK.task_prompts == 'run' else f'../tasks/{PACK.name}/prompts')
+        out.append(block.replace("__TASK_PROMPTS__", prompts))
     for short in ALL_AGENTS:
         out.append(ROUTER_BLOCK.replace("__SHORT__", short))
     return "".join(out)

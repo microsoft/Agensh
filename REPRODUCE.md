@@ -34,6 +34,7 @@ Skills remain enabled in every harness.
 | Core worker instructions and kickoff | [prompts/](prompts/README.md) |
 | Team driver, pack loading and allocation | [agensh/](agensh/README.md) |
 | ProgramBench pack: prompts, hooks, launch scripts, standalone baseline, submission and scoring | [tasks/programbench/](tasks/programbench/README.md) |
+| Software-project pack: real repositories, project files, delivery as pull requests | [tasks/software-project/](tasks/software-project/README.md) |
 | Core scripts: team runner, status, model proxy, render check | [scripts/](scripts/README.md) |
 | Compose generation and render snapshot | [tools/](tools/README.md) |
 | Unit and smoke tests | [tests/smoke/](tests/smoke/README.md) |

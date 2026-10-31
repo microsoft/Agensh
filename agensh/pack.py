@@ -42,6 +42,11 @@ class Pack:
     network: str = 'offline'
     mounts: tuple = ()
     board_id: str = 'team'
+    channel: str = 'team-task'
+    # `run`: the prepare hook renders the prompt fragments into $AGENSH_TASK_PROMPTS.
+    task_prompts: str = 'pack'
+    # The prepare hook supplies a git history that becomes the team's main branch.
+    import_history: bool = False
 
     def hook(self, name):
         return self.hooks.get(name)
@@ -62,7 +67,7 @@ def load_pack(name, root=ROOT):
         raise PackError(f'{path} not found')
     with path.open('rb') as stream:
         data = tomllib.load(stream)
-    _known(data, ('name', 'description', 'hooks', 'messages', 'team', 'environment'), path.name)
+    _known(data, ('name', 'description', 'hooks', 'messages', 'team', 'environment', 'workspace'), path.name)
     if data.get('name') != name:
         raise PackError(f'{path} declares name {data.get("name")!r}, expected {name!r}')
 
@@ -90,13 +95,24 @@ def load_pack(name, root=ROOT):
                           'message': inside(reminder['message'], 'reminder message')})
 
     team = data.get('team', {})
-    _known(team, ('issue_title', 'seed_message', 'board_id'), '[team]')
+    _known(team, ('issue_title', 'seed_message', 'board_id', 'channel'), '[team]')
     board_id = team.get('board_id', 'team')
     if not re.fullmatch(r'[a-z0-9][a-z0-9-]*', str(board_id)):
         raise PackError(f'invalid board_id {board_id!r}')
+    channel = team.get('channel', 'team-task')
+    if not re.fullmatch(r'[a-z0-9][a-z0-9-]{0,63}', str(channel)):
+        raise PackError(f'invalid channel {channel!r}')
 
     environment = data.get('environment', {})
-    _known(environment, ('network', 'mounts'), '[environment]')
+    _known(environment, ('network', 'mounts', 'task_prompts'), '[environment]')
+    task_prompts = environment.get('task_prompts', 'pack')
+    if task_prompts not in ('pack', 'run'):
+        raise PackError(f'task_prompts must be "pack" or "run"; got {task_prompts!r}')
+    workspace = data.get('workspace', {})
+    _known(workspace, ('import_history',), '[workspace]')
+    import_history = workspace.get('import_history', False)
+    if not isinstance(import_history, bool):
+        raise PackError('[workspace] import_history must be true or false')
     network = environment.get('network', 'offline')
     if network not in NETWORK_MODES:
         raise PackError(f'network must be one of {", ".join(NETWORK_MODES)}; got {network!r}')
@@ -118,4 +134,5 @@ def load_pack(name, root=ROOT):
         issue_title=team.get('issue_title', '{task}'),
         seed_message=team.get('seed_message', 'Seed workspace ({task})'),
         network=network, mounts=tuple(mounts), board_id=board_id,
+        task_prompts=task_prompts, import_history=import_history, channel=channel,
     )

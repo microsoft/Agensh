@@ -1,0 +1,3 @@
+Only what is merged into `main` is delivered. Keep `main` passing the full suite, and
+record the architecture and the decisions you make in the repository (for example in
+`ARCHITECTURE.md`) so reviewers and later runs can follow them.

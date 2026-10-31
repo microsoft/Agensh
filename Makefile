@@ -28,7 +28,8 @@ COMPOSE_BASE := docker/_gen_prod.$(PROFILE).yml
 # selects the overlay: `offline` keeps workers on the internal network only.
 profile_value = $(shell grep -E '^$(1)=' $(ENV_FILE) 2>/dev/null | tail -n1 | cut -d= -f2-)
 PACK := $(or $(call profile_value,AGENSH_PACK),programbench)
-NETWORK_MODE := $(shell python3 -c 'import sys; from agensh.pack import load_pack; print(load_pack(sys.argv[1]).network)' $(PACK) 2>/dev/null)
+# A project may override the pack's network mode with AGENSH_NETWORK in its profile.
+NETWORK_MODE := $(or $(call profile_value,AGENSH_NETWORK),$(shell python3 -c 'import sys; from agensh.pack import load_pack; print(load_pack(sys.argv[1]).network)' $(PACK) 2>/dev/null))
 NETWORK_OVERLAY := $(if $(filter open,$(NETWORK_MODE)),-f docker/network_open.yml)
 # COMPOSE_EXTRA_FILES (space-separated, absolute paths) layers further overrides,
 # such as the smoke test's stub harness mounts.
@@ -80,6 +81,10 @@ up: check-env prep-mm-dirs render-base
 	$(COMPOSE) up -d --build $(UP_FLAGS) $(SERVICES)
 
 SERVICES ?=
+
+# Packs with per-run prompts require AGENSH_TASK_PROMPTS to start workers; commands
+# that only inspect or stop a profile get a placeholder so they work outside a run.
+down logs ps pull compose-services clean wipe bootstrap-rerun: export AGENSH_TASK_PROMPTS ?= /nonexistent-task-prompts
 
 UP_FLAGS ?=
 

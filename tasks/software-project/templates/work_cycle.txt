@@ -1,0 +1,12 @@
+1. Read issue #1, the open issues and the board, and pick a piece of the goal nobody
+   has claimed.
+2. Announce it as a `CLAIM` on the shared context board, naming the issue it serves
+   (for example `#1`).
+3. Implement it on a branch from the latest `main`, with tests where the repository
+   has them. You do not need to sync code with others during implementation.
+4. Run the PR checks on your branch:
+${ACCEPTANCE_PR}
+5. Push, open a PR, and merge to `main`. If the merge is refused, merge the latest `main`
+   into your branch, re-run the checks, and push again.
+6. Say what you finished as a `PATCH_SUMMARY` (`files= | idea= | evidence=`) on the board,
+   then go back to 1.

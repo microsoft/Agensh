@@ -32,7 +32,6 @@ UP_LOCK = '/tmp/agensh-make-up.lock'
 SESSION_DIRS = {'copilot': 'home/.copilot/session-state', 'codex': 'home/.codex/sessions',
                 'claude': 'home/.claude/projects'}
 DEFAULT_SESSION_DIR = 'home/.pi/agent/sessions'
-TASK_CHANNEL = 'pbench-task'
 
 
 def log(message):
@@ -84,7 +83,8 @@ def render_prompt(path, **variables):
 class Mattermost:
     """Admin-side Mattermost calls; failures are reported and never stop the run."""
 
-    def __init__(self, port, user, password, team_name):
+    def __init__(self, port, user, password, team_name, channel):
+        self.channel = channel
         self.base = f'http://localhost:{port}' if port else None
         self.user, self.password, self.team_name = user, password, team_name
         self.token = None
@@ -156,11 +156,11 @@ class Mattermost:
         for member in [self.user_id(self.user), *[self.user_id(w) for w in workers]]:
             if member:
                 self.request('POST', f'/teams/{team_id}/members', {'team_id': team_id, 'user_id': member})
-        status, reply, _ = self.request('GET', f'/teams/{team_id}/channels/name/{TASK_CHANNEL}')
+        status, reply, _ = self.request('GET', f'/teams/{team_id}/channels/name/{self.channel}')
         channel = reply.get('id') if status == 200 and isinstance(reply, dict) else None
         if not channel:
-            status, reply, _ = self.request('POST', '/channels', {'team_id': team_id, 'name': TASK_CHANNEL,
-                                                                  'display_name': 'pbench task', 'type': 'P'})
+            status, reply, _ = self.request('POST', '/channels', {'team_id': team_id, 'name': self.channel,
+                                                                  'display_name': self.channel.replace('-', ' '), 'type': 'P'})
             channel = reply.get('id') if 200 <= status < 300 and isinstance(reply, dict) else None
             if not channel:
                 log('WARN: could not create MM task channel')
@@ -226,7 +226,7 @@ class TeamRun:
         self.workers = int(v.get('AGENSH_WORKERS', '') or 4)
         self.mm = Mattermost(v.get('EDGE_MM_PORT', ''), v.get('MATTERMOST_ADMIN_USER', ''),
                              v.get('MATTERMOST_ADMIN_PASSWORD', ''),
-                             v.get('MATTERMOST_TEAM_NAME', '') or self.org)
+                             v.get('MATTERMOST_TEAM_NAME', '') or self.org, self.pack.channel)
 
     def gitea_url(self, with_credentials=True):
         credentials = f'{self.gitea_user}:{self.gitea_password}@' if with_credentials else ''
@@ -243,7 +243,8 @@ class TeamRun:
         hook = self.pack.hook(name)
         if hook is None:
             return True
-        return run(['bash', str(hook)], cwd=ROOT, env=self.hook_env()).returncode == 0
+        interpreter = [sys.executable] if hook.suffix == '.py' else ['bash']
+        return run([*interpreter, str(hook)], cwd=ROOT, env=self.hook_env()).returncode == 0
 
     def make(self, *arguments, quiet=False, check=False):
         return run(['make', *arguments, f'PROFILE={self.profile}'], cwd=ROOT, quiet=quiet, check=check)
@@ -316,7 +317,22 @@ class TeamRun:
             log(f'clearing {len(stale)} stale container record(s) for {self.profile}')
             run([*DOCKER, 'rm', '-f', *stale], quiet=True)
 
+    def push_history(self, clone):
+        # main does not exist yet (no initial commit), so this is an ordinary push.
+        log(f'pushing the imported history from {clone} as main')
+        for attempt in range(1, 6):
+            if run(['git', '-C', str(clone), 'push', '-q', self.gitea_url(), 'HEAD:refs/heads/main']).returncode == 0:
+                log('imported history is main')
+                return
+            log(f'WARN: history push attempt {attempt}/5 failed; retrying in {attempt * 5}s')
+            time.sleep(attempt * 5)
+        raise Fatal('could not push the imported history to the team repository')
+
     def push_seed(self):
+        history = self.task_out / '.seed_git'
+        if history.is_file():
+            self.push_history(Path(history.read_text().strip()))
+            return
         seed_path = self.task_out / '.seed_path'
         seed_dir = Path(seed_path.read_text().strip()) if seed_path.is_file() else None
         push_tmp = self.task_out / '_push'
@@ -375,7 +391,13 @@ class TeamRun:
     def drive(self):
         self.push_seed()
         team_id, channel = self.mm.ensure_task_channel([f'{self.org}-worker{i}' for i in range(1, self.workers + 1)])
-        brief = render_prompt(self.pack.task_brief, TASK=self.task, REPO=self.repo,
+        # The prepare hook may add project variables (goal, checks) for the brief.
+        extra = {}
+        brief_vars = self.task_out / 'brief_vars.json'
+        if brief_vars.is_file():
+            extra = {k: str(v) for k, v in json.loads(brief_vars.read_text()).items()
+                     if re.fullmatch(r'[A-Z][A-Z0-9_]*', k)}
+        brief = render_prompt(self.pack.task_brief, **extra, TASK=self.task, REPO=self.repo,
                               MM_TEAM_ID=team_id or '', TASK_CHANNEL_ID=channel or '')
         kickoff = render_prompt(ROOT / 'prompts/kickoff.txt', TASK_BRIEF=brief)
         self.open_issue(brief)
@@ -417,7 +439,7 @@ class TeamRun:
         log(f'wake complete: {woke}/{self.workers} agents')
         if channel:
             if self.mm.post(channel, kickoff):
-                log(f'task posted to MM channel {TASK_CHANNEL} (record; agents already woken)')
+                log(f'task posted to MM channel {self.pack.channel} (record; agents already woken)')
             else:
                 log('WARN: MM channel post failed')
         else:

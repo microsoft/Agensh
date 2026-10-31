@@ -1,0 +1,26 @@
+# Software project: improve an existing repository, or build a new one, from a
+# goal in the project file (.agensh/project.toml); delivered as an upstream PR.
+name = "software-project"
+description = "Work on a real repository from a goal; deliver main upstream as a pull request"
+
+[hooks]
+prepare = "hooks/prepare.py"    # import upstream history (or start empty), render prompts
+export = "hooks/export.py"      # push main to a delivery branch and open a pull request
+evaluate = "hooks/evaluate.py"  # run the full acceptance suite on the delivered main
+
+[messages]
+task_brief = "prompts/task_brief.txt"
+idle = "prompts/idle.txt"
+idle_delivery = "prompts/idle_delivery.txt"
+
+[team]
+issue_title = "{task}: project goal"
+board_id = "team"
+channel = "team-task"
+
+[environment]
+network = "open"         # a project file may choose "offline"
+task_prompts = "run"     # the prepare hook renders templates/ for each project
+
+[workspace]
+import_history = true    # the upstream branch's history becomes the team's main

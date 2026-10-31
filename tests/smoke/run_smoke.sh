@@ -1,27 +1,44 @@
 #!/usr/bin/env bash
 # Run a short team on the scripted stub harness through the real runner, then
-# check claims, PRs, merges, event delivery, export and shutdown archives.
+# check claims, PRs, merges, event delivery, usage, export and shutdown archives.
+# SMOKE_PACK selects programbench (default) or software-project.
 # Needs Docker, passwordless sudo and network access for the first image builds.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT"
 
+PACK="${SMOKE_PACK:-programbench}"
 WORKERS="${SMOKE_WORKERS:-2}"
 MINUTES="${SMOKE_MINUTES:-5}"
 KEEP="${SMOKE_KEEP:-0}"
 INTERRUPT="${SMOKE_INTERRUPT:-0}"
 PORT_BASE="${SMOKE_PORT_BASE:-26000}"
 SUBNET_OCTET="${SMOKE_SUBNET_OCTET:-231}"
-TASK=jgm__pandoc.5caad90
-PROFILE=programbench-pandoc-smoke
 IMAGE_ORG=agensh-smoke
-CLEANROOM="$IMAGE_ORG/jgm_1776_pandoc.5caad90:task_cleanroom_v6"
-AGENT_IMAGE=omcgitea-agent-pandoc-pi:smoke
 PI_VERSION=1.4.0
 OUT="$ROOT/out/smoke"
-ENV_FILE="$ROOT/.env.$PROFILE"
 DOCKER=(sudo -n docker)
+case "$PACK" in
+    programbench)
+        TASK=jgm__pandoc.5caad90
+        PROFILE=programbench-pandoc-smoke
+        CLEANROOM="$IMAGE_ORG/jgm_1776_pandoc.5caad90:task_cleanroom_v6"
+        AGENT_IMAGE=omcgitea-agent-pandoc-pi:smoke
+        BOARD=pbench-top
+        ;;
+    software-project)
+        TASK=smoke-widget
+        PROFILE=software-project-smoke-widget
+        PROJECT_FILE="$OUT/project/.agensh/project.toml"
+        UPSTREAM="$OUT/upstream.git"
+        BASE_IMAGE=python:3.12-slim-bookworm
+        AGENT_IMAGE=omcgitea-agent-python-3-12-slim-bookworm-pi:smoke
+        BOARD=team
+        ;;
+    *) echo "SMOKE_PACK must be programbench or software-project" >&2; exit 2 ;;
+esac
+ENV_FILE="$ROOT/.env.$PROFILE"
 
 log() { echo "[smoke $(date -u +%H:%M:%S)] $*" >&2; }
 die() { log "FAIL: $*"; exit 1; }
@@ -31,11 +48,19 @@ profile_value() { awk -F= -v k="$1" '$1==k {print substr($0, length(k) + 2); exi
 sudo -n true 2>/dev/null || die "passwordless sudo is required"
 
 remove_profile() {
-    # Only this smoke profile's containers, data and outputs are removed.
+    # Only this smoke profile's containers, data and outputs are removed. Containers
+    # left by an earlier run would restart with the daemon, so remove them by label too.
+    local stale
+    stale="$("${DOCKER[@]}" ps -aq --filter "label=com.docker.compose.project=omcgitea-$PROFILE")"
+    [ -z "$stale" ] || "${DOCKER[@]}" rm -f $stale >/dev/null
     if [ -f "$ENV_FILE" ]; then
         make -s clean PROFILE="$PROFILE" >/dev/null 2>&1 || true
+        local data
+        data="$(profile_value DATA_ROOT)/$PROFILE"
+        # make clean stops before deleting data when Compose cannot render; say so.
+        [ ! -e "$data" ] || die "make clean left $data behind"
     fi
-    sudo -n rm -rf "$OUT/run"
+    sudo -n rm -rf "$OUT/run" "$OUT/project" "$OUT/upstream.git"
 }
 
 preserve_failure() {
@@ -49,27 +74,70 @@ preserve_failure() {
     fi
 }
 
+smoke_env() {
+    # The egress proxy forwards to tests/smoke/fake_upstream.py, which reports fixed usage.
+    env LLM_UPSTREAM=http://fake-upstream:8080 LLM_UPSTREAM_TOKEN=smoke-unused \
+        AGENT_IMAGE_TAG=smoke AGENT_BASE_IMAGE="$IMAGE_ORG/agent-base:local" \
+        MINI_ROUTER_IMAGE="$IMAGE_ORG/mini-router:local" BOARD_IMAGE="$IMAGE_ORG/board:local" \
+        BOOTSTRAP_IMAGE="$IMAGE_ORG/bootstrap:local" SECRET_SERVICE_IMAGE="$IMAGE_ORG/secret-service:local" \
+        DOCKER="sudo -n docker" "$@"
+}
+
+make_upstream() {
+    # A tiny Python project with a test suite and two commits, as a local upstream.
+    local work="$OUT/upstream-work"
+    rm -rf "$work" "$UPSTREAM"
+    git init -q --initial-branch=main "$work"
+    printf '%s\n' 'def greet(name):' '    return f"hello {name}"' > "$work/widget.py"
+    git -C "$work" add . && git -C "$work" -c user.name=Smoke -c user.email=smoke@localhost commit -qm "Add widget"
+    printf '%s\n' 'import unittest' 'from widget import greet' '' 'class GreetTest(unittest.TestCase):' \
+        '    def test_greet(self):' '        self.assertEqual(greet("x"), "hello x")' > "$work/test_widget.py"
+    git -C "$work" add . && git -C "$work" -c user.name=Smoke -c user.email=smoke@localhost commit -qm "Test widget"
+    git clone -q --bare "$work" "$UPSTREAM"
+    rm -rf "$work"
+    mkdir -p "$(dirname "$PROJECT_FILE")"
+    cat > "$PROJECT_FILE" <<EOF
+pack = "software-project"
+name = "$TASK"
+goal = "Smoke test: each worker adds one file through a merged pull request."
+[upstream]
+repo = "$UPSTREAM"
+[acceptance]
+pr = ["python3 -m unittest -q"]
+[team]
+workers = $WORKERS
+[environment]
+base_image = "$BASE_IMAGE"
+EOF
+}
+
 build_images() {
     log "building images (cached after the first run)"
     "${DOCKER[@]}" build -q -f agent/Dockerfile.base -t "$IMAGE_ORG/agent-base:local" agent/ >/dev/null
     "${DOCKER[@]}" build -q -t "$IMAGE_ORG/mini-router:local" mini-router/ >/dev/null
     "${DOCKER[@]}" build -q -t "$IMAGE_ORG/board:local" board-service/ >/dev/null
-    "${DOCKER[@]}" build -q -f tests/smoke/cleanroom.Dockerfile -t "$CLEANROOM" tests/smoke/ >/dev/null
-    "${DOCKER[@]}" build -q -f agent/Dockerfile \
-        --build-arg TASK_IMAGE="$CLEANROOM" --build-arg AGENT_HARNESS=pi \
-        --build-arg PI_CLI_VERSION="$PI_VERSION" \
-        --build-arg AGENT_BASE_IMAGE="$IMAGE_ORG/agent-base:local" -t "$AGENT_IMAGE" . >/dev/null
+    if [ "$PACK" = programbench ]; then
+        "${DOCKER[@]}" build -q -f tests/smoke/cleanroom.Dockerfile -t "$CLEANROOM" tests/smoke/ >/dev/null
+        "${DOCKER[@]}" build -q -f agent/Dockerfile \
+            --build-arg TASK_IMAGE="$CLEANROOM" --build-arg AGENT_HARNESS=pi \
+            --build-arg PI_CLI_VERSION="$PI_VERSION" \
+            --build-arg AGENT_BASE_IMAGE="$IMAGE_ORG/agent-base:local" -t "$AGENT_IMAGE" . >/dev/null
+    else
+        [ "$(smoke_env python3 -m agensh.project build "$PROJECT_FILE" --agent-harness pi \
+            --harness-version "$PI_VERSION" 2>"$OUT/build.log" | tail -1)" = "$AGENT_IMAGE" ] \
+            || die "project image build failed; see $OUT/build.log"
+    fi
 }
 
 write_profile() {
-    # The egress proxy forwards to tests/smoke/fake_upstream.py, which reports fixed usage.
-    env ENV_DIR="$ROOT" TASKS="$TASK" WORKERS="$WORKERS" PROFILE_SUFFIX=smoke \
-        PORT_BASE="$PORT_BASE" SUBNET_OCTET="$SUBNET_OCTET" \
-        LLM_UPSTREAM=http://fake-upstream:8080 LLM_UPSTREAM_TOKEN=smoke-unused \
-        AGENT_IMAGE_TAG=smoke MINI_ROUTER_IMAGE="$IMAGE_ORG/mini-router:local" \
-        BOARD_IMAGE="$IMAGE_ORG/board:local" BOOTSTRAP_IMAGE="$IMAGE_ORG/bootstrap:local" \
-        SECRET_SERVICE_IMAGE="$IMAGE_ORG/secret-service:local" \
-        bash tasks/programbench/scripts/gen_env.sh --agent-harness pi --harness-version "$PI_VERSION" >/dev/null
+    if [ "$PACK" = programbench ]; then
+        smoke_env ENV_DIR="$ROOT" TASKS="$TASK" WORKERS="$WORKERS" PROFILE_SUFFIX=smoke \
+            PORT_BASE="$PORT_BASE" SUBNET_OCTET="$SUBNET_OCTET" \
+            bash tasks/programbench/scripts/gen_env.sh --agent-harness pi --harness-version "$PI_VERSION" >/dev/null
+    else
+        smoke_env python3 -m agensh.project profile "$PROJECT_FILE" --agent-harness pi \
+            --harness-version "$PI_VERSION" >/dev/null
+    fi
     [ "$(profile_value AGENT_IMAGE)" = "$AGENT_IMAGE" ] || die "unexpected AGENT_IMAGE in $ENV_FILE"
     {
         echo "# Generated by tests/smoke/run_smoke.sh: run the stub harness in place of Pi."
@@ -93,6 +161,10 @@ gitea_api() {
         "http://localhost:$(profile_value EDGE_HTTP_PORT)/api/v1$1"
 }
 
+gitea_clone_url() {
+    echo "http://$(profile_value GITEA_ADMIN_USER):$(profile_value GITEA_ADMIN_PASSWORD)@localhost:$(profile_value EDGE_HTTP_PORT)/$(profile_value ORG_NAME)/main.git"
+}
+
 container() {
     "${DOCKER[@]}" ps --filter "label=com.docker.compose.project=omcgitea-$PROFILE" \
         --filter "label=com.docker.compose.service=$1" --format '{{.Names}}' | head -1
@@ -102,8 +174,10 @@ contributions_on_main() {
     local org count=0 i
     org="$(profile_value ORG_NAME)"
     for i in $(seq 1 "$WORKERS"); do
-        gitea_api "/repos/$org/main/contents/smoke/$org-worker$i.txt?ref=main" >/dev/null 2>&1 \
-            && count=$((count + 1))
+        # Gitea answers 200 for an empty repository, so check that the file itself came back.
+        gitea_api "/repos/$org/main/contents/smoke/$org-worker$i.txt?ref=main" 2>/dev/null \
+            | python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(not (isinstance(d, dict) and d.get("type") == "file" and d.get("path") == sys.argv[1]))' \
+                "smoke/$org-worker$i.txt" 2>/dev/null && count=$((count + 1))
     done
     echo "$count"
 }
@@ -124,8 +198,8 @@ check_live_state() {
 
     "${DOCKER[@]}" exec "$board" python3 -c '
 import json, sys, urllib.request
-workers, org = int(sys.argv[1]), sys.argv[2]
-url = "http://127.0.0.1:8660/board/pbench-top/read_all?viewer=harness"
+workers, org, board = int(sys.argv[1]), sys.argv[2], sys.argv[3]
+url = f"http://127.0.0.1:8660/board/{board}/read_all?viewer=harness"
 entries = json.load(urllib.request.urlopen(url, timeout=10))["entries"]
 for i in range(1, workers + 1):
     agent = f"{org}-worker{i}"
@@ -134,10 +208,11 @@ for i in range(1, workers + 1):
     if missing:
         sys.exit(f"{agent} has no board {sorted(missing)}")
 print(f"board entries: {len(entries)}")
-' "$WORKERS" "$org" >&2 || die "board check failed"
+' "$WORKERS" "$org" "$BOARD" >&2 || die "board check failed"
 
     check_usage
     check_agents_md
+    [ "$PACK" = software-project ] && check_imported_history
 
     local rows
     rows="$("${DOCKER[@]}" exec "$mysql" mysql -N -B -uroot -p"$(profile_value MYSQL_ROOT_PASSWORD)" \
@@ -150,16 +225,35 @@ print(f"board entries: {len(entries)}")
 }
 
 check_agents_md() {
-    # The worker's entrypoint must render exactly what the render snapshot predicts.
-    local expected worker
-    python3 tools/render_snapshot.py --out "$OUT/snapshot" --workers "$WORKERS" --harness pi >/dev/null \
-        || die "render snapshot failed"
-    expected="$OUT/snapshot/worker/w$(printf '%02d' "$WORKERS")/AGENTS.md"
+    # The worker's entrypoint must render exactly what the shared renderer predicts.
+    local expected="$OUT/expected-AGENTS.md" worker
+    if [ "$PACK" = programbench ]; then
+        python3 tools/render_snapshot.py --out "$OUT/snapshot" --workers "$WORKERS" --harness pi >/dev/null \
+            || die "render snapshot failed"
+        cp "$OUT/snapshot/worker/w$(printf '%02d' "$WORKERS")/AGENTS.md" "$expected"
+    else
+        env -i PATH="$PATH" AGENT_NAME="$(profile_value ORG_NAME)-worker1" GITEA_ORG="$(profile_value ORG_NAME)" \
+            AGENSH_WORKERS="$WORKERS" TASK_CHANNEL=team-task \
+            bash agent/render_agents.sh prompts/agents.txt "$OUT/run/$TASK/prompts" > "$expected"
+    fi
     worker="$(container agent-worker1)"
     "${DOCKER[@]}" exec "$worker" cat /work/AGENTS.md > "$OUT/agents-worker1.md" \
         || die "cannot read AGENTS.md from $worker"
-    diff -u "$expected" "$OUT/agents-worker1.md" >&2 || die "worker AGENTS.md differs from the render snapshot"
-    log "worker AGENTS.md matches the render snapshot ($(wc -c < "$expected") bytes)"
+    diff -u "$expected" "$OUT/agents-worker1.md" >&2 || die "worker AGENTS.md differs from the expected rendering"
+    log "worker AGENTS.md matches the expected rendering ($(wc -c < "$expected") bytes)"
+}
+
+check_imported_history() {
+    # main must descend from the upstream base, so the delivery PR shares its history.
+    local base check="$OUT/gitea-main"
+    base="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["base_sha"])' "$OUT/run/$TASK/prepare.json")"
+    rm -rf "$check"
+    git clone -q "$(gitea_clone_url)" "$check" || die "cannot clone the team repository"
+    git -C "$check" merge-base --is-ancestor "$base" HEAD || die "team main does not descend from upstream $base"
+    [ "$(git -C "$check" rev-list --count "$base")" = 2 ] || die "upstream history was not imported in full"
+    [ ! -e "$check/.gitea/CODEOWNERS" ] || die "bootstrap added CODEOWNERS to the imported history"
+    log "team main descends from upstream ${base:0:12} with its full history"
+    rm -rf "$check"
 }
 
 check_usage() {
@@ -189,36 +283,76 @@ print(f"usage metered for {workers} workers; team requests={status['team_usage']
 CHECK
 }
 
-check_outputs() {
-    local task_out="$OUT/run/$TASK" org listing
-    org="$(profile_value ORG_NAME)"
-    [ ! -e "$task_out/EXPORT_FAILED" ] || die "submission export failed"
-    # Re-packed archives list entries as ./path; compare without that prefix.
-    listing="$(tar -tzf "$task_out/submission.tar.gz" | sed 's|^\./||')" || die "submission.tar.gz unreadable"
-    for i in $(seq 1 "$WORKERS"); do
-        grep -qx "smoke/$org-worker$i.txt" <<<"$listing" || die "submission lacks smoke/$org-worker$i.txt"
-    done
-    grep -qx "README.md" <<<"$listing" || die "submission lacks the seeded README.md"
+check_archives() {
     local archives
     archives="$(sudo -n find "$(profile_value DATA_ROOT)/$PROFILE/agents" -path '*/shutdown/*/state.tar.gz' | wc -l)"
     [ "$archives" -ge "$WORKERS" ] || die "expected $WORKERS shutdown archives, found $archives"
-    log "submission has every contribution; $archives shutdown archives verified"
+    echo "$archives"
+}
+
+check_outputs() {
+    local task_out="$OUT/run/$TASK" org listing archives
+    org="$(profile_value ORG_NAME)"
+    archives="$(check_archives)"
+    if [ "$PACK" = programbench ]; then
+        [ ! -e "$task_out/EXPORT_FAILED" ] || die "submission export failed"
+        # Re-packed archives list entries as ./path; compare without that prefix.
+        listing="$(tar -tzf "$task_out/submission.tar.gz" | sed 's|^\./||')" || die "submission.tar.gz unreadable"
+        for i in $(seq 1 "$WORKERS"); do
+            grep -qx "smoke/$org-worker$i.txt" <<<"$listing" || die "submission lacks smoke/$org-worker$i.txt"
+        done
+        grep -qx "README.md" <<<"$listing" || die "submission lacks the seeded README.md"
+        log "submission has every contribution; $archives shutdown archives verified"
+        return
+    fi
+    python3 - "$task_out" "$UPSTREAM" "$WORKERS" "$org" "$INTERRUPT" <<'CHECK' >&2 || die "delivery check failed"
+import json, subprocess, sys
+from pathlib import Path
+task_out, upstream, workers, org, interrupted = Path(sys.argv[1]), sys.argv[2], int(sys.argv[3]), sys.argv[4], sys.argv[5] == '1'
+delivery = json.loads((task_out / 'delivery.json').read_text())
+if delivery.get('mode') != 'branch':
+    sys.exit(f'unexpected delivery {delivery}')
+branch, base = delivery['branch'], delivery['base_sha']
+git = lambda *a: subprocess.run(['git', '-C', upstream, *a], capture_output=True, text=True)
+if git('merge-base', '--is-ancestor', base, branch).returncode != 0:
+    sys.exit(f'{branch} does not descend from the upstream base {base}')
+files = set(git('ls-tree', '-r', '--name-only', branch).stdout.split())
+missing = {f'smoke/{org}-worker{i}.txt' for i in range(1, workers + 1)} - files
+if missing or not {'widget.py', 'test_widget.py'} <= files:
+    sys.exit(f'{branch} lacks {sorted(missing)} or the upstream files: {sorted(files)}')
+if delivery['commits'] < workers:
+    sys.exit(f'expected at least {workers} new commits, got {delivery["commits"]}')
+if not interrupted:
+    acceptance = json.loads((task_out / 'acceptance.json').read_text())
+    if not acceptance['all_passed'] or acceptance['head'] != delivery['head']:
+        sys.exit(f'acceptance did not pass on the delivered head: {acceptance}')
+print(f'delivered {branch}: {delivery["commits"]} commit(s) on upstream {base[:12]}'
+      + ('' if interrupted else '; acceptance passed on the delivered head'))
+CHECK
+    log "delivery verified; $archives shutdown archives verified"
 }
 
 main() {
     mkdir -p "$OUT"
     remove_profile
+    [ "$PACK" = software-project ] && make_upstream
     build_images
     write_profile
     trap 'rc=$?; [ "$rc" = 0 ] || preserve_failure; [ "$KEEP" = 1 ] || remove_profile; exit $rc' EXIT
 
     local hours
     hours="$(python3 -c "print($MINUTES / 60)")"
-    log "running $WORKERS stub workers for $MINUTES minutes (log: $OUT/run.log)"
-    env TASK="$TASK" PROFILE="$PROFILE" HOURS="$hours" OUT_DIR="$OUT/run" SKIP_EVAL=1 \
-        PROGRAMBENCH_DOCKER_ORG="$IMAGE_ORG" COMPOSE_EXTRA_FILES="$OUT/compose_stub.yml" \
-        AGENSH_WAKE_STAGGER_S=5 AGENSH_BRINGUP_SETTLE_S=5 \
-        bash scripts/team_run.sh > "$OUT/run.log" 2>&1 &
+    log "running $WORKERS stub workers of $PACK for $MINUTES minutes (log: $OUT/run.log)"
+    if [ "$PACK" = programbench ]; then
+        env TASK="$TASK" PROFILE="$PROFILE" HOURS="$hours" OUT_DIR="$OUT/run" SKIP_EVAL=1 \
+            PROGRAMBENCH_DOCKER_ORG="$IMAGE_ORG" COMPOSE_EXTRA_FILES="$OUT/compose_stub.yml" \
+            AGENSH_WAKE_STAGGER_S=5 AGENSH_BRINGUP_SETTLE_S=5 \
+            bash scripts/team_run.sh > "$OUT/run.log" 2>&1 &
+    else
+        env HOURS="$hours" OUT_DIR="$OUT/run" RUN_ID=smoke COMPOSE_EXTRA_FILES="$OUT/compose_stub.yml" \
+            AGENSH_WAKE_STAGGER_S=5 AGENSH_BRINGUP_SETTLE_S=5 DOCKER="sudo -n docker" \
+            python3 -m agensh.project run "$PROJECT_FILE" > "$OUT/run.log" 2>&1 &
+    fi
     local runner=$!
 
     local deadline=$((SECONDS + MINUTES * 60)) done_count=0

@@ -9,6 +9,7 @@ driver. Standard library only; requires Python 3.11 for `tomllib`.
 | `pack.py` | Loads and validates `tasks/<pack>/pack.toml` |
 | `schedule.py` | Budget, staggered wake, idle phase, reminder and nudge timing as pure functions |
 | `allocate.py` | Port and subnet slots for profiles: fixed for listed tasks, first free slot otherwise |
+| `project.py` | Project files for repository packs: `profile`, `build` and `run` (see the [software-project pack](../tasks/software-project/README.md)) |
 
 [`scripts/team_run.sh`](../scripts/team_run.sh) runs the driver with
 `python3 -m agensh.team_run`. The pack is `--pack`, else `AGENSH_PACK` from the
@@ -22,8 +23,8 @@ service logs and stops the profile only when shutdown archives verify.
 
 ## Pack hooks
 
-Hooks are executables named in `pack.toml` and run on the host from the
-repository root. They receive the run's environment plus:
+Hooks are named in `pack.toml` and run on the host from the repository root,
+`.py` hooks with the driver's Python and others with Bash. They receive the run's environment plus:
 
 | Variable | Value |
 |---|---|
@@ -35,6 +36,6 @@ repository root. They receive the run's environment plus:
 
 | Hook | When | Contract |
 |---|---|---|
-| `prepare` | Before services start | May write the seed tree path to `$AGENSH_TASK_OUT/.seed_path` and `KEY=VALUE` Compose settings to `$AGENSH_TASK_OUT/compose.env`; non-zero stops the run |
+| `prepare` | Before services start | May write the seed tree path to `$AGENSH_TASK_OUT/.seed_path`, or a git clone whose `HEAD` becomes `main` with its history to `.seed_git`; `KEY=VALUE` Compose settings to `compose.env`; extra task-brief variables to `brief_vars.json`; non-zero stops the run |
 | `export` | After the budget, and on the failure path | Delivers the team's result; its exit status is logged, not fatal |
 | `evaluate` | After shutdown unless `SKIP_EVAL=1` | Scores the result; non-zero makes the run exit 1 |

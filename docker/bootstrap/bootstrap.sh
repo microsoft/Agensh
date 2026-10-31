@@ -257,8 +257,9 @@ ensure_repo() {
         return 0
     fi
     local body
-    body=$(jq -nc --arg n "$repo" \
-        '{name:$n, private:false, auto_init:true, default_branch:"main", description:"Agent team collaboration repository"}')
+    # Imported projects push their own history as main, so the repo starts empty.
+    body=$(jq -nc --arg n "$repo" --argjson init "${REPO_AUTO_INIT:-true}" \
+        '{name:$n, private:false, auto_init:$init, default_branch:"main", description:"Agent team collaboration repository"}')
     api_token POST "/api/v1/orgs/${GITEA_ORG}/repos" "$body" >/dev/null
     log "Repo ${GITEA_ORG}/${repo} created"
 }
@@ -343,7 +344,8 @@ ensure_agent_unwatched() {
 
 for repo in "${REPO_LIST[@]}"; do
     ensure_repo "$repo"
-    ensure_codeowners "$repo"
+    # The CODEOWNERS commit would otherwise become part of an imported project's history.
+    if [ "${BOOTSTRAP_CODEOWNERS:-true}" = true ]; then ensure_codeowners "$repo"; fi
     ensure_branch_protection "$repo"
     for agent in "${AGENT_LIST[@]}"; do
         ensure_agent_unwatched "$repo" "$agent"
