@@ -46,7 +46,7 @@ refuse_double_launch() {
     local rc=0 task p pid pr
     for task in $TASKS; do
         p="$(task_profile "$task")"
-        for pid in $(pgrep -f 'pbench_chain\.sh|pbench_run\.sh' 2>/dev/null); do
+        for pid in $(pgrep -f 'pbench_chain\.sh|pbench_run\.sh|agensh\.team_run' 2>/dev/null); do
             pr="$(sudo cat "/proc/$pid/environ" 2>/dev/null | tr '\0' '\n' | awk '/^PROFILE=/{print substr($0, 9); exit}')"
             [ "$pr" = "$p" ] || continue
             log "FATAL: $p is already running (pid $pid) — refusing to double-launch"

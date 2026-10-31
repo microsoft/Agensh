@@ -56,7 +56,7 @@ log "inner daemon ready: $("${DOCKER[@]}" exec "$NAME" docker version --format '
 env_args=()
 while IFS= read -r setting; do
     env_args+=(-e "$setting")
-done < <(env | grep -E '^SMOKE_(WORKERS|MINUTES|KEEP|PORT_BASE|SUBNET_OCTET)=' || true)
+done < <(env | grep -E '^SMOKE_(WORKERS|MINUTES|KEEP|INTERRUPT|PORT_BASE|SUBNET_OCTET)=' || true)
 
 log "running tests/smoke/run_smoke.sh inside $NAME"
 "${DOCKER[@]}" exec "${env_args[@]}" "$NAME" bash tests/smoke/run_smoke.sh

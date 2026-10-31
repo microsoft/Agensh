@@ -2,9 +2,24 @@
 
 The task-specific parts of the ProgramBench experiments: agents rebuild a
 reference program from its behavior and bundled documentation. The core
-cooperation instructions are in [`prompts/`](../../prompts/README.md). The
-pack's runner hooks, tools and `pack.toml` follow with the pack-loading step of
-the [task pack design](../../docs/task_pack_design.md).
+cooperation instructions are in [`prompts/`](../../prompts/README.md), and the
+[team driver](../../agensh/README.md) runs the lifecycle. The ProgramBench-only
+tools and launch scripts still live under `tools/` and `scripts/`; they move
+here with the naming migration in the [task pack design](../../docs/task_pack_design.md).
+
+## Pack file and hooks
+
+[`pack.toml`](pack.toml) names the hooks, the runner messages and their
+timing, and the issue title and seed commit message.
+
+| Hook | Does |
+|---|---|
+| [`hooks/prepare.sh`](hooks/prepare.sh) | Pulls the `task_cleanroom_v6` image, extracts `/workspace` as the seed, stages the reference binary mode 0111 as root outside the seed, records `reference.json`, and passes `PBENCH_BIN` to Compose |
+| [`hooks/export.sh`](hooks/export.sh) | Exports committed `main` as `submission.tar.gz` with three attempts; leaves `EXPORT_FAILED` and an empty archive on failure |
+| [`hooks/evaluate.sh`](hooks/evaluate.sh) | Runs `programbench eval` inside `pbench.slice` through the Docker shim |
+
+The deadline reminders fire 45 and 5 minutes before the end and are skipped when
+their time has already passed at the start of the budget.
 
 ## Prompts
 

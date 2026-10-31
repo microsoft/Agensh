@@ -10,6 +10,7 @@ cd "$ROOT"
 WORKERS="${SMOKE_WORKERS:-2}"
 MINUTES="${SMOKE_MINUTES:-5}"
 KEEP="${SMOKE_KEEP:-0}"
+INTERRUPT="${SMOKE_INTERRUPT:-0}"
 PORT_BASE="${SMOKE_PORT_BASE:-26000}"
 SUBNET_OCTET="${SMOKE_SUBNET_OCTET:-231}"
 TASK=jgm__pandoc.5caad90
@@ -231,10 +232,20 @@ main() {
     log "all $WORKERS contributions are on main"
     check_live_state
 
-    log "waiting for the runner to finish its budget, export and shutdown"
     local rc=0
-    wait "$runner" || rc=$?
-    [ "$rc" = 0 ] || die "runner exited $rc; see $OUT/run.log"
+    if [ "$INTERRUPT" = 1 ]; then
+        # The failure path must still export, archive and verify before stopping.
+        log "interrupting the runner (SIGTERM) to exercise its teardown"
+        kill -TERM "$runner"
+        wait "$runner" || rc=$?
+        [ "$rc" != 0 ] || die "interrupted runner exited 0; expected a failure status"
+        grep -q 'teardown (rc=' "$OUT/run.log" || die "runner did not run its teardown; see $OUT/run.log"
+        log "runner exited $rc after teardown"
+    else
+        log "waiting for the runner to finish its budget, export and shutdown"
+        wait "$runner" || rc=$?
+        [ "$rc" = 0 ] || die "runner exited $rc; see $OUT/run.log"
+    fi
     check_outputs
     log "PASS"
 }

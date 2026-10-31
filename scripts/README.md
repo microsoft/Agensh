@@ -10,7 +10,7 @@ prerequisites and configuration examples are in the
 | `pbench_gen_env.sh` | Writes private per-task profiles, preserving passwords and allocating ports/subnets |
 | `launch_single_node.sh` | Checks all team profiles, images, host guards and the live model route before launch |
 | `lib_launch.sh` | Profile/run naming, environment precedence and inference/evaluation sequencing |
-| `pbench_run.sh` | Seeds one task, starts workers, sends reminders/idle nudges, exports and stops workers |
+| `pbench_run.sh` | Runs one task with the [team driver](../agensh/README.md) and the ProgramBench pack's hooks |
 | `pbench_chain.sh` | Separates run/eval phases, salvages interrupted output and verifies trajectory copies before cleanup |
 | `pbench_build_pertask_images.sh`, `lib_pbench_images.sh` | Builds v6-based worker images and enforces the reference cleanroom tag |
 | `launch_single_agent.py` | Runs the standalone baseline from JSON config with provenance, snapshots and export |

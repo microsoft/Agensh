@@ -524,13 +524,17 @@ Refactor:
    `tasks/programbench/prompts/`, with shared renderers
    (`agent/render_agents.sh`, `scripts/lib_prompts.sh`). *(done)* Lifecycle
    messages move to PR 10, where pause, resume and the token budget exist.
-6. **Python core driver and pack loading**: `pack.toml` and project files;
-   ProgramBench `prepare/export/evaluate` hooks; ProgramBench-only tools move
-   into the pack.
+6. **Python core driver and pack loading**: `agensh/` (driver, `pack.toml`
+   loader, timing rules) and the ProgramBench `prepare/export/evaluate` hooks;
+   `scripts/pbench_run.sh` becomes a wrapper. *(done)* Project files arrive with
+   the `software-project` pack, and the ProgramBench-only tools and launch
+   scripts move into the pack with the naming migration, so user-facing paths
+   change once.
 7. **Compose and image parameterization**: mounts, network modes, base images,
    board id and resource shares come from configuration; profile generation
    drops `TASK_TABLE` for explicit or automatically chosen ports and subnets.
-8. **Naming migration** in one step.
+8. **Naming migration** in one step, together with moving the
+   ProgramBench-only tools and launch scripts into `tasks/programbench/`.
 
 Features:
 

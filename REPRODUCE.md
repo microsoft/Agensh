@@ -362,8 +362,10 @@ and starts temporary image-check containers. Launch only after it passes.
 The launcher uses [lib_launch.sh](scripts/lib_launch.sh) and
 [pbench_chain.sh](scripts/pbench_chain.sh) to sequence tasks and overlap
 completed-task evaluation with the next task. [pbench_run.sh](scripts/pbench_run.sh)
-handles service startup, task seeding, kickoff messages, reminders, idle nudges,
-submission export and shutdown.
+runs the task-neutral [team driver](agensh/team_run.py), which handles service
+startup, the seed push, kickoff messages, reminders, idle nudges and shutdown.
+The [ProgramBench pack](tasks/programbench/README.md) supplies cleanroom seeding,
+submission export and evaluation as hooks.
 
 | Artifact | Location |
 |---|---|
@@ -598,7 +600,7 @@ The team budget includes staggered startup. The default ramp targets 30 seconds
 per worker for the first 120 workers, then 3 seconds, with a serial 20-second
 settle wait. Actual startup can exceed those targets; later workers get less
 time. The ramp can overrun the budget and is followed by a minimum 60-second
-wait. See [pbench_run.sh](scripts/pbench_run.sh) for
+wait. See [the team driver](agensh/team_run.py) and [its timing rules](agensh/schedule.py) for
 `PBENCH_WAKE_STAGGER_S`, `PBENCH_WAKE_FAST_STAGGER_S`,
 `PBENCH_WAKE_RAMP_SUBJ_S` and `PBENCH_BRINGUP_SETTLE_S`. Deadline reminders start
 after the ramp and can be skipped when their target time has passed.
