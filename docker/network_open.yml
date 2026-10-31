@@ -1,0 +1,5 @@
+# Overlay for task packs with network = "open": the team's default network gets
+# general egress. The model credential still stays in the egress proxy.
+networks:
+  default:
+    internal: false

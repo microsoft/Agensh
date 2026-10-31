@@ -8,10 +8,12 @@ driver. Standard library only; requires Python 3.11 for `tomllib`.
 | `team_run.py` | Runs one task: prepare hook, services, seed push, Mattermost setup, task issue, staggered wake, idle watchdog, reminders, export hook, quiesce, archives, service logs, evaluate hook |
 | `pack.py` | Loads and validates `tasks/<pack>/pack.toml` |
 | `schedule.py` | Budget, staggered wake, idle phase, reminder and nudge timing as pure functions |
+| `allocate.py` | Port and subnet slots for profiles: fixed for listed tasks, first free slot otherwise |
 
 [`scripts/pbench_run.sh`](../scripts/pbench_run.sh) runs the driver with
-`python3 -m agensh.team_run --pack programbench`; `AGENSH_PACK` selects another
-pack. Settings come from the environment as before: `TASK`, `PROFILE`, `HOURS`,
+`python3 -m agensh.team_run`. The pack is `--pack`, else `AGENSH_PACK` from the
+environment, else `AGENSH_PACK` from the profile (as the Makefile uses for
+Compose), else `programbench`. Settings come from the environment as before: `TASK`, `PROFILE`, `HOURS`,
 `OUT_DIR`, `SKIP_EVAL`, the `PBENCH_WAKE_*`, `PBENCH_BRINGUP_SETTLE_S`,
 `PBENCH_START_RETRY_S`, `PBENCH_STAGGERED_BRINGUP` and `PBENCH_WATCHDOG_EARLY`
 ramp settings, and the `WORKER_IDLE_*` and `WORKER_CHECK_INTERVAL` watchdog

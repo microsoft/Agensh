@@ -9,4 +9,4 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 python3 -c 'import tomllib' 2>/dev/null \
     || { echo "[pbench] FATAL: Python 3.11 or newer is required (tomllib)" >&2; exit 1; }
-exec python3 -m agensh.team_run --pack "${AGENSH_PACK:-programbench}" "$@"
+exec python3 -m agensh.team_run "$@"

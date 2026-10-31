@@ -18,7 +18,9 @@ SUBNET_OCTET="${SUBNET_OCTET:-216}"
 WORKERS="${WORKERS:-8}"
 TASKS="${TASKS:-jgm__pandoc.5caad90}"
 
-# Stable task positions determine port and subnet offsets across invocations.
+# Listed tasks keep stable port and subnet offsets across invocations. Other
+# tasks get the first free slot after the table (see agensh/allocate.py), which
+# is reused from their existing profile when one exists.
 TASK_TABLE=(
     ffmpeg__ffmpeg.360a402 universal-ctags__ctags.243595e typst__typst.88356d0
     php__php-src.c891263 gromacs__gromacs.665ea4c jgm__pandoc.5caad90
@@ -34,7 +36,7 @@ task_index() {
     return 1
 }
 for task in $TASKS; do
-    task_index "$task" >/dev/null || { echo "FATAL: unknown task $task (not in TASK_TABLE)" >&2; exit 2; }
+    task_index "$task" >/dev/null || echo "note: $task is not in TASK_TABLE; choosing free ports and subnets" >&2
 done
 
 creds="$HOME/.pbench-upstream.env"
@@ -51,28 +53,18 @@ for task in $TASKS; do
     out="$ENV_DIR/.env.pbench-$MODE-$short${PROFILE_SUFFIX:+-$PROFILE_SUFFIX}"
     # Size subnets for agent/router pairs and atomically publish a mode-600 file.
     python3 - "$out" "$MODE" "$short" "$(task_index "$task")" "$PORT_BASE" "$SUBNET_OCTET" \
-              "$WORKERS" "$ROOT" <<'PY' || { echo "FATAL: generating $out failed" >&2; exit 1; }
+              "$WORKERS" "$ROOT" "${#TASK_TABLE[@]}" "$ENV_DIR" <<'PY' || { echo "FATAL: generating $out failed" >&2; exit 1; }
 import os, re, secrets, string, sys
-out, mode, short, idx, port_base, octet, workers, root = sys.argv[1:]
-idx, port_base, workers = int(idx), int(port_base), int(workers)
+out, mode, short, idx, port_base, octet, workers, root, listed, env_dir = sys.argv[1:]
+port_base, workers, listed = int(port_base), int(workers), int(listed)
+sys.path.insert(0, root)
+from agensh import allocate
 profile = f"pbench-{mode}-{short}"
 suffix = os.environ.get("PROFILE_SUFFIX", "")
 if suffix:
     profile += f"-{suffix}"
-http = port_base + idx * 10
-mm = http + 2
-if not 1 <= http <= 65533 or not 0 <= int(octet) <= 255:
+if not 1 <= port_base <= 65533 or not 0 <= int(octet) <= 255:
     sys.exit("FATAL: PORT_BASE or SUBNET_OCTET produces an invalid port/subnet")
-
-prefix = 24
-need = 2 * workers + 8 + 6
-while (1 << (32 - prefix)) - 2 < need and prefix > 16:
-    prefix -= 1
-units = 1 << (24 - prefix)
-stride = 3 if units == 1 else 2 * units
-sub = idx * stride
-if sub + units + 1 > 255:
-    sys.exit(f"FATAL: {profile}: {workers} workers at task index {idx} runs past 10.{octet}.255")
 
 old = {}
 if os.path.exists(out):
@@ -80,6 +72,22 @@ if os.path.exists(out):
         k, sep, v = line.rstrip("\n").partition("=")
         if sep and not k.startswith("#"):
             old[k] = v
+SLOT_KEYS = ("EDGE_HTTP_PORT", "EDGE_MM_PORT", "PBENCH_SUBNET_DEFAULT", "PBENCH_SUBNET_EGRESS", "PBENCH_SUBNET_EDGE")
+prefix = allocate.subnet_layout(workers)[0]
+if idx:
+    slot = allocate.slot(int(idx), port_base, octet, workers)
+    if slot is None:
+        sys.exit(f"FATAL: {profile}: {workers} workers at task index {idx} runs past 10.{octet}.255")
+elif all(old.get(k) for k in SLOT_KEYS) and old["PBENCH_SUBNET_DEFAULT"].endswith(f"/{prefix}"):
+    # Keep an unlisted task's earlier allocation while it still fits the team size.
+    slot = {k: old[k] for k in SLOT_KEYS}
+else:
+    ports, networks = allocate.profile_claims(env_dir, out)
+    index, slot = allocate.choose_slot(port_base, octet, workers, ports, networks + allocate.host_networks(),
+                                       allocate.port_is_free, start=listed)
+    print(f"allocated slot {index} for {profile}: ports {slot['EDGE_HTTP_PORT']}/{slot['EDGE_MM_PORT']}, "
+          f"subnets {slot['PBENCH_SUBNET_DEFAULT']}", file=sys.stderr)
+http, mm = int(slot["EDGE_HTTP_PORT"]), int(slot["EDGE_MM_PORT"])
 alnum = string.ascii_letters + string.digits
 def password(key, n):
     if re.fullmatch(r"[A-Za-z0-9]{20,}", old.get(key, "")):
@@ -120,9 +128,9 @@ keys = [
     ("REPOS", "main"),
     ("MINI_ROUTER_STUCK_MS", 1200000),
     ("AGENT_IMAGE", f"omcgitea-agent-{short}-{os.environ['AGENT_HARNESS']}:{os.environ.get('AGENT_IMAGE_TAG') or 'pbench'}"),
-    ("PBENCH_SUBNET_DEFAULT", f"10.{octet}.{sub}.0/{prefix}"),
-    ("PBENCH_SUBNET_EGRESS", f"10.{octet}.{sub + units}.0/24"),
-    ("PBENCH_SUBNET_EDGE", f"10.{octet}.{sub + units + 1}.0/24"),
+    ("PBENCH_SUBNET_DEFAULT", slot["PBENCH_SUBNET_DEFAULT"]),
+    ("PBENCH_SUBNET_EGRESS", slot["PBENCH_SUBNET_EGRESS"]),
+    ("PBENCH_SUBNET_EDGE", slot["PBENCH_SUBNET_EDGE"]),
     ("UPSTREAM_AUTH_STYLE", "bearer"),
 ]
 prefix = os.environ["AGENT_HARNESS"].upper()
@@ -131,6 +139,12 @@ keys.extend([(f"{prefix}_CLI_VERSION", os.environ["HARNESS_VERSION"]),
 if prefix == "COPILOT":
     keys.append(("COPILOT_PROVIDER_TYPE", "openai"))
 for key in ("MINI_ROUTER_IMAGE", "BOARD_IMAGE", "BOOTSTRAP_IMAGE", "SECRET_SERVICE_IMAGE"):
+    if os.environ.get(key):
+        keys.append((key, os.environ[key]))
+# Optional settings are recorded only when chosen, so default profiles stay unchanged.
+if os.environ.get("AGENSH_PACK") and os.environ["AGENSH_PACK"] != "programbench":
+    keys.append(("AGENSH_PACK", os.environ["AGENSH_PACK"]))
+for key in ("WORKER_CPUS", "WORKER_MEMORY"):
     if os.environ.get(key):
         keys.append((key, os.environ[key]))
 body = "".join(f"{k}={v}\n" for k, v in keys)

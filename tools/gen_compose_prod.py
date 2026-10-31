@@ -7,9 +7,13 @@ from pathlib import Path
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'agent'))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from harness_config import load_config
+from agensh.pack import load_pack
 
 SETTINGS = load_config()
+# The task pack supplies extra worker mounts, its prompt directory and the board id.
+PACK = load_pack(os.environ.get('AGENSH_PACK') or 'programbench')
 
 WORKERS_PER_TEAM = int(os.environ.get("PBENCH_WORKERS_PER_TEAM") or 16)
 AGENT_HARNESS = SETTINGS.harness
@@ -17,6 +21,34 @@ if AGENT_HARNESS not in ("pi", "copilot", "codex", "claude"):
     raise ValueError("AGENT_HARNESS must be pi, copilot, codex or claude")
 
 ALL_AGENTS = [f"worker{w}" for w in range(1, WORKERS_PER_TEAM + 1)]
+
+
+def worker_cpus(value, workers, host_cpus=None):
+    # Empty keeps the unlimited default; `auto` shares 80% of the host evenly.
+    value = (value or '').strip()
+    if not value:
+        return None
+    if value == 'auto':
+        host = host_cpus or os.cpu_count() or 1
+        return max(0.5, round(host * 0.8 / max(1, workers), 2))
+    cpus = float(value)
+    if cpus <= 0:
+        raise ValueError('WORKER_CPUS must be positive, "auto" or empty')
+    return cpus
+
+
+def worker_resources():
+    memory = (os.environ.get('WORKER_MEMORY') or '64g').strip()
+    lines = [f'  mem_limit: {memory}', f'  memswap_limit: {memory}']
+    cpus = worker_cpus(os.environ.get('WORKER_CPUS'), WORKERS_PER_TEAM)
+    if cpus is not None:
+        lines.append(f'  cpus: {cpus:g}')
+    return '\n'.join(lines)
+
+
+def pack_mounts():
+    return '\n'.join(f"      - {m['source']}:{m['target']}{':ro' if m['read_only'] else ''}"
+                     for m in PACK.mounts)
 
 # Shared anchors keep model settings, limits and board access identical across workers.
 HEADER = '''
@@ -27,8 +59,7 @@ x-agent: &agent-base
   working_dir: /work
   stop_grace_period: 10m
   cgroup_parent: pbench.slice
-  mem_limit: 64g
-  memswap_limit: 64g
+__WORKER_RESOURCES__
   image: "${AGENT_IMAGE:?AGENT_IMAGE required}"
   restart: unless-stopped
   extra_hosts:
@@ -48,7 +79,7 @@ __HARNESS_ENV__
   ACP_CHILD_GID: "10000"
   PBENCH_WORKERS: "${PBENCH_WORKERS_PER_TEAM}"
   BOARD_SERVICE_URL: "http://board-service:8660"
-  BOARD_IDS: "pbench-top"
+  BOARD_IDS: "__BOARD_ID__"
 
 x-mini-router: &mini-router-base
   cgroup_parent: pbench.slice
@@ -71,7 +102,7 @@ x-mini-router-env: &mini-router-env-base
   MINI_ROUTER_STUCK_MS: "${MINI_ROUTER_STUCK_MS:-1200000}"
   PBENCH_RUN_START_MS: "${PBENCH_RUN_START_MS:-}"
   BOARD_SERVICE_URL: "http://board-service:8660"
-  BOARD_IDS: "pbench-top"
+  BOARD_IDS: "__BOARD_ID__"
 '''
 
 # Shared services and one-shot provisioning are independent of worker activation.
@@ -312,7 +343,7 @@ services:
       BOARD_LISTEN_PORT: "8660"
       BOARD_LIFECYCLE_DIR: "/data/lifecycle"
       BOARD_MEMBERS_JSON: >-
-        {"pbench-top":[
+        {"__BOARD_ID__":[
 {BOARD_MEMBERS}
         ]}
     volumes:
@@ -342,9 +373,9 @@ AGENT_BLOCK = '''
       - ${DATA_ROOT:-../.claude-team-data}/${PROFILE}/acp/${ORG_NAME}-__SHORT__:/var/run/acp
       - ${DATA_ROOT:-../.claude-team-data}/${PROFILE}/tokens/agent-${ORG_NAME}-__SHORT__.token:/run/omcgitea/tokens/agent-${ORG_NAME}-__SHORT__.token:ro
       - ${DATA_ROOT:-../.claude-team-data}/${PROFILE}/tokens/agent-${ORG_NAME}-__SHORT__-mm.token:/run/omcgitea/tokens/agent-${ORG_NAME}-__SHORT__-mm.token:ro
-      - ${PBENCH_BIN:-/dev/null}:/opt/pbench/executable:ro
+__PACK_MOUNTS__
       - ../prompts/agents.txt:/opt/omcgitea/prompts/agents.md:ro
-      - ../tasks/programbench/prompts:/opt/omcgitea/task-prompts:ro
+      - ../tasks/__PACK__/prompts:/opt/omcgitea/task-prompts:ro
       - ../agent/render_agents.sh:/opt/omcgitea/render_agents.sh:ro
       - ../agent/config/mcp_deny_tools.json:/opt/omcgitea/config/mcp_deny_tools.json:ro
       - ../agent/config/mcp_allowed_tools.json:/opt/omcgitea/config/mcp_allowed_tools.json:ro
@@ -398,16 +429,22 @@ def build():
     if AGENT_HARNESS == 'copilot':
         harness_env += '\n  COPILOT_PROVIDER_TYPE: "${COPILOT_PROVIDER_TYPE:-openai}"'
     out.append(HEADER.replace('__HARNESS_ENV__', harness_env)
+               .replace('__WORKER_RESOURCES__', worker_resources())
+               .replace('__BOARD_ID__', PACK.board_id)
                .replace('${AGENT_HARNESS:-copilot}', '${AGENT_HARNESS:-' + AGENT_HARNESS + '}'))
     members = ",\n".join(f'          "${{ORG_NAME}}-{s}"' for s in ALL_AGENTS)
     out.append(INFRA.replace("{AGENTS_CSV}", agents_csv)
-               .replace("{BOARD_MEMBERS}", members))
+               .replace("{BOARD_MEMBERS}", members)
+               .replace("__BOARD_ID__", PACK.board_id))
     for short in ALL_AGENTS:
         harness_files = ('config.sh',) if AGENT_HARNESS == 'copilot' else ('acp.py', 'config.py')
         harness_mounts = '\n'.join(
             f"      - ../agent/{AGENT_HARNESS}/{name}:/opt/omcgitea/{AGENT_HARNESS}/{name}:ro"
             for name in harness_files)
-        out.append(AGENT_BLOCK.replace("__SHORT__", short).replace("__HARNESS_MOUNTS__", harness_mounts))
+        block = AGENT_BLOCK.replace("__SHORT__", short).replace("__HARNESS_MOUNTS__", harness_mounts)
+        mounts = pack_mounts()
+        block = block.replace("__PACK_MOUNTS__\n", mounts + "\n" if mounts else "")
+        out.append(block.replace("__PACK__", PACK.name))
     for short in ALL_AGENTS:
         out.append(ROUTER_BLOCK.replace("__SHORT__", short))
     return "".join(out)

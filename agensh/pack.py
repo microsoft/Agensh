@@ -9,6 +9,9 @@ import tomllib
 ROOT = Path(__file__).resolve().parents[1]
 DURATION = re.compile(r'^(\d+)([smh])$')
 HOOKS = ('prepare', 'export', 'evaluate')
+# `allowlist` and `auto` arrive with the software-project pack (docs/task_pack_design.md).
+NETWORK_MODES = ('offline', 'open')
+MOUNT_TARGET = re.compile(r'^/[A-Za-z0-9._/-]+$')
 
 
 class PackError(ValueError):
@@ -36,6 +39,9 @@ class Pack:
     reminders: tuple
     issue_title: str
     seed_message: str
+    network: str = 'offline'
+    mounts: tuple = ()
+    board_id: str = 'team'
 
     def hook(self, name):
         return self.hooks.get(name)
@@ -56,7 +62,7 @@ def load_pack(name, root=ROOT):
         raise PackError(f'{path} not found')
     with path.open('rb') as stream:
         data = tomllib.load(stream)
-    _known(data, ('name', 'description', 'hooks', 'messages', 'team'), path.name)
+    _known(data, ('name', 'description', 'hooks', 'messages', 'team', 'environment'), path.name)
     if data.get('name') != name:
         raise PackError(f'{path} declares name {data.get("name")!r}, expected {name!r}')
 
@@ -84,7 +90,25 @@ def load_pack(name, root=ROOT):
                           'message': inside(reminder['message'], 'reminder message')})
 
     team = data.get('team', {})
-    _known(team, ('issue_title', 'seed_message'), '[team]')
+    _known(team, ('issue_title', 'seed_message', 'board_id'), '[team]')
+    board_id = team.get('board_id', 'team')
+    if not re.fullmatch(r'[a-z0-9][a-z0-9-]*', str(board_id)):
+        raise PackError(f'invalid board_id {board_id!r}')
+
+    environment = data.get('environment', {})
+    _known(environment, ('network', 'mounts'), '[environment]')
+    network = environment.get('network', 'offline')
+    if network not in NETWORK_MODES:
+        raise PackError(f'network must be one of {", ".join(NETWORK_MODES)}; got {network!r}')
+    mounts = []
+    for index, mount in enumerate(environment.get('mounts', [])):
+        _known(mount, ('source', 'target', 'read_only'), f'[[environment.mounts]] #{index + 1}')
+        source, target = str(mount.get('source', '')), str(mount.get('target', ''))
+        if not source or any(c in source for c in '\n\r"'):
+            raise PackError(f'mount #{index + 1} needs a single-line source')
+        if not MOUNT_TARGET.match(target) or '..' in target.split('/'):
+            raise PackError(f'mount #{index + 1} needs an absolute target path; got {target!r}')
+        mounts.append({'source': source, 'target': target, 'read_only': bool(mount.get('read_only', True))})
     return Pack(
         name=name, root=directory, prompts=directory / 'prompts', hooks=hooks,
         task_brief=inside(messages['task_brief'], 'message'),
@@ -93,4 +117,5 @@ def load_pack(name, root=ROOT):
         reminders=tuple(sorted(reminders, key=lambda r: -r['before_end_seconds'])),
         issue_title=team.get('issue_title', '{task}'),
         seed_message=team.get('seed_message', 'Seed workspace ({task})'),
+        network=network, mounts=tuple(mounts), board_id=board_id,
     )

@@ -530,9 +530,12 @@ Refactor:
    the `software-project` pack, and the ProgramBench-only tools and launch
    scripts move into the pack with the naming migration, so user-facing paths
    change once.
-7. **Compose and image parameterization**: mounts, network modes, base images,
-   board id and resource shares come from configuration; profile generation
-   drops `TASK_TABLE` for explicit or automatically chosen ports and subnets.
+7. **Compose parameterization**: worker mounts, prompt directory, board id and
+   the `offline`/`open` network modes come from the pack; worker memory and CPU
+   shares are opt-in settings; tasks outside `TASK_TABLE` get automatically
+   chosen ports and subnets. *(done)* The `allowlist` and `auto` network modes
+   and the per-language default base images move to PR 9, which is the first
+   pack to use them.
 8. **Naming migration** in one step, together with moving the
    ProgramBench-only tools and launch scripts into `tasks/programbench/`.
 

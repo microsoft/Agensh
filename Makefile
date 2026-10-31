@@ -24,9 +24,15 @@ endif
 SUDO ?= sudo -E
 
 COMPOSE_BASE := docker/_gen_prod.$(PROFILE).yml
+# The profile names its task pack (default programbench); the pack's network mode
+# selects the overlay: `offline` keeps workers on the internal network only.
+profile_value = $(shell grep -E '^$(1)=' $(ENV_FILE) 2>/dev/null | tail -n1 | cut -d= -f2-)
+PACK := $(or $(call profile_value,AGENSH_PACK),programbench)
+NETWORK_MODE := $(shell python3 -c 'import sys; from agensh.pack import load_pack; print(load_pack(sys.argv[1]).network)' $(PACK) 2>/dev/null)
+NETWORK_OVERLAY := $(if $(filter open,$(NETWORK_MODE)),-f docker/network_open.yml)
 # COMPOSE_EXTRA_FILES (space-separated, absolute paths) layers further overrides,
 # such as the smoke test's stub harness mounts.
-COMPOSE_OVERLAY := -f docker/docker_compose.pbench.yml $(foreach f,$(COMPOSE_EXTRA_FILES),-f $(f))
+COMPOSE_OVERLAY := -f docker/docker_compose.pbench.yml $(NETWORK_OVERLAY) $(foreach f,$(COMPOSE_EXTRA_FILES),-f $(f))
 
 # Unset these legacy model/identity keys; the launcher scrubs other profile conflicts.
 COMPOSE ?= env -u ANTHROPIC_BASE_URL -u ANTHROPIC_MODEL -u ANTHROPIC_API_KEY \
@@ -65,6 +71,8 @@ check-env: require-profile
 render-pbench-base: require-profile
 	@PBENCH_WORKERS_PER_TEAM="$$(grep -E '^PBENCH_WORKERS_PER_TEAM=' $(ENV_FILE) 2>/dev/null | cut -d= -f2)" \
 	AGENT_HARNESS="$$(grep -E '^AGENT_HARNESS=' $(ENV_FILE) 2>/dev/null | cut -d= -f2)" \
+	AGENSH_PACK="$(PACK)" WORKER_MEMORY="$(call profile_value,WORKER_MEMORY)" \
+	WORKER_CPUS="$(call profile_value,WORKER_CPUS)" \
 	python3 tools/gen_compose_prod.py > docker/_gen_prod.$(PROFILE).yml \
 	&& echo "[render-pbench-base] wrote docker/_gen_prod.$(PROFILE).yml" >&2
 

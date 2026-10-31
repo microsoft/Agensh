@@ -25,3 +25,12 @@ message = "prompts/deadline_5m.txt"
 [team]
 issue_title = "[pbench] {task}"
 seed_message = "pbench: seed cleanroom workspace ({task})"
+board_id = "pbench-top"
+
+[environment]
+# Workers reach only the model proxy; the reference is executable, not readable.
+network = "offline"
+
+[[environment.mounts]]
+source = "${PBENCH_BIN:-/dev/null}"   # staged by the prepare hook via compose.env
+target = "/opt/pbench/executable"

@@ -19,7 +19,10 @@ timing, and the issue title and seed commit message.
 | [`hooks/evaluate.sh`](hooks/evaluate.sh) | Runs `programbench eval` inside `pbench.slice` through the Docker shim |
 
 The deadline reminders fire 45 and 5 minutes before the end and are skipped when
-their time has already passed at the start of the budget.
+their time has already passed at the start of the budget. `[environment]` keeps
+workers on the internal network (`network = "offline"`) and mounts the staged
+reference binary at `/opt/pbench/executable`; `board_id = "pbench-top"` names
+the shared context board.
 
 ## Prompts
 

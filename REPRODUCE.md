@@ -77,9 +77,18 @@ inference to catch access and disk-space failures early.
 
 ## Configure the experiment
 
-Choose one or more supported task IDs from `TASK_TABLE` in
-[the profile generator](scripts/pbench_gen_env.sh). Set `TASKS` explicitly:
-the generator, image builder and launcher have different built-in task lists.
+Choose one or more task IDs and set `TASKS` explicitly: the generator, image
+builder and launcher have different built-in task lists. Tasks listed in
+`TASK_TABLE` in [the profile generator](scripts/pbench_gen_env.sh) keep fixed
+port and subnet offsets. Other tasks get the first free slot after the table,
+avoiding host ports in use, host routes, Docker networks and other profiles in
+`ENV_DIR`; regenerating their profile keeps that allocation.
+
+Worker containers keep a 64 GiB memory ceiling and no CPU limit by default.
+Export `WORKER_MEMORY` (for example `32g`) or `WORKER_CPUS` (a number, or `auto`
+for an even share of 80% of the host's CPUs) before profile generation to
+record a different setting; these change the experimental conditions, so record
+them with results.
 
 Shared settings live in [`agent/config/harness.json`](agent/config/harness.json):
 

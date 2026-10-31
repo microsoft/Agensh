@@ -635,12 +635,17 @@ def terminate(signum, _frame):
 
 def main():
     parser = argparse.ArgumentParser(description='Run one task for a team; settings come from the environment.')
-    parser.add_argument('--pack', default=os.environ.get('AGENSH_PACK', 'programbench'),
-                        help='task pack under tasks/ (default: programbench)')
+    parser.add_argument('--pack', default=os.environ.get('AGENSH_PACK') or None,
+                        help="task pack under tasks/ (default: the profile's AGENSH_PACK, else programbench)")
     args = parser.parse_args()
     signal.signal(signal.SIGTERM, terminate)
     try:
-        TeamRun(load_pack(args.pack)).main()
+        pack = args.pack
+        profile_file = ROOT / f".env.{os.environ.get('PROFILE', '')}"
+        if not pack and profile_file.is_file():
+            # Match the Makefile, which renders Compose for the profile's pack.
+            pack = read_profile(profile_file).get('AGENSH_PACK', '').strip()
+        TeamRun(load_pack(pack or 'programbench')).main()
     except (Fatal, PackError) as error:
         log(f'FATAL: {error}')
         sys.exit(1)
