@@ -150,6 +150,7 @@ async function main(): Promise<void> {
     auth,
     ...(env.hostHeader ? { hostHeader: env.hostHeader } : {}),
     ...(process.env.HUMAN_USERNAME ? { human: process.env.HUMAN_USERNAME } : {}),
+    ...(process.env.EVENT_CONTEXT ? { eventContext: process.env.EVENT_CONTEXT } : {}),
     onIngest: (n) => {
       log("info", `ingested ${n} events; waking dispatcher`);
       dispatcher.wake();
@@ -176,6 +177,7 @@ async function main(): Promise<void> {
         token: mmToken,
         ...(env.mattermostHostHeader ? { hostHeader: env.mattermostHostHeader } : {}),
         ...(process.env.HUMAN_USERNAME ? { human: process.env.HUMAN_USERNAME } : {}),
+        ...(process.env.EVENT_CONTEXT ? { eventContext: process.env.EVENT_CONTEXT } : {}),
         onIngest: (n) => {
           log("info", `mattermost ingested ${n} events; waking dispatcher`);
           dispatcher.wake();

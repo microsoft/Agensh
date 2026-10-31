@@ -19,6 +19,7 @@ issue_title = "{task}: project goal"
 board_id = "team"
 channel = "team-task"
 wake_stagger = "5s"      # 4-16 workers start within a minute or two
+event_context = "inline" # events carry the latest comment or the thread's start
 
 [environment]
 network = "auto"         # open for a public GitHub upstream, allowlist otherwise; a project may choose

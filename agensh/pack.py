@@ -64,6 +64,8 @@ class Pack:
     wake_stagger: int = 30
     # A project may name a human product owner (AGENSH_HUMAN in its profile).
     product_owner: bool = False
+    # `inline`: the router adds the latest comment or thread start to each event.
+    event_context: str = 'summary'
 
     def hook(self, name):
         return self.hooks.get(name)
@@ -122,7 +124,10 @@ def load_pack(name, root=ROOT):
                           'message': inside(reminder['message'], 'reminder message')})
 
     team = data.get('team', {})
-    _known(team, ('issue_title', 'seed_message', 'board_id', 'channel', 'wake_stagger'), '[team]')
+    _known(team, ('issue_title', 'seed_message', 'board_id', 'channel', 'wake_stagger', 'event_context'), '[team]')
+    event_context = team.get('event_context', 'summary')
+    if event_context not in ('summary', 'inline'):
+        raise PackError(f'[team] event_context must be "summary" or "inline"; got {event_context!r}')
     wake_stagger = parse_duration(team.get('wake_stagger', 30))
     board_id = team.get('board_id', 'team')
     if not re.fullmatch(r'[a-z0-9][a-z0-9-]*', str(board_id)):
@@ -195,5 +200,5 @@ def load_pack(name, root=ROOT):
         task_prompts=task_prompts, import_history=import_history, channel=channel,
         ci_gate=ci_gate, protected_paths=protected_paths, backlog=backlog, sync_before_end=sync_before_end,
         resumable=resumable, stop_when=tuple(stop_when), finalize_notice=finalize_notice, wake_stagger=wake_stagger,
-        product_owner=product_owner,
+        product_owner=product_owner, event_context=event_context,
     )

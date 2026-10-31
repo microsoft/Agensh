@@ -20,6 +20,8 @@ export interface MattermostPost {
   channel_id: string;
   message: string;
   type?: string;
+  /** Set on replies: the post that started the thread. */
+  root_id?: string;
 }
 
 export interface MattermostWsEvent {
@@ -128,6 +130,31 @@ export function markUrgentFromHuman(
 export function mentions(text: string, agent: string): boolean {
   const escaped = agent.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   return new RegExp(`(^|[^\\w@-])@${escaped}(?![\\w-])`, "i").test(text);
+}
+
+/**
+ * Inline context (EVENT_CONTEXT=inline): a reply says which thread it belongs to
+ * and how that thread started; a channel post cut to the summary limit names its
+ * post id, so the worker can read the rest.
+ */
+export function withThreadContext(
+  uem: UEM,
+  ev: MattermostWsEvent,
+  root: { author: string; message: string } | null,
+): UEM {
+  if (ev.event !== "posted") return uem;
+  const post = parsePostMaybe(ev.data?.post);
+  if (!post) return uem;
+  const parts: string[] = [uem.summary];
+  if (post.root_id) {
+    const start = root ? `${root.author}: "${oneLine(root.message, 120)}"` : "an earlier post";
+    parts.push(`(reply in the thread of post ${post.root_id}, started by ${start})`);
+  }
+  const isDM = ev.data?.channel_type === "D";
+  if (!isDM && post.message.replace(/\s+/g, " ").trim().length > CHANNEL_SUMMARY_MAX) {
+    parts.push(`(post ${post.id}; read the rest of it in Mattermost)`);
+  }
+  return parts.length > 1 ? { ...uem, summary: parts.join(" ") } : uem;
 }
 
 // DM classification also determines eligibility for mid-turn notice delivery.

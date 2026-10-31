@@ -20,6 +20,8 @@ ${ACCEPTANCE_MAIN}
 4. Follow the repository's conventions: its build, test and style tools, layout and
    commit style. Do not rewrite code the goal does not need.
 5. Never commit secrets, credentials or personal data.
+6. Keep each chat message under 100 words: decisions, direct questions and short
+   conclusions. Put details, logs and reasoning in issues, PRs and board entries.
 
 ## The first step is always
 

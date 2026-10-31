@@ -112,7 +112,10 @@ only the team's work. GitHub delivery uses the host's `gh` login; workers never
 hold upstream credentials.
 
 Workers get their instructions from the core template with this pack's
-fragments, the `team-task` channel and the `team` board.
+fragments, the `team-task` channel and the `team` board. Their events carry
+inline context (who commented what, how a thread started; see the
+[router](../../mini-router/README.md#runtime-and-event-delivery)), and chat
+messages stay under 100 words, with details in issues and PRs.
 
 ## Network
 

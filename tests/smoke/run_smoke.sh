@@ -291,6 +291,8 @@ print(f"board entries: {len(entries)}")
     if [ "$PACK" = software-project ]; then
         check_imported_history
         check_backlog
+        # The assignment above notifies each worker about issue #1.
+        check_event_context
         check_allowlist
         check_planning
         check_models
@@ -345,6 +347,15 @@ check_imported_history() {
     [ -f "$check/.gitea/workflows/agensh.yml" ] || die "the team workflow is not on main"
     log "team main descends from upstream ${base:0:12} with its full history"
     rm -rf "$check"
+}
+
+check_event_context() {
+    # event_context = "inline": Gitea events name who wrote what, not just the title.
+    local inline
+    inline="$("${DOCKER[@]}" exec "$(container mysql)" mysql -N -B -uroot -p"$(profile_value MYSQL_ROOT_PASSWORD)" -D omcgitea \
+        -e "SELECT COUNT(*) FROM events WHERE source = 'gitea' AND JSON_UNQUOTE(JSON_EXTRACT(payload, '\$.summary')) LIKE '% by @%'" 2>/dev/null)"
+    [ "${inline:-0}" -gt 0 ] || die "no Gitea event carries inline context (author and text)"
+    log "inline event context: $inline Gitea event(s) name their author and text"
 }
 
 check_backlog() {

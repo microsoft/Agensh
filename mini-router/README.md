@@ -76,6 +76,15 @@ The process-local catch-up cursor initially looks back ten minutes; cached
 channels are reused, and REST catch-up does not replay reaction/deletion events.
 Both listeners reconnect with backoff and use stable event IDs for deduplication.
 
+With `EVENT_CONTEXT=inline` (packs with `[team] event_context = "inline"`),
+summaries carry the context a worker would otherwise fetch first. A Gitea event
+adds the latest comment's author and its first 200 characters (or the issue or
+PR body's, for a new subject), with the comment id; longer text is cut and the
+summary names the API path that returns it. A Mattermost reply names its thread
+and the author and opening of the post that started it; a channel post longer
+than the summary limit names its post id. `HUMAN_USERNAME` marks the product
+owner's DMs, mentions and comments urgent, reusing the same comment read.
+
 ## Database schema
 
 MySQL mounts `sql/` at `/docker-entrypoint-initdb.d` and runs the numbered files

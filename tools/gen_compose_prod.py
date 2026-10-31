@@ -436,6 +436,13 @@ ROUTER_BLOCK = '''
 ROUTER_ENV_TAIL = '  AGENSH_RUN_START_MS: "${AGENSH_RUN_START_MS:-}"\n  BOARD_SERVICE_URL: "http://board-service:8660"\n'
 ROUTER_HUMAN_ENV = '  HUMAN_USERNAME: "${AGENSH_HUMAN:-}"\n'
 
+
+def router_env():
+    extra = ROUTER_HUMAN_ENV if PACK.product_owner else ''
+    if PACK.event_context != 'summary':
+        extra += f'  EVENT_CONTEXT: "{PACK.event_context}"\n'
+    return extra
+
 def build():
     # Bootstrap identities, board membership and service names use the same worker list.
     agents_csv = ",".join(f"${{ORG_NAME}}-{s}" for s in ALL_AGENTS)
@@ -453,7 +460,7 @@ def build():
                .replace('__BOARD_ID__', PACK.board_id)
                .replace('  TASK_CHANNEL: "__TASK_CHANNEL__"', f'  TASK_CHANNEL: "{PACK.channel}"{proxy_env()}')
                .replace('${AGENT_HARNESS:-copilot}', '${AGENT_HARNESS:-' + AGENT_HARNESS + '}')
-               .replace(ROUTER_ENV_TAIL, ROUTER_ENV_TAIL + ROUTER_HUMAN_ENV if PACK.product_owner else ROUTER_ENV_TAIL))
+               .replace(ROUTER_ENV_TAIL, ROUTER_ENV_TAIL + router_env()))
     members = ",\n".join(f'          "${{ORG_NAME}}-{s}"' for s in ALL_AGENTS)
     # Imported histories become main as is: no initial commit and no CODEOWNERS commit.
     bootstrap_import = ('      REPO_AUTO_INIT: "false"\n      BOOTSTRAP_CODEOWNERS: "false"\n'
