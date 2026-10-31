@@ -152,7 +152,7 @@ The team uses `/var/run/acp/agent.sock`; the standalone Compose entrypoint
 uses `/opt/data/acp.sock` and mounts its workspace at both `/workspace` and `/work`.
 
 Build `Dockerfile` from the repository root, or use
-[`scripts/pbench_build_pertask_images.sh`](../scripts/pbench_build_pertask_images.sh).
+[`tasks/programbench/scripts/build_images.sh`](../tasks/programbench/scripts/build_images.sh).
 For direct builds, pass `--build-arg AGENT_HARNESS=copilot`, `pi`, `codex` or `claude` alongside
 `TASK_IMAGE`. Team image names include the selected harness to avoid tag collisions.
 The [generated Compose stack](../tools/README.md) also mounts prompts, config,

@@ -2,7 +2,7 @@
 # Build one worker image per task from its v6 cleanroom and the cached MCP artifact.
 # JOBS bounds concurrent builds; individual logs and a summary are written under out/.
 set -u
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"; cd "$ROOT" || exit 1
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"; cd "$ROOT" || exit 1
 harness_env=$(python3 "$ROOT/agent/harness_config.py" shell "$@") || exit $?
 eval "$harness_env"
 JOBS="${JOBS:-6}"

@@ -12,7 +12,7 @@ BIN_PATH="$TASK_OUT/bin/executable"
 log() { echo "[pbench] $*" >&2; }
 die() { echo "[pbench] FATAL: $*" >&2; exit 1; }
 
-source "$ROOT/scripts/lib_pbench_images.sh"
+source "$ROOT/tasks/programbench/scripts/lib_images.sh"
 img_base="$DOCKER_ORG/$(printf '%s' "$TASK" | sed 's/__/_1776_/')"
 CLEANROOM_TAG="$(pbench_cleanroom_tag "$ENV_FILE")" || die "reference image configuration mismatch"
 CLEANROOM_IMG="$img_base:$CLEANROOM_TAG"
@@ -29,7 +29,7 @@ cleanroom_id="$(sudo docker image inspect --format '{{.Id}}' "$CLEANROOM_IMG")" 
 seed_dir="$TASK_OUT/_seed"
 rm -rf "$seed_dir"; mkdir -p "$seed_dir"
 PROGRAMBENCH_DOCKER_ORG="$DOCKER_ORG" \
-    python3 "$ROOT/tools/pbench_submission.py" seed --image "$cleanroom_id" \
+    python3 "$ROOT/tasks/programbench/tools/submission.py" seed --image "$cleanroom_id" \
     --into "$seed_dir" --bin-out "$BIN_PATH" \
     || die "seed extraction failed"
 if [ -f "$BIN_PATH" ]; then

@@ -29,9 +29,9 @@ def slot(index, port_base, octet, workers):
     http = port_base + index * 10
     return {
         'EDGE_HTTP_PORT': http, 'EDGE_MM_PORT': http + 2,
-        'PBENCH_SUBNET_DEFAULT': f'10.{octet}.{sub}.0/{prefix}',
-        'PBENCH_SUBNET_EGRESS': f'10.{octet}.{sub + units}.0/24',
-        'PBENCH_SUBNET_EDGE': f'10.{octet}.{sub + units + 1}.0/24',
+        'AGENSH_SUBNET_DEFAULT': f'10.{octet}.{sub}.0/{prefix}',
+        'AGENSH_SUBNET_EGRESS': f'10.{octet}.{sub + units}.0/24',
+        'AGENSH_SUBNET_EDGE': f'10.{octet}.{sub + units + 1}.0/24',
     }
 
 
@@ -50,7 +50,7 @@ def choose_slot(port_base, octet, workers, taken_ports, taken_networks, port_fre
         ports = (candidate['EDGE_HTTP_PORT'], candidate['EDGE_MM_PORT'])
         if candidate['EDGE_MM_PORT'] > 65535:
             raise ValueError('port range exhausted; choose a lower PORT_BASE')
-        networks = [candidate[key] for key in ('PBENCH_SUBNET_DEFAULT', 'PBENCH_SUBNET_EGRESS', 'PBENCH_SUBNET_EDGE')]
+        networks = [candidate[key] for key in ('AGENSH_SUBNET_DEFAULT', 'AGENSH_SUBNET_EGRESS', 'AGENSH_SUBNET_EDGE')]
         if (not any(port in taken_ports or not port_free(port) for port in ports)
                 and not any(overlaps(network, taken_networks) for network in networks)):
             return index, candidate
@@ -72,7 +72,7 @@ def profile_claims(env_dir, exclude):
             key, _, value = line.partition('=')
             if key in ('EDGE_HTTP_PORT', 'EDGE_MM_PORT') and value.isdigit():
                 ports.add(int(value))
-            elif key.startswith('PBENCH_SUBNET_') and value:
+            elif key.startswith('AGENSH_SUBNET_') and value:
                 try:
                     networks.append(ipaddress.ip_network(value, strict=False))
                 except ValueError:

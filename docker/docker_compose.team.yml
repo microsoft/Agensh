@@ -5,17 +5,17 @@ networks:
     internal: true
     ipam:
       config:
-        - subnet: ${PBENCH_SUBNET_DEFAULT:-10.176.253.0/24}
+        - subnet: ${AGENSH_SUBNET_DEFAULT:-10.176.253.0/24}
   egress:
     driver: bridge
     ipam:
       config:
-        - subnet: ${PBENCH_SUBNET_EGRESS:-10.176.254.0/24}
+        - subnet: ${AGENSH_SUBNET_EGRESS:-10.176.254.0/24}
   edge:
     driver: bridge
     ipam:
       config:
-        - subnet: ${PBENCH_SUBNET_EDGE:-10.176.255.0/24}
+        - subnet: ${AGENSH_SUBNET_EDGE:-10.176.255.0/24}
 
 services:
   nginx-edge:
@@ -23,18 +23,18 @@ services:
       - default
       - edge
     ports:
-      - "${PBENCH_PUBLIC_PORT:-}:80"
+      - "${AGENSH_PUBLIC_PORT:-}:80"
 
   egress-proxy:
     # Inject the real model credential here; workers use a local proxy credential.
     image: python:3.13-slim
     restart: unless-stopped
-    cgroup_parent: pbench.slice
+    cgroup_parent: agensh.slice
     networks:
       - default
       - egress
     environment:
-      UPSTREAM: "${PBENCH_LLM_UPSTREAM:?PBENCH_LLM_UPSTREAM required (the real LLM VM)}"
+      UPSTREAM: "${AGENSH_LLM_UPSTREAM:?AGENSH_LLM_UPSTREAM required (the real LLM VM)}"
       LISTEN_PORT: "4180"
       LISTEN_HOST: "0.0.0.0"
       UPSTREAM_DISABLED_TOOLS: functions.request_user_input,functions.request_user_input_async,request_user_input,request_user_input_async

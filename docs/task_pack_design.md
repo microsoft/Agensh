@@ -470,8 +470,12 @@ every change. Names that belong to ProgramBench stay inside the
 | `pbench.slice`, `pbench-reboot-guard.service` | `agensh.slice`, `agensh-reboot-guard.service` |
 | `pbench-single-node-<task>` profiles | `<pack>-<project>` (for example `programbench-pandoc`) |
 | `~/.pbench-upstream.env` | `~/.agensh/upstream.env` |
-| `ORG_NAME=pbench`, board id `pbench-top`, channel `pbench-task` | project-derived names |
+| `ORG_NAME=pbench`, board id `pbench-top`, channel `pbench-task` | pack-defined; ProgramBench keeps these values, so its prompts are unchanged |
 | `/opt/pbench/executable`, cleanroom tags, evaluator variables | unchanged, owned by the `programbench` pack |
+| `omcgitea` images, Compose projects, `/opt/omcgitea` paths, database | unchanged for now; renaming needs image rebuilds and a reboot-guard change |
+
+Implemented in PR 8; REPRODUCE.md "Migrating from earlier releases" lists every
+renamed file and setting.
 
 ## Orchestration language
 
@@ -538,6 +542,9 @@ Refactor:
    pack to use them.
 8. **Naming migration** in one step, together with moving the
    ProgramBench-only tools and launch scripts into `tasks/programbench/`.
+   *(done)* Agent-visible ProgramBench names stay in the pack and internal
+   `omcgitea` names are unchanged; REPRODUCE.md lists every rename and the host
+   migration steps.
 
 Features:
 

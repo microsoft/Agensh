@@ -1,6 +1,6 @@
 # Stub-harness smoke test
 
-Runs a short team through the real runner (`scripts/pbench_run.sh`) and team
+Runs a short team through the real runner (`scripts/team_run.sh`) and team
 services, with a scripted ACP harness in place of a model. It checks the
 cooperation path end to end without spending tokens, so refactors of the
 runner, Compose generation and services can be verified locally.
@@ -51,7 +51,7 @@ The test passes when:
 Requirements: Docker with Compose v2, passwordless `sudo`, and network access
 for the first image builds and pulls. Images use private `agensh-smoke/*` and
 `:smoke` tags, so shared experiment tags are never moved. The profile is
-`pbench-single-node-pandoc-smoke`; the test removes only that profile's data
+`programbench-pandoc-smoke`; the test removes only that profile's data
 and `out/smoke/run`. The task ID is a fixed entry from the profile generator's
 table, but the cleanroom image comes from `PROGRAMBENCH_DOCKER_ORG=agensh-smoke`
 and has nothing to do with ProgramBench's Pandoc task. Evaluation is skipped.

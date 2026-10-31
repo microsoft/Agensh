@@ -119,7 +119,7 @@ test("board ids are split and trimmed", () => {
 });
 
 test("event rendering uses the shared run start", () => {
-  process.env.PBENCH_RUN_START_MS = "1000";
+  process.env.AGENSH_RUN_START_MS = "1000";
   try {
     assert.equal(runAge(1000 + 90_000), "+1.5m");
     assert.equal(runAge(0), "+0.0m");
@@ -132,6 +132,6 @@ test("event rendering uses the shared run start", () => {
     assert.equal(batch[2], "--- event 1/2 ---");
     assert.ok(batch.includes("--- event 2/2 ---"));
   } finally {
-    delete process.env.PBENCH_RUN_START_MS;
+    delete process.env.AGENSH_RUN_START_MS;
   }
 });

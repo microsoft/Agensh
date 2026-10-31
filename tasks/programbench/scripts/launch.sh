@@ -3,7 +3,7 @@
 # lib_launch.sh runs each inference phase and overlaps its evaluation with the next.
 
 set -u
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 cd "$ROOT" || { echo "FATAL: cannot cd $ROOT" >&2; exit 1; }
 harness_env=$(python3 "$ROOT/agent/harness_config.py" shell "$@") || exit $?
 eval "$harness_env"
@@ -14,8 +14,8 @@ MODE=single-node
 TASKS="${TASKS:-jgm__pandoc.5caad90 gromacs__gromacs.665ea4c universal-ctags__ctags.243595e php__php-src.c891263 ffmpeg__ffmpeg.360a402}"
 HOURS="${HOURS:-6}"
 WORKERS="${WORKERS:-8}"
-source "$ROOT/scripts/lib_launch.sh"
-source "$ROOT/scripts/lib_pbench_images.sh"
+source "$ROOT/tasks/programbench/scripts/lib_launch.sh"
+source "$ROOT/tasks/programbench/scripts/lib_images.sh"
 mkdir -p "$TRAJ_ROOT" "$ROOT/out"
 
 pv() { awk -F= -v k="$2" '$1==k{print substr($0, length(k) + 2); exit}' "$ROOT/.env.$1"; }
@@ -37,11 +37,11 @@ fail=0
 refuse_double_launch || fail=1
 for task in $TASKS; do
     p="$(task_profile "$task")"
-    [ -f "$ROOT/.env.$p" ] || { log "FATAL: .env.$p missing — run scripts/pbench_gen_env.sh"; fail=1; continue; }
+    [ -f "$ROOT/.env.$p" ] || { log "FATAL: .env.$p missing — run tasks/programbench/scripts/gen_env.sh"; fail=1; continue; }
 
-    o="$(pv "$p" PBENCH_ORCHESTRATOR)"
+    o="$(pv "$p" AGENSH_ORCHESTRATOR)"
     [ "${o:-compose}" = "compose" ] || { log "FATAL: .env.$p supports single-node Compose only"; fail=1; }
-    [ "${PBENCH_ORCHESTRATOR:-compose}" = "compose" ] || { log "FATAL: PBENCH_ORCHESTRATOR supports single-node Compose only"; fail=1; }
+    [ "${AGENSH_ORCHESTRATOR:-compose}" = "compose" ] || { log "FATAL: AGENSH_ORCHESTRATOR supports single-node Compose only"; fail=1; }
 
     k="$(pv "$p" AGENT_HARNESS)"
     case "$k" in
@@ -81,14 +81,14 @@ for task in $TASKS; do
     [ "$k" = claude ] && expected_wire=messages
     [ "$w" = "$expected_wire" ] || { log "FATAL: .env.$p ${prefix}_PROVIDER_WIRE_API='$w' expected $expected_wire"; fail=1; }
 
-    gw="$(pv "$p" PBENCH_WORKERS_PER_TEAM)"
-    [ "$gw" = "$WORKERS" ] || { log "FATAL: .env.$p PBENCH_WORKERS_PER_TEAM=$gw expected $WORKERS"; fail=1; }
-    sn="$(pv "$p" PBENCH_SUBNET_DEFAULT)"
+    gw="$(pv "$p" AGENSH_WORKERS)"
+    [ "$gw" = "$WORKERS" ] || { log "FATAL: .env.$p AGENSH_WORKERS=$gw expected $WORKERS"; fail=1; }
+    sn="$(pv "$p" AGENSH_SUBNET_DEFAULT)"
     python3 -c "
 import ipaddress,sys
 n=ipaddress.ip_network('$sn'); need=2*int('${WORKERS:-0}' or 0)+8
 sys.exit(0 if n.num_addresses-2 >= need else 1)
-" 2>/dev/null || { log "FATAL: .env.$p PBENCH_SUBNET_DEFAULT=$sn too small for $WORKERS workers (need $((2*WORKERS+8)) IPs)"; fail=1; }
+" 2>/dev/null || { log "FATAL: .env.$p AGENSH_SUBNET_DEFAULT=$sn too small for $WORKERS workers (need $((2*WORKERS+8)) IPs)"; fail=1; }
 
     cleanroom_tag="$(pbench_cleanroom_tag "$ROOT/.env.$p")" || { fail=1; continue; }
     ci="${PROGRAMBENCH_DOCKER_ORG:-programbench}/${task/__/_1776_}:$cleanroom_tag"
@@ -135,29 +135,29 @@ for task in $TASKS; do
     if image_file_matches "$img" /opt/omcgitea/entrypoint.sh "$ROOT/agent/entrypoint.sh"; then
         log "image OK: $img bakes this checkout's agent/entrypoint.sh"
     else
-        log "FATAL: ${img:-$p has no AGENT_IMAGE, which} does not bake this checkout's agent/entrypoint.sh -- rebuild it: TASKS=$task bash scripts/pbench_build_pertask_images.sh"
+        log "FATAL: ${img:-$p has no AGENT_IMAGE, which} does not bake this checkout's agent/entrypoint.sh -- rebuild it: TASKS=$task bash tasks/programbench/scripts/build_images.sh"
         fail=1
     fi
 done
 
-sm="$(systemctl show pbench.slice -p MemoryMax --value 2>/dev/null)"
+sm="$(systemctl show agensh.slice -p MemoryMax --value 2>/dev/null)"
 case "$sm" in
     ''|infinity)
-        if [ "${PBENCH_SKIP_HOST_GUARDS:-0}" = "1" ]; then
-            log "WARN: pbench.slice has no MemoryMax — skipped by PBENCH_SKIP_HOST_GUARDS=1"
+        if [ "${AGENSH_SKIP_HOST_GUARDS:-0}" = "1" ]; then
+            log "WARN: agensh.slice has no MemoryMax — skipped by AGENSH_SKIP_HOST_GUARDS=1"
         else
-            log "FATAL: pbench.slice has no MemoryMax"; fail=1
+            log "FATAL: agensh.slice has no MemoryMax"; fail=1
         fi ;;
-    *) log "pbench.slice MemoryMax=$sm ($(( sm / 1073741824 )) GiB)" ;;
+    *) log "agensh.slice MemoryMax=$sm ($(( sm / 1073741824 )) GiB)" ;;
 esac
 
-if [ "$(systemctl is-enabled pbench-reboot-guard.service 2>/dev/null)" = "enabled" ]; then
+if [ "$(systemctl is-enabled agensh-reboot-guard.service 2>/dev/null)" = "enabled" ]; then
     log "reboot guard enabled — a maintenance reboot will stop stacks cleanly"
 else
-    if [ "${PBENCH_SKIP_HOST_GUARDS:-0}" = "1" ]; then
-        log "WARN: pbench-reboot-guard.service not enabled — skipped by PBENCH_SKIP_HOST_GUARDS=1 (a maintenance reboot will kill stacks mid-run)"
+    if [ "${AGENSH_SKIP_HOST_GUARDS:-0}" = "1" ]; then
+        log "WARN: agensh-reboot-guard.service not enabled — skipped by AGENSH_SKIP_HOST_GUARDS=1 (a maintenance reboot will kill stacks mid-run)"
     else
-        log "FATAL: pbench-reboot-guard.service not enabled (see docker/pbench_reboot_guard.service)"; fail=1
+        log "FATAL: agensh-reboot-guard.service not enabled (see docker/agensh_reboot_guard.service)"; fail=1
     fi
 fi
 
@@ -166,7 +166,7 @@ probed=""
 for task in $TASKS; do
     p="$(task_profile "$task")"
     [ -f "$ROOT/.env.$p" ] || continue
-    U="$(pv "$p" PBENCH_LLM_UPSTREAM)"
+    U="$(pv "$p" AGENSH_LLM_UPSTREAM)"
     K="$(pv "$p" UPSTREAM_AUTH_TOKEN)"
     M="$(pv "$p" ANTHROPIC_MODEL)"
     case "$(pv "$p" AGENT_HARNESS)" in pi) prefix=PI ;; codex) prefix=CODEX ;; claude) prefix=CLAUDE ;; *) prefix=COPILOT ;; esac
@@ -235,7 +235,7 @@ for task in $TASKS; do
     p="$(task_profile "$task")"; ef="$ROOT/.env.$p"
     [ -f "$ef" ] || continue
     # Render the same Compose inputs that Make will use, then verify worker counts.
-    make -s render-pbench-base PROFILE="$p" >/dev/null 2>&1 || true
+    make -s render-base PROFILE="$p" >/dev/null 2>&1 || true
     make -n up PROFILE="$p" >/dev/null 2>&1 || { log "FATAL: make -n up PROFILE=$p fails"; fail=1; continue; }
     ovl=$(make -n up PROFILE="$p" 2>/dev/null | grep -oE '\-f docker/docker_compose[^ ]*' | tr '\n' ' ')
     if ! rendered=$(env -u ANTHROPIC_BASE_URL -u ANTHROPIC_MODEL -u ANTHROPIC_API_KEY -u AGENT_HARNESS \

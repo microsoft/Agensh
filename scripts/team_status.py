@@ -15,6 +15,8 @@ import time
 import urllib.request
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from agensh.pack import PackError, load_pack  # noqa: E402
 DOCKER = shlex.split(os.environ.get('DOCKER', 'sudo -n docker'))
 # Native session journals, as scanned by the runner's idle watchdog.
 SESSION_DIRS = {'copilot': 'home/.copilot/session-state', 'codex': 'home/.codex/sessions',
@@ -133,13 +135,18 @@ def pull_requests(values):
 def collect(profile):
     values = read_profile(profile)
     org = values['ORG_NAME']
-    workers = int(values.get('PBENCH_WORKERS_PER_TEAM', '0') or 0)
+    workers = int(values.get('AGENSH_WORKERS', '0') or 0)
     harness = values.get('AGENT_HARNESS', 'copilot')
     project = f'omcgitea-{profile}'
     data_root = values.get('DATA_ROOT') or str(ROOT / '.claude-team-data')
     services, container_error = containers(project)
     usage, usage_error = proxy_usage(services)
-    board, board_error = board_counts(services, 'pbench-top')
+    # The board belongs to the profile's pack, as in Compose generation.
+    try:
+        board_id = load_pack(values.get('AGENSH_PACK') or 'programbench').board_id
+    except PackError as error:
+        board_id, board_error = None, str(error)
+    board, board_error = board_counts(services, board_id) if board_id else (None, board_error)
     events, event_error = event_counts(services, values.get('MYSQL_ROOT_PASSWORD', ''))
     pulls, pull_error = pull_requests(values)
     now = time.time()
@@ -203,7 +210,7 @@ def print_table(status):
 
 def main():
     parser = argparse.ArgumentParser(description='Summarize a running team profile.')
-    parser.add_argument('profile', help='profile name, e.g. pbench-single-node-pandoc')
+    parser.add_argument('profile', help='profile name, e.g. programbench-pandoc')
     parser.add_argument('--json', action='store_true', help='print machine-readable JSON')
     args = parser.parse_args()
     status = collect(args.profile)

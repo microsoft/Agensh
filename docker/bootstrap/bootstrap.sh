@@ -21,12 +21,12 @@ chmod 700 "$TOKENS_DIR"
 
 log() { echo "[bootstrap] $*" >&2; }
 
-if [ -f "$DONE_MARK" ] && [ "${PBENCH_BOOTSTRAP_FORCE:-0}" != "1" ]; then
+if [ -f "$DONE_MARK" ] && [ "${AGENSH_BOOTSTRAP_FORCE:-0}" != "1" ]; then
     log "Already done (mark=$DONE_MARK), exit 0"
     exit 0
 fi
-[ "${PBENCH_BOOTSTRAP_FORCE:-0}" = "1" ] && [ -f "$DONE_MARK" ] && \
-    log "PBENCH_BOOTSTRAP_FORCE=1 — ignoring $DONE_MARK and re-provisioning"
+[ "${AGENSH_BOOTSTRAP_FORCE:-0}" = "1" ] && [ -f "$DONE_MARK" ] && \
+    log "AGENSH_BOOTSTRAP_FORCE=1 — ignoring $DONE_MARK and re-provisioning"
 
 log "Waiting for Gitea at $GITEA_HOST ..."
 for i in $(seq 1 120); do
@@ -258,7 +258,7 @@ ensure_repo() {
     fi
     local body
     body=$(jq -nc --arg n "$repo" \
-        '{name:$n, private:false, auto_init:true, default_branch:"main", description:"ProgramBench agent collaboration repository"}')
+        '{name:$n, private:false, auto_init:true, default_branch:"main", description:"Agent team collaboration repository"}')
     api_token POST "/api/v1/orgs/${GITEA_ORG}/repos" "$body" >/dev/null
     log "Repo ${GITEA_ORG}/${repo} created"
 }

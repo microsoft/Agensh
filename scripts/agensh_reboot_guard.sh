@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Stop all running omcgitea-* Compose projects, assuming they are orphaned after boot.
 # Driver liveness is not checked; profile data is preserved.
-# PBENCH_GUARD_DRY_RUN=1 lists affected projects without stopping containers.
+# AGENSH_GUARD_DRY_RUN=1 lists affected projects without stopping containers.
 set -u
-ROOT="${PBENCH_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
-LOG="${PBENCH_GUARD_LOG:-$ROOT/out/reboot-guard.log}"
-DRY="${PBENCH_GUARD_DRY_RUN:-0}"
+ROOT="${AGENSH_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+LOG="${AGENSH_GUARD_LOG:-$ROOT/out/reboot-guard.log}"
+DRY="${AGENSH_GUARD_DRY_RUN:-0}"
 
 DOCKER="docker"
 command -v sudo >/dev/null 2>&1 && DOCKER="sudo docker"
@@ -42,4 +42,4 @@ for proj in $projects; do
 done
 
 say "done; the sweep driver did not survive the reboot, so these were orphans"
-say "to resume: re-run the sweep driver — pbench_chain.sh salvages an interrupted task"
+say "to resume: re-run the sweep driver — tasks/programbench/scripts/chain.sh salvages an interrupted task"

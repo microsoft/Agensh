@@ -16,7 +16,7 @@ import sys
 import threading
 from dataclasses import asdict
 
-SOURCE = Path(__file__).resolve().parents[1]
+SOURCE = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(SOURCE / 'agent'))
 from harness_config import PROFILE, version_argument, load_config
 PROMPT_SOURCE_COMMIT = '06e16c27eebad4c7f2843cc730398df2817bf788'
@@ -91,7 +91,7 @@ def run(config_path, agent_harness=None, harness_version=None, harness_config=No
                PBENCH_DOCKER='sudo -n docker')
     env.update(settings.environment())
     compose = DOCKER + ['compose', '--project-name', project, '--file',
-                        str(SOURCE / 'docker/docker_compose.single_agent.yml')]
+                        str(SOURCE / 'tasks/programbench/docker/single_agent.yml')]
     started = False
     driver = None
     stopped = threading.Event()
@@ -136,7 +136,7 @@ def run(config_path, agent_harness=None, harness_version=None, harness_config=No
         if runtime.get('limits_profile') != PROFILE:
             raise RuntimeError('Rebuild this image with the current harness configuration profile')
         write_json(run_dir / 'runtime.json', runtime)
-        invoke([sys.executable, SOURCE / 'tools/pbench_submission.py', 'seed', '--image', cleanroom_id,
+        invoke([sys.executable, SOURCE / 'tasks/programbench/tools/submission.py', 'seed', '--image', cleanroom_id,
                 '--into', workspace, '--bin-out', reference], env=env)
         if not reference.is_file():
             raise RuntimeError('The v6 reference was not extracted')
@@ -163,7 +163,7 @@ def run(config_path, agent_harness=None, harness_version=None, harness_config=No
         write_json(run_dir / 'provenance.json', {'cleanroom_id': cleanroom_id, 'agent_id': agent_id,
                    'agent_harness': agent_harness, 'harness_version': harness_version,
                    'reference_sha256': reference_hash, 'prompt_source_commit': PROMPT_SOURCE_COMMIT,
-                   'driver_sha256': hashlib.sha256((SOURCE / 'scripts/acp_driver.py').read_bytes()).hexdigest(),
+                   'driver_sha256': hashlib.sha256((SOURCE / 'tasks/programbench/scripts/acp_driver.py').read_bytes()).hexdigest(),
                    'adapter_sha256': (capture(DOCKER + ['run', '--rm', '--network', 'none', '--entrypoint',
                        'python3', agent_id, '-c', 'import hashlib,sys;print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())',
                        f'/opt/omcgitea/{agent_harness}/acp.py']) if agent_harness != 'copilot' else None),
@@ -198,7 +198,7 @@ print(json.dumps({'uid':os.getuid(),'reference_readable':os.access('/opt/pbench/
         snapshot_thread = threading.Thread(target=snapshot_loop, args=(container,), daemon=True)
         snapshot_thread.start()
         with (run_dir / 'cc.log').open('w') as output:
-            driver = subprocess.Popen([sys.executable, str(SOURCE / 'scripts/acp_driver.py'), '--container', container,
+            driver = subprocess.Popen([sys.executable, str(SOURCE / 'tasks/programbench/scripts/acp_driver.py'), '--container', container,
                      '--workspace-cwd', '/workspace', '--deadline-secs', str(config['deadline_seconds']),
                      '--brief', '/home/ccagent/.pbench/brief.txt', '--rules', '/home/ccagent/.pbench/rules.txt',
                      '--resume', '/home/ccagent/.pbench/resume.txt', '--docker', 'sudo -n docker',
@@ -233,7 +233,7 @@ print(json.dumps({'uid':os.getuid(),'reference_readable':os.access('/opt/pbench/
                        '-C', str(workspace), 'diff', '--cached', '--quiet']).returncode:
         git('commit', '-qm', 'pbench-single-agent: final snapshot')
     out = run_dir / 'out'
-    invoke(['sudo', '-n', sys.executable, SOURCE / 'tools/pbench_submission.py', 'export', '--from-dir', workspace,
+    invoke(['sudo', '-n', sys.executable, SOURCE / 'tasks/programbench/tools/submission.py', 'export', '--from-dir', workspace,
             '--task', config['task'], '--out-dir', out])
     invoke(['sudo', '-n', 'chown', '-R', f'{os.getuid()}:{os.getgid()}', out])
     submission = out / config['task'] / 'submission.tar.gz'
@@ -247,7 +247,7 @@ print(json.dumps({'uid':os.getuid(),'reference_readable':os.access('/opt/pbench/
         write_json(run_dir / 'status.json', status)
         temporary = run_dir / 'evaltmp'
         temporary.mkdir()
-        eval_env = env | {'PROGRAMBENCH_DOCKER_EXECUTABLE': str(SOURCE / 'scripts/pbench_docker_sudo.sh'),
+        eval_env = env | {'PROGRAMBENCH_DOCKER_EXECUTABLE': str(SOURCE / 'tasks/programbench/scripts/eval_docker_shim.sh'),
                           'TMPDIR': str(temporary)}
         if config.get('pytest_addopts'):
             eval_env['PBENCH_EVAL_PYTEST_ADDOPTS'] = config['pytest_addopts']

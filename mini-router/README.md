@@ -59,7 +59,7 @@ then `retrying` when due, with at most five recorded attempts. Startup returns
 interrupted `sending` rows to `pending`. Normal delivery and retries share one
 serialization chain. The ACP session ID is stored under
 `acp_session_id:<harness>` in `agent_kv`; native rollouts remain in worker HOME.
-`PBENCH_RUN_START_MS` aligns event timestamps across workers, otherwise router
+`AGENSH_RUN_START_MS` aligns event timestamps across workers, otherwise router
 startup supplies the time origin.
 
 Gitea listeners under `src/listeners/gitea/` use cookie-authenticated

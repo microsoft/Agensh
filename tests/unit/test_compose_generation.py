@@ -12,7 +12,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'tools'))
 BASE_ENV = {'PATH': os.environ.get('PATH', '/usr/bin:/bin'), 'HOME': tempfile.gettempdir(),
-            'PBENCH_WORKERS_PER_TEAM': '2', 'AGENT_HARNESS': 'pi', 'HARNESS_VERSION': '1.4.0'}
+            'AGENSH_WORKERS': '2', 'AGENT_HARNESS': 'pi', 'HARNESS_VERSION': '1.4.0'}
 
 
 def generate(**extra):
@@ -59,7 +59,7 @@ class NetworkOverlayTest(unittest.TestCase):
             command = ['docker', 'compose', '-f', str(base)]
             for name in files:
                 command += ['-f', str(ROOT / 'docker' / name)]
-            env = dict(os.environ, PBENCH_LLM_UPSTREAM='http://upstream.invalid', PBENCH_PUBLIC_PORT='18080',
+            env = dict(os.environ, AGENSH_LLM_UPSTREAM='http://upstream.invalid', AGENSH_PUBLIC_PORT='18080',
                        DATA_ROOT=directory, PROFILE='p')
             result = subprocess.run(command + ['--profile', 'p', 'config', '--format', 'json'],
                                     capture_output=True, text=True, env=env)
@@ -69,9 +69,9 @@ class NetworkOverlayTest(unittest.TestCase):
         return json.loads(result.stdout)
 
     def test_offline_is_internal_and_open_is_not(self):
-        offline = self.config('docker_compose.pbench.yml')
+        offline = self.config('docker_compose.team.yml')
         self.assertTrue(offline['networks']['default'].get('internal'))
-        opened = self.config('docker_compose.pbench.yml', 'network_open.yml')
+        opened = self.config('docker_compose.team.yml', 'network_open.yml')
         self.assertFalse(opened['networks']['default'].get('internal', False))
         self.assertEqual(opened['networks']['default']['ipam'], offline['networks']['default']['ipam'])
 

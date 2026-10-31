@@ -2,8 +2,8 @@
 # Run one task for a team: prepare, bring up services, seed Gitea, wake workers,
 # enforce the budget, export, shut down and evaluate. Task-specific steps are the
 # pack's hooks. Graceful worker shutdown seals archives that must verify before
-# profile teardown. Configuration is read from the environment, as scripts/pbench_run.sh
-# has always accepted it.
+# profile teardown. Configuration is read from the environment, as the former shell runner
+# accepted it; scripts/team_run.sh is the entry point.
 
 import argparse
 import base64
@@ -28,7 +28,7 @@ from agensh.pack import PackError, load_pack
 
 ROOT = Path(__file__).resolve().parents[1]
 DOCKER = ['sudo', 'docker']
-UP_LOCK = '/tmp/pbench-make-up.lock'
+UP_LOCK = '/tmp/agensh-make-up.lock'
 SESSION_DIRS = {'copilot': 'home/.copilot/session-state', 'codex': 'home/.codex/sessions',
                 'claude': 'home/.claude/projects'}
 DEFAULT_SESSION_DIR = 'home/.pi/agent/sessions'
@@ -36,7 +36,7 @@ TASK_CHANNEL = 'pbench-task'
 
 
 def log(message):
-    print(f'[pbench] {message}', file=sys.stderr, flush=True)
+    print(f'[agensh] {message}', file=sys.stderr, flush=True)
 
 
 class Fatal(Exception):
@@ -183,9 +183,9 @@ class TeamRun:
         self.task = os.environ.get('TASK') or self.fail_usage('TASK=<instance_id> required (e.g. abishekvashok__cmatrix.5c082c6)')
         self.hours = os.environ.get('HOURS', '2')
         self.out_dir = Path(os.environ.get('OUT_DIR') or ROOT / 'out/pbench')
-        self.profile = os.environ.get('PROFILE') or self.fail_usage('PROFILE=pbench-single-node-<task> required')
-        if not self.profile.startswith('pbench-single-node-') or self.profile == 'pbench-single-node-':
-            raise Fatal('this release supports PROFILE=pbench-single-node-<task> only')
+        self.profile = os.environ.get('PROFILE') or self.fail_usage('PROFILE=<profile> required (e.g. programbench-pandoc)')
+        if not re.fullmatch(r'[a-z0-9][a-z0-9-]*', self.profile):
+            raise Fatal(f'PROFILE={self.profile!r} must be lowercase letters, digits and hyphens')
         self.env_file = ROOT / f'.env.{self.profile}'
         self.task_out = self.out_dir / self.task
         self.stop = threading.Event()
@@ -198,17 +198,17 @@ class TeamRun:
 
     # Environment shared by make, Compose and hooks.
     def setup_environment(self):
-        os.environ.setdefault('PBENCH_RUN_START_MS', str(int(time.time() * 1000)))
+        os.environ.setdefault('AGENSH_RUN_START_MS', str(int(time.time() * 1000)))
         os.environ.setdefault('PBENCH_DOCKER', 'sudo docker')
         if shutil.which('envsubst') is None:
             raise Fatal('envsubst not found (apt install gettext-base); it renders the prompts under prompts/ and the task pack')
-        orchestrator = os.environ.get('PBENCH_ORCHESTRATOR')
+        orchestrator = os.environ.get('AGENSH_ORCHESTRATOR')
         if not self.env_file.is_file():
             raise Fatal(f'{self.env_file} missing (task #1 should have created it)')
         self.values = read_profile(self.env_file)
-        orchestrator = orchestrator or self.values.get('PBENCH_ORCHESTRATOR', '').strip() or 'compose'
+        orchestrator = orchestrator or self.values.get('AGENSH_ORCHESTRATOR', '').strip() or 'compose'
         if orchestrator != 'compose':
-            raise Fatal(f"PBENCH_ORCHESTRATOR='{orchestrator}'; this release supports single-node Compose only")
+            raise Fatal(f"AGENSH_ORCHESTRATOR='{orchestrator}'; this release supports single-node Compose only")
         if self.task_out.exists():
             raise Fatal(f'{self.task_out} already exists — leftover output from a prior run would be mixed in. '
                         f'Remove it (`rm -rf {self.task_out}`) before re-running.')
@@ -220,10 +220,10 @@ class TeamRun:
                         f'one (acp_session_id, gitea repo, mattermost history). Run `make clean PROFILE={self.profile}` first.')
         v = self.values
         self.org = v.get('ORG_NAME', '')
-        self.repo = os.environ.get('PBENCH_REPO', 'main')
+        self.repo = os.environ.get('AGENSH_REPO', 'main')
         self.edge_port = v.get('EDGE_HTTP_PORT', '')
         self.gitea_user, self.gitea_password = v.get('GITEA_ADMIN_USER', ''), v.get('GITEA_ADMIN_PASSWORD', '')
-        self.workers = int(v.get('PBENCH_WORKERS_PER_TEAM', '') or 4)
+        self.workers = int(v.get('AGENSH_WORKERS', '') or 4)
         self.mm = Mattermost(v.get('EDGE_MM_PORT', ''), v.get('MATTERMOST_ADMIN_USER', ''),
                              v.get('MATTERMOST_ADMIN_PASSWORD', ''),
                              v.get('MATTERMOST_TEAM_NAME', '') or self.org)
@@ -272,11 +272,12 @@ class TeamRun:
             raise Fatal(f'AGENT_IMAGE is not set in .env.{self.profile}')
         log(f'agent image: {image}')
         if run([*DOCKER, 'image', 'inspect', image], quiet=True).returncode != 0:
-            raise Fatal(f'agent image missing: {image} (build it with scripts/pbench_build_pertask_images.sh)')
+            raise Fatal(f"agent image missing: {image} (build it with the pack's image builder, "
+                        "e.g. tasks/programbench/scripts/build_images.sh)")
         log(f'bringing up {self.profile} stack')
-        if self.make('-s', 'render-pbench-base', quiet=True).returncode != 0:
-            raise Fatal(f'render-pbench-base failed for {self.profile}')
-        wanted = self.values.get('PBENCH_WORKERS_PER_TEAM', '').strip()
+        if self.make('-s', 'render-base', quiet=True).returncode != 0:
+            raise Fatal(f'render-base failed for {self.profile}')
+        wanted = self.values.get('AGENSH_WORKERS', '').strip()
         if wanted:
             base = ROOT / f'docker/_gen_prod.{self.profile}.yml'
             if not base.is_file():
@@ -297,7 +298,7 @@ class TeamRun:
                         raise Fatal(f'could not acquire {UP_LOCK} in 15min')
                     time.sleep(1)
             log(f'acquired make-up lock (pid {os.getpid()})')
-            if os.environ.get('PBENCH_STAGGERED_BRINGUP', '1') == '1':
+            if os.environ.get('AGENSH_STAGGERED_BRINGUP', '1') == '1':
                 code, text = output(['make', '-s', 'compose-services', f'PROFILE={self.profile}'], cwd=ROOT)
                 infra = [s for s in text.split() if not re.fullmatch(r'(agent|mini-router)-worker[0-9]+', s)]
                 if code != 0 or not infra:
@@ -363,7 +364,7 @@ class TeamRun:
                                     cwd=ROOT, capture_output=True, text=True)
             if result.returncode == 0:
                 break
-            retry = env_int('PBENCH_START_RETRY_S', 30)
+            retry = env_int('AGENSH_START_RETRY_S', 30)
             log(f'WARN: container start failed for {name} (try {attempt}); retrying in {retry}s')
             for line in (result.stdout + result.stderr).splitlines()[-5:]:
                 log(f'    {line}')
@@ -379,9 +380,9 @@ class TeamRun:
         kickoff = render_prompt(ROOT / 'prompts/kickoff.txt', TASK_BRIEF=brief)
         self.open_issue(brief)
 
-        base = env_int('PBENCH_WAKE_STAGGER_S', 30)
-        fast = env_int('PBENCH_WAKE_FAST_STAGGER_S', 3)
-        ramp = env_int('PBENCH_WAKE_RAMP_SUBJ_S', 3600)
+        base = env_int('AGENSH_WAKE_STAGGER_S', 30)
+        fast = env_int('AGENSH_WAKE_FAST_STAGGER_S', 3)
+        ramp = env_int('AGENSH_WAKE_RAMP_SUBJ_S', 3600)
         switch_at = ramp // base
         if self.workers > switch_at:
             log(f'waking {self.workers} agents by DM: {base}s apart for the first {switch_at} (one hour), then {fast}s')
@@ -389,7 +390,7 @@ class TeamRun:
             log(f'waking {self.workers} agents by DM, {base}s apart')
         # Charge activation time to the shared wall-clock budget, starting before ramp-up.
         self.run_t0 = time.time()
-        if os.environ.get('PBENCH_WATCHDOG_EARLY', '1') == '1':
+        if os.environ.get('AGENSH_WATCHDOG_EARLY', '1') == '1':
             total = schedule.budget_seconds(self.hours or 6)
             self.start_thread(self.watchdog, total)
             log(f'idle watchdog started BEFORE the ramp ({total}s)')
@@ -397,9 +398,9 @@ class TeamRun:
         for index in range(1, self.workers + 1):
             name = f'{self.org}-worker{index}'
             started = time.time()
-            if os.environ.get('PBENCH_STAGGERED_BRINGUP', '1') == '1':
+            if os.environ.get('AGENSH_STAGGERED_BRINGUP', '1') == '1':
                 self.start_agent_containers(index, name)
-                time.sleep(env_int('PBENCH_BRINGUP_SETTLE_S', 20))
+                time.sleep(env_int('AGENSH_BRINGUP_SETTLE_S', 20))
             dm = self.mm.dm_channel(name) or self.mm.dm_channel(name)
             if dm:
                 if self.mm.post(dm, kickoff):

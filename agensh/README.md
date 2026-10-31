@@ -10,12 +10,12 @@ driver. Standard library only; requires Python 3.11 for `tomllib`.
 | `schedule.py` | Budget, staggered wake, idle phase, reminder and nudge timing as pure functions |
 | `allocate.py` | Port and subnet slots for profiles: fixed for listed tasks, first free slot otherwise |
 
-[`scripts/pbench_run.sh`](../scripts/pbench_run.sh) runs the driver with
+[`scripts/team_run.sh`](../scripts/team_run.sh) runs the driver with
 `python3 -m agensh.team_run`. The pack is `--pack`, else `AGENSH_PACK` from the
 environment, else `AGENSH_PACK` from the profile (as the Makefile uses for
 Compose), else `programbench`. Settings come from the environment as before: `TASK`, `PROFILE`, `HOURS`,
-`OUT_DIR`, `SKIP_EVAL`, the `PBENCH_WAKE_*`, `PBENCH_BRINGUP_SETTLE_S`,
-`PBENCH_START_RETRY_S`, `PBENCH_STAGGERED_BRINGUP` and `PBENCH_WATCHDOG_EARLY`
+`OUT_DIR`, `SKIP_EVAL`, the `AGENSH_WAKE_*`, `AGENSH_BRINGUP_SETTLE_S`,
+`AGENSH_START_RETRY_S`, `AGENSH_STAGGERED_BRINGUP` and `AGENSH_WATCHDOG_EARLY`
 ramp settings, and the `WORKER_IDLE_*` and `WORKER_CHECK_INTERVAL` watchdog
 settings. On failure or SIGTERM the driver quiesces workers, exports, saves
 service logs and stops the profile only when shutdown archives verify.

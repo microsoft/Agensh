@@ -13,7 +13,7 @@ DRIVER_LOG="$ROOT/out/$MODE.driver.log"
 
 log() { echo "[$MODE $(date -u +%H:%M:%S)] $*" | tee -a "$DRIVER_LOG"; }
 short() { local t="${1#*__}"; echo "${t%%.*}" | tr -cd 'a-z0-9-'; }
-task_profile() { echo "pbench-$MODE-$(short "$1")${PROFILE_SUFFIX:+-$PROFILE_SUFFIX}"; }
+task_profile() { echo "programbench-$(short "$1")${PROFILE_SUFFIX:+-$PROFILE_SUFFIX}"; }
 
 scrub_shadowed_env() {
     # Compose prefers exported shell values over --env-file, so remove conflicts.
@@ -46,7 +46,7 @@ refuse_double_launch() {
     local rc=0 task p pid pr
     for task in $TASKS; do
         p="$(task_profile "$task")"
-        for pid in $(pgrep -f 'pbench_chain\.sh|pbench_run\.sh|agensh\.team_run' 2>/dev/null); do
+        for pid in $(pgrep -f 'programbench/scripts/chain\.sh|scripts/team_run\.sh|agensh\.team_run' 2>/dev/null); do
             pr="$(sudo cat "/proc/$pid/environ" 2>/dev/null | tr '\0' '\n' | awk '/^PROFILE=/{print substr($0, 9); exit}')"
             [ "$pr" = "$p" ] || continue
             log "FATAL: $p is already running (pid $pid) — refusing to double-launch"
@@ -80,12 +80,12 @@ run_chain() {
         )
         log "starting $task (${HOURS}h) profile=$p"
         env "${common[@]}" PHASE=run PATH="$HOME/.local/bin:$PATH" \
-            "$ROOT/scripts/pbench_chain.sh" > "$ROOT/out/chain-$p.driver.log" 2>&1
+            "$ROOT/tasks/programbench/scripts/chain.sh" > "$ROOT/out/chain-$p.driver.log" 2>&1
         rc=$?
         log "finished RUN $task (rc=$rc) — eval detached"
         # Evaluation consumes the exported submission while the next task runs.
         env "${common[@]}" PHASE=eval PATH="$HOME/.local/bin:$PATH" \
-            nohup "$ROOT/scripts/pbench_chain.sh" >> "$ROOT/out/chain-$p.driver.log" 2>&1 &
+            nohup "$ROOT/tasks/programbench/scripts/chain.sh" >> "$ROOT/out/chain-$p.driver.log" 2>&1 &
         EVAL_PIDS+=($!)
         log "  eval $task pid=$! (runs alongside the next task)"
     done

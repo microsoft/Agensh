@@ -14,7 +14,7 @@ log() { echo "[pbench] $*" >&2; }
 mkdir -p "$TASK_OUT"
 log "exporting submission from Gitea repo $REPO_PATH → $TASK_OUT/"
 for attempt in 1 2 3; do
-    if python3 "$ROOT/tools/pbench_submission.py" export \
+    if python3 "$ROOT/tasks/programbench/tools/submission.py" export \
         --from-gitea "$TEAM_URL" --task "$TASK" --out-dir "$OUT_DIR" \
         2>>"$TASK_OUT/export.log"; then
         log "submission.tar.gz written (attempt $attempt)"
@@ -27,7 +27,7 @@ done
 
 log "ERROR: gitea export FAILED after 3 attempts — this task has NO submission."
 log "ERROR: the repo is still intact under \$DATA_ROOT; recover with:"
-log "ERROR:   python3 tools/pbench_submission.py export --from-gitea file://<data-root>/gitea/git/repositories/$REPO_PATH.git --task $TASK --out-dir <dir>"
+log "ERROR:   python3 tasks/programbench/tools/submission.py export --from-gitea file://<data-root>/gitea/git/repositories/$REPO_PATH.git --task $TASK --out-dir <dir>"
 {
     echo "export failed after 3 attempts at $(date -u +%FT%TZ)"
     echo "task=$TASK profile=$PROFILE url=$PUBLIC_URL"

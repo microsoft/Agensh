@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ProgramBench evaluate hook: run `programbench eval` on the exported submission,
-# inside pbench.slice when available, through the Docker shim's evaluator limits.
+# inside agensh.slice when available, through the Docker shim's evaluator limits.
 set -uo pipefail
 
 ROOT="${AGENSH_ROOT:?}"; TASK="${AGENSH_TASK:?}"; OUT_DIR="${AGENSH_OUT_DIR:?}"
@@ -12,16 +12,16 @@ die() { echo "[pbench] FATAL: $*" >&2; exit 1; }
 
 log "running programbench eval on $OUT_DIR"
 # The Docker shim applies evaluator limits without changing ProgramBench itself.
-export PROGRAMBENCH_DOCKER_EXECUTABLE="${PROGRAMBENCH_DOCKER_EXECUTABLE:-$ROOT/scripts/pbench_docker_sudo.sh}"
+export PROGRAMBENCH_DOCKER_EXECUTABLE="${PROGRAMBENCH_DOCKER_EXECUTABLE:-$ROOT/tasks/programbench/scripts/eval_docker_shim.sh}"
 pbench_tmp="$TASK_OUT/_evaltmp"
 rm -rf "$pbench_tmp"; mkdir -p "$pbench_tmp"
 export TMPDIR="$pbench_tmp"
 in_slice=()
-if command -v systemd-run >/dev/null 2>&1 && systemctl cat pbench.slice >/dev/null 2>&1; then
-    in_slice=(sudo -n systemd-run --scope --quiet --slice=pbench.slice --collect --uid="$(id -u)" --gid="$(id -g)")
-    log "eval runs inside pbench.slice (aggregate ceiling)"
+if command -v systemd-run >/dev/null 2>&1 && systemctl cat agensh.slice >/dev/null 2>&1; then
+    in_slice=(sudo -n systemd-run --scope --quiet --slice=agensh.slice --collect --uid="$(id -u)" --gid="$(id -g)")
+    log "eval runs inside agensh.slice (aggregate ceiling)"
 else
-    log "WARN: pbench.slice not installed -- eval runs UNCAPPED (see docker/pbench.slice)"
+    log "WARN: agensh.slice not installed -- eval runs UNCAPPED (see docker/agensh.slice)"
 fi
 uv_bin="$(command -v uv 2>/dev/null || true)"
 programbench_bin="$(command -v programbench 2>/dev/null || true)"

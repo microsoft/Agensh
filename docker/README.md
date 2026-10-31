@@ -10,13 +10,12 @@ resources from `WORKER_MEMORY` and `WORKER_CPUS`.
 
 | Path | Purpose |
 |---|---|
-| `docker_compose.pbench.yml` | Team network isolation, model egress proxy and MySQL TCP health check |
+| `docker_compose.team.yml` | Team network isolation, model egress proxy and MySQL TCP health check |
 | `network_open.yml` | Added after the team overlay when the pack's `network = "open"`: the default network gets general egress |
-| `docker_compose.single_agent.yml` | Standalone selected harness, proxy, private mounts and subnets |
 | [bootstrap/](bootstrap/) | One-shot Gitea/Mattermost account and token provisioning |
 | [nginx-edge/](nginx-edge/) | Host-facing HTTP routes for repository and chat services |
-| `pbench.slice` | Host cgroup ceiling: 80% memory, no swap and an aggregate task limit |
-| `pbench_reboot_guard.service` | Installs the `pbench-reboot-guard.service` unit to stop running `omcgitea-*` Compose projects after a host reboot |
+| `agensh.slice` | Host cgroup ceiling: 80% memory, no swap and an aggregate task limit |
+| `agensh_reboot_guard.service` | Installs the `agensh-reboot-guard.service` unit to stop running `omcgitea-*` Compose projects after a host reboot |
 
 The generated team base defines shared services and one worker/router pair
 per agent. Bootstrap completes before workers start. Each worker has private
@@ -26,7 +25,7 @@ edge proxy also joins `edge` for host access.
 
 Team environment comes from `.env.<profile>`. The standalone launcher supplies
 its own project, image, path and subnet variables to the standalone Compose
-file. Its `/workspace` and `/work` mounts point to the same source tree so
+file, [`tasks/programbench/docker/single_agent.yml`](../tasks/programbench/docker/single_agent.yml). Its `/workspace` and `/work` mounts point to the same source tree so
 the common archive bridge can save it.
 
 Use `make help` at the repository root for team lifecycle commands.
@@ -36,7 +35,7 @@ profile's data. Host guard installation and launch prerequisites are in the
 
 The reboot guard assumes matching projects are orphaned after boot; it does
 not test driver liveness or restrict matches to this checkout. Use
-`PBENCH_GUARD_DRY_RUN=1 bash scripts/pbench_reboot_guard.sh` to inspect its scope
+`AGENSH_GUARD_DRY_RUN=1 bash scripts/agensh_reboot_guard.sh` to inspect its scope
 before invoking it manually.
 
 ## Bootstrap
@@ -52,7 +51,7 @@ Credentials are cached privately under `$BOOTSTRAP_DATA_DIR/tokens`. Valid
 tokens are reused and stale tokens rotated. Routers read Gitea passwords for
 SSE login; the token service supplies API tokens. `.bootstrap-done` skips
 completed provisioning. `make bootstrap-rerun PROFILE=…` removes that marker;
-`PBENCH_BOOTSTRAP_FORCE=1` works when set inside the bootstrap container and is
+`AGENSH_BOOTSTRAP_FORCE=1` works when set inside the bootstrap container and is
 not forwarded automatically from the host. The task runner seeds the repository
 and creates the private task channel after bootstrap.
 

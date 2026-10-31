@@ -3,16 +3,16 @@
 # PHASE separates run/eval so the launcher can overlap evaluation with later tasks.
 
 set -u
-PROFILE="${PROFILE:?PROFILE=pbench-<mode>-<task> required}"
+PROFILE="${PROFILE:?PROFILE=programbench-<task> required}"
 : "${TASKS_ENV:?TASKS_ENV (comma-separated task ids) required}"
 : "${SUFFIX:?SUFFIX (<mode>.<RUN_ID>) required}"
 : "${TRAJ_ROOT:?TRAJ_ROOT required}"
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 LOG="${LOG:-$ROOT/out/chain-${PROFILE}.log}"
 SUMMARY="${SUMMARY:-$ROOT/out/chain-${PROFILE}.summary}"
 OUT_ROOT="${OUT_ROOT:-$ROOT/out/$PROFILE}"
 PB_REPO="${PROGRAMBENCH_REPO:-$HOME/programbench}"
-DOCKER_SUDO_SHIM="$ROOT/scripts/pbench_docker_sudo.sh"
+DOCKER_SUDO_SHIM="$ROOT/tasks/programbench/scripts/eval_docker_shim.sh"
 ENV_FILE="$ROOT/.env.$PROFILE"
 if [ -z "${DATA_ROOT:-}" ] && [ -f "$ENV_FILE" ]; then
     DATA_ROOT="$(awk -F= '$1=="DATA_ROOT"{sub(/\r$/,"",$2); print $2; exit}' "$ENV_FILE")"
@@ -137,7 +137,7 @@ salvage_interrupted() {
     fi
     sudo rm -f "$OUT_ROOT/$current/submission.tar.gz" "$OUT_ROOT/$current/export.log"
     local team_url="http://chairman:$(sudo grep -E '^GITEA_ADMIN_PASSWORD=' "$ENV_FILE" 2>/dev/null | cut -d= -f2)@localhost:${EDGE_HTTP_PORT}/pbench/main.git"
-    if python3 "$ROOT/tools/pbench_submission.py" export \
+    if python3 "$ROOT/tasks/programbench/tools/submission.py" export \
             --from-gitea "$team_url" --task "$current" --out-dir "$OUT_ROOT" \
             >>"$OUT_ROOT/$current/export.log" 2>&1; then
         log "salvage: submission re-exported"
@@ -211,7 +211,7 @@ eval_and_archive() {
 }
 
 report_score() {
-    # This diagnostic counts raw attempt rows; use tools/pbench_score_report.py
+    # This diagnostic counts raw attempt rows; use tasks/programbench/tools/score_report.py
     # for the official canonical-kept score when comparing experiments.
     local task="$1"
     local eval_json="$OUT_ROOT/$task/$task.eval.json"
@@ -249,7 +249,7 @@ launch_task() {
         PROGRAMBENCH_REPO="$PB_REPO" \
         PATH="$HOME/.local/bin:$PATH" \
         SKIP_EVAL=1 \
-        "$ROOT/scripts/pbench_run.sh" \
+        "$ROOT/scripts/team_run.sh" \
         > "$run_log" 2>&1
       echo $? > "$rcfile"
     } &

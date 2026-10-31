@@ -18,7 +18,6 @@ from pathlib import Path
 
 # Fixed inputs keep snapshots deterministic; none of these values are credentials.
 TASK = 'jgm__pandoc.5caad90'
-PROFILE = 'pbench-single-node-pandoc'
 HOURS = 6
 DEFAULT_WORKERS = range(1, 17)
 # Exact releases avoid resolving `latest` from the npm registry.
@@ -100,9 +99,22 @@ def harness_version(value):
     return name, version
 
 
+# Revisions before the naming migration used scripts/ for ProgramBench tooling,
+# pbench-single-node-<task> profiles and PBENCH_* names for core settings.
+LAYOUTS = {
+    'current': {'gen_env': 'tasks/programbench/scripts/gen_env.sh', 'profile': 'programbench-pandoc',
+                'overlay': 'docker/docker_compose.team.yml', 'workers_key': 'AGENSH_WORKERS',
+                'acp_driver': 'tasks/programbench/scripts/acp_driver.py'},
+    'legacy': {'gen_env': 'scripts/pbench_gen_env.sh', 'profile': 'pbench-single-node-pandoc',
+               'overlay': 'docker/docker_compose.pbench.yml', 'workers_key': 'PBENCH_WORKERS_PER_TEAM',
+               'acp_driver': 'scripts/acp_driver.py'},
+}
+
+
 class Snapshot:
     def __init__(self, root: Path, out: Path, harnesses, versions, workers, jobs):
         self.root = root.resolve()
+        self.layout = LAYOUTS['current' if (self.root / LAYOUTS['current']['gen_env']).is_file() else 'legacy']
         self.out = out
         self.harnesses = harnesses
         self.versions = versions
@@ -122,7 +134,7 @@ class Snapshot:
     def fixtures(self):
         # Recording the inputs makes a diff caused by changed options self-explanatory.
         self.write('fixtures.json', json.dumps({
-            'task': TASK, 'profile': PROFILE, 'hours': HOURS, 'workers': self.workers,
+            'task': TASK, 'profile': self.layout['profile'], 'hours': HOURS, 'workers': self.workers,
             'harness_versions': {name: self.versions[name] for name in self.harnesses},
         }, indent=2) + '\n')
 
@@ -157,6 +169,8 @@ class Snapshot:
         variables = {
             'AGENT_NAME': f'{org}-worker1',
             'GITEA_ORG': org,
+            # The core template names the team size AGENSH_WORKERS (PBENCH_WORKERS before).
+            'AGENSH_WORKERS': str(workers),
             'PBENCH_WORKERS': str(workers),
             'GITEA_HOST': 'http://gitea:3000',
             'GITEA_TOKEN': '<GITEA_TOKEN>',
@@ -181,7 +195,7 @@ class Snapshot:
             text = (prompts / f'{name}.txt').read_text()
             text = text.replace('${TASK}', TASK).replace('${HOURS}', str(HOURS))
             rendered[name] = text.rstrip('\n') if name == 'resume' else text
-        spec = importlib.util.spec_from_file_location('acp_driver', self.root / 'scripts/acp_driver.py')
+        spec = importlib.util.spec_from_file_location('acp_driver', self.root / self.layout['acp_driver'])
         driver = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(driver)
         self.write('single-agent/initial.txt',
@@ -194,11 +208,11 @@ class Snapshot:
 
     def profile(self, harness, workers, directory):
         # Pre-seeded passwords are preserved by the generator, keeping output stable.
-        env_file = directory / f'.env.{PROFILE}'
+        env_file = directory / f".env.{self.layout['profile']}"
         env_file.write_text(''.join(f'{k}={v}\n' for k, v in FIXED_PASSWORDS.items()))
         env = clean_env(directory, ENV_DIR=str(directory), TASKS=TASK, WORKERS=str(workers),
                         **FIXTURE_ENV)
-        run(['bash', str(self.root / 'scripts/pbench_gen_env.sh'),
+        run(['bash', str(self.root / self.layout['gen_env']),
              '--agent-harness', harness, '--harness-version', self.versions[harness]],
             env=env, cwd=self.root)
         text = env_file.read_text()
@@ -207,9 +221,10 @@ class Snapshot:
                                         text, flags=re.M)
 
     def compose(self, harness, workers, directory, env_file, values):
-        # Mirror the Makefile's render-pbench-base and COMPOSE invocation. The profile's
+        # Mirror the Makefile's render-base and COMPOSE invocation. The profile's
         # version is exported so the generator never resolves `latest` from npm.
-        env = clean_env(directory, PBENCH_WORKERS_PER_TEAM=values['PBENCH_WORKERS_PER_TEAM'],
+        workers_key = self.layout['workers_key']
+        env = clean_env(directory, **{workers_key: values[workers_key]},
                         AGENT_HARNESS=values['AGENT_HARNESS'],
                         HARNESS_VERSION=values['HARNESS_VERSION'])
         base = run([sys.executable, str(self.root / 'tools/gen_compose_prod.py')],
@@ -220,9 +235,9 @@ class Snapshot:
         staged.write_text(base)
         try:
             resolved = run(['docker', 'compose', '-f', str(staged),
-                            '-f', str(docker_dir / 'docker_compose.pbench.yml'),
-                            '--project-name', f'omcgitea-{PROFILE}', '--env-file', str(env_file),
-                            '--profile', PROFILE, 'config'],
+                            '-f', str(self.root / self.layout['overlay']),
+                            '--project-name', f"omcgitea-{self.layout['profile']}", '--env-file', str(env_file),
+                            '--profile', self.layout['profile'], 'config'],
                            env=clean_env(directory))
         finally:
             staged.unlink()

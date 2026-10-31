@@ -79,8 +79,8 @@ Copilot is the harness used for the 1.0 experiments.
 - [Repository layout](REPRODUCE.md#repository-layout): component and folder guides.
 - [Harness configuration](agent/config/harness.json): model, reasoning effort,
   prompt/output budgets and compaction settings.
-- [Team launcher](scripts/launch_single_node.sh) and
-  [single-agent launcher](scripts/launch_single_agent.py): experiment entrypoints.
+- [Team launcher](tasks/programbench/scripts/launch.sh) and
+  [single-agent launcher](tasks/programbench/scripts/launch_single_agent.py): experiment entrypoints.
 
 ## Citation
 

@@ -2,7 +2,7 @@
 # Generate private per-task Compose profiles with model, image and network settings.
 # Reuse valid local passwords when regenerating an existing profile.
 set -u
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 harness_env=$(python3 "$ROOT/agent/harness_config.py" shell "$@") || exit $?
 eval "$harness_env"
 ENV_DIR="${ENV_DIR:-$ROOT}"
@@ -39,7 +39,7 @@ for task in $TASKS; do
     task_index "$task" >/dev/null || echo "note: $task is not in TASK_TABLE; choosing free ports and subnets" >&2
 done
 
-creds="$HOME/.pbench-upstream.env"
+creds="$HOME/.agensh/upstream.env"
 cred() { [ -r "$creds" ] && awk -F= -v k="$1" '$1==k{print substr($0, length(k) + 2); exit}' "$creds"; }
 LLM_UPSTREAM="${LLM_UPSTREAM:-$(cred LLM_UPSTREAM)}"
 LLM_UPSTREAM_TOKEN="${LLM_UPSTREAM_TOKEN:-$(cred LLM_UPSTREAM_TOKEN)}"
@@ -50,7 +50,7 @@ export LLM_UPSTREAM LLM_UPSTREAM_TOKEN REASONING_EFFORT LLM_MODEL
 mkdir -p "$ENV_DIR"
 for task in $TASKS; do
     t="${task#*__}"; short="$(echo "${t%%.*}" | tr -cd 'a-z0-9-')"
-    out="$ENV_DIR/.env.pbench-$MODE-$short${PROFILE_SUFFIX:+-$PROFILE_SUFFIX}"
+    out="$ENV_DIR/.env.programbench-$short${PROFILE_SUFFIX:+-$PROFILE_SUFFIX}"
     # Size subnets for agent/router pairs and atomically publish a mode-600 file.
     python3 - "$out" "$MODE" "$short" "$(task_index "$task")" "$PORT_BASE" "$SUBNET_OCTET" \
               "$WORKERS" "$ROOT" "${#TASK_TABLE[@]}" "$ENV_DIR" <<'PY' || { echo "FATAL: generating $out failed" >&2; exit 1; }
@@ -59,7 +59,7 @@ out, mode, short, idx, port_base, octet, workers, root, listed, env_dir = sys.ar
 port_base, workers, listed = int(port_base), int(workers), int(listed)
 sys.path.insert(0, root)
 from agensh import allocate
-profile = f"pbench-{mode}-{short}"
+profile = f"programbench-{short}"
 suffix = os.environ.get("PROFILE_SUFFIX", "")
 if suffix:
     profile += f"-{suffix}"
@@ -72,13 +72,13 @@ if os.path.exists(out):
         k, sep, v = line.rstrip("\n").partition("=")
         if sep and not k.startswith("#"):
             old[k] = v
-SLOT_KEYS = ("EDGE_HTTP_PORT", "EDGE_MM_PORT", "PBENCH_SUBNET_DEFAULT", "PBENCH_SUBNET_EGRESS", "PBENCH_SUBNET_EDGE")
+SLOT_KEYS = ("EDGE_HTTP_PORT", "EDGE_MM_PORT", "AGENSH_SUBNET_DEFAULT", "AGENSH_SUBNET_EGRESS", "AGENSH_SUBNET_EDGE")
 prefix = allocate.subnet_layout(workers)[0]
 if idx:
     slot = allocate.slot(int(idx), port_base, octet, workers)
     if slot is None:
         sys.exit(f"FATAL: {profile}: {workers} workers at task index {idx} runs past 10.{octet}.255")
-elif all(old.get(k) for k in SLOT_KEYS) and old["PBENCH_SUBNET_DEFAULT"].endswith(f"/{prefix}"):
+elif all(old.get(k) for k in SLOT_KEYS) and old["AGENSH_SUBNET_DEFAULT"].endswith(f"/{prefix}"):
     # Keep an unlisted task's earlier allocation while it still fits the team size.
     slot = {k: old[k] for k in SLOT_KEYS}
 else:
@@ -86,7 +86,7 @@ else:
     index, slot = allocate.choose_slot(port_base, octet, workers, ports, networks + allocate.host_networks(),
                                        allocate.port_is_free, start=listed)
     print(f"allocated slot {index} for {profile}: ports {slot['EDGE_HTTP_PORT']}/{slot['EDGE_MM_PORT']}, "
-          f"subnets {slot['PBENCH_SUBNET_DEFAULT']}", file=sys.stderr)
+          f"subnets {slot['AGENSH_SUBNET_DEFAULT']}", file=sys.stderr)
 http, mm = int(slot["EDGE_HTTP_PORT"]), int(slot["EDGE_MM_PORT"])
 alnum = string.ascii_letters + string.digits
 def password(key, n):
@@ -111,7 +111,7 @@ keys = [
     ("MATTERMOST_ADMIN_USER", "mmadmin"),
     ("MATTERMOST_ADMIN_PASSWORD", password("MATTERMOST_ADMIN_PASSWORD", 23)),
     ("ANTHROPIC_BASE_URL", "http://egress-proxy:4180"),
-    ("PBENCH_LLM_UPSTREAM", os.environ["LLM_UPSTREAM"]),
+    ("AGENSH_LLM_UPSTREAM", os.environ["LLM_UPSTREAM"]),
     ("AGENT_HARNESS", os.environ["AGENT_HARNESS"]),
     ("HARNESS_VERSION", os.environ["HARNESS_VERSION"]),
     ("HARNESS_CONFIG", os.environ["HARNESS_CONFIG"]),
@@ -124,13 +124,13 @@ keys = [
     ("ANTHROPIC_MODEL", os.environ["LLM_MODEL"]),
     ("ANTHROPIC_API_KEY", "local-proxy-no-auth"),
     ("UPSTREAM_AUTH_TOKEN", os.environ["LLM_UPSTREAM_TOKEN"]),
-    ("PBENCH_WORKERS_PER_TEAM", workers),
+    ("AGENSH_WORKERS", workers),
     ("REPOS", "main"),
     ("MINI_ROUTER_STUCK_MS", 1200000),
     ("AGENT_IMAGE", f"omcgitea-agent-{short}-{os.environ['AGENT_HARNESS']}:{os.environ.get('AGENT_IMAGE_TAG') or 'pbench'}"),
-    ("PBENCH_SUBNET_DEFAULT", slot["PBENCH_SUBNET_DEFAULT"]),
-    ("PBENCH_SUBNET_EGRESS", slot["PBENCH_SUBNET_EGRESS"]),
-    ("PBENCH_SUBNET_EDGE", slot["PBENCH_SUBNET_EDGE"]),
+    ("AGENSH_SUBNET_DEFAULT", slot["AGENSH_SUBNET_DEFAULT"]),
+    ("AGENSH_SUBNET_EGRESS", slot["AGENSH_SUBNET_EGRESS"]),
+    ("AGENSH_SUBNET_EDGE", slot["AGENSH_SUBNET_EDGE"]),
     ("UPSTREAM_AUTH_STYLE", "bearer"),
 ]
 prefix = os.environ["AGENT_HARNESS"].upper()

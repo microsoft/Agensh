@@ -26,9 +26,9 @@ def legacy_slot(idx, port_base, octet, workers):
     if sub + units + 1 > 255:
         return None
     return {'EDGE_HTTP_PORT': http, 'EDGE_MM_PORT': http + 2,
-            'PBENCH_SUBNET_DEFAULT': f'10.{octet}.{sub}.0/{prefix}',
-            'PBENCH_SUBNET_EGRESS': f'10.{octet}.{sub + units}.0/24',
-            'PBENCH_SUBNET_EDGE': f'10.{octet}.{sub + units + 1}.0/24'}
+            'AGENSH_SUBNET_DEFAULT': f'10.{octet}.{sub}.0/{prefix}',
+            'AGENSH_SUBNET_EGRESS': f'10.{octet}.{sub + units}.0/24',
+            'AGENSH_SUBNET_EDGE': f'10.{octet}.{sub + units + 1}.0/24'}
 
 
 def always_free(_port):
@@ -45,7 +45,7 @@ class SlotTest(unittest.TestCase):
     def test_slot_subnets_do_not_overlap(self):
         for workers in (2, 128):
             networks = [ipaddress.ip_network(allocate.slot(i, 22000, 216, workers)[k])
-                        for i in range(3) for k in ('PBENCH_SUBNET_DEFAULT', 'PBENCH_SUBNET_EGRESS', 'PBENCH_SUBNET_EDGE')]
+                        for i in range(3) for k in ('AGENSH_SUBNET_DEFAULT', 'AGENSH_SUBNET_EGRESS', 'AGENSH_SUBNET_EDGE')]
             for a in range(len(networks)):
                 for b in range(a + 1, len(networks)):
                     self.assertFalse(networks[a].overlaps(networks[b]), (workers, networks[a], networks[b]))
@@ -76,7 +76,7 @@ class ProfileClaimsTest(unittest.TestCase):
     def test_reads_other_profiles_only(self):
         with tempfile.TemporaryDirectory() as directory:
             Path(directory, '.env.a').write_text('EDGE_HTTP_PORT=22200\nEDGE_MM_PORT=22202\n'
-                                                 'PBENCH_SUBNET_DEFAULT=10.216.60.0/24\nOTHER=x\n')
+                                                 'AGENSH_SUBNET_DEFAULT=10.216.60.0/24\nOTHER=x\n')
             mine = Path(directory, '.env.b')
             mine.write_text('EDGE_HTTP_PORT=22210\n')
             ports, networks = allocate.profile_claims(directory, str(mine))

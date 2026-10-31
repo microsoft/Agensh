@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # Emit the team Compose base to stdout, expanding one worker/router pair per agent.
-# Make writes this to docker/_gen_prod.<profile>.yml and adds the pbench overlay.
+# Make writes this to docker/_gen_prod.<profile>.yml and adds the team overlay.
 
 import os
 from pathlib import Path
@@ -15,7 +15,7 @@ SETTINGS = load_config()
 # The task pack supplies extra worker mounts, its prompt directory and the board id.
 PACK = load_pack(os.environ.get('AGENSH_PACK') or 'programbench')
 
-WORKERS_PER_TEAM = int(os.environ.get("PBENCH_WORKERS_PER_TEAM") or 16)
+WORKERS_PER_TEAM = int(os.environ.get("AGENSH_WORKERS") or 16)
 AGENT_HARNESS = SETTINGS.harness
 if AGENT_HARNESS not in ("pi", "copilot", "codex", "claude"):
     raise ValueError("AGENT_HARNESS must be pi, copilot, codex or claude")
@@ -58,7 +58,7 @@ x-agent: &agent-base
   init: true
   working_dir: /work
   stop_grace_period: 10m
-  cgroup_parent: pbench.slice
+  cgroup_parent: agensh.slice
 __WORKER_RESOURCES__
   image: "${AGENT_IMAGE:?AGENT_IMAGE required}"
   restart: unless-stopped
@@ -77,12 +77,12 @@ __HARNESS_ENV__
   MATTERMOST_HOST: "http://mattermost:8065"
   ACP_CHILD_UID: "10000"
   ACP_CHILD_GID: "10000"
-  PBENCH_WORKERS: "${PBENCH_WORKERS_PER_TEAM}"
+  AGENSH_WORKERS: "${AGENSH_WORKERS}"
   BOARD_SERVICE_URL: "http://board-service:8660"
   BOARD_IDS: "__BOARD_ID__"
 
 x-mini-router: &mini-router-base
-  cgroup_parent: pbench.slice
+  cgroup_parent: agensh.slice
   mem_limit: 8g
   memswap_limit: 8g
   image: "${MINI_ROUTER_IMAGE:-omcgitea-mini-router:local}"
@@ -100,7 +100,7 @@ x-mini-router-env: &mini-router-env-base
   MINI_ROUTER_PORT: "8645"
   MATTERMOST_HOST: "http://mattermost:8065"
   MINI_ROUTER_STUCK_MS: "${MINI_ROUTER_STUCK_MS:-1200000}"
-  PBENCH_RUN_START_MS: "${PBENCH_RUN_START_MS:-}"
+  AGENSH_RUN_START_MS: "${AGENSH_RUN_START_MS:-}"
   BOARD_SERVICE_URL: "http://board-service:8660"
   BOARD_IDS: "__BOARD_ID__"
 '''
@@ -111,7 +111,7 @@ services:
   gitea:
     image: docker.gitea.com/gitea:1.22.6
     restart: unless-stopped
-    cgroup_parent: pbench.slice
+    cgroup_parent: agensh.slice
     depends_on:
       mysql: { condition: service_healthy }
     ulimits:
@@ -148,7 +148,7 @@ services:
   nginx-edge:
     image: nginx:1.27-alpine
     restart: unless-stopped
-    cgroup_parent: pbench.slice
+    cgroup_parent: agensh.slice
     depends_on:
       gitea:
         condition: service_healthy
@@ -167,7 +167,7 @@ services:
   gitea-admin-init:
     image: docker.gitea.com/gitea:1.22.6
     restart: "no"
-    cgroup_parent: pbench.slice
+    cgroup_parent: agensh.slice
     depends_on:
       gitea:
         condition: service_healthy
@@ -199,7 +199,7 @@ services:
       context: ./bootstrap
     image: "${BOOTSTRAP_IMAGE:-omcgitea-bootstrap:local}"
     restart: "no"
-    cgroup_parent: pbench.slice
+    cgroup_parent: agensh.slice
     depends_on:
       gitea: { condition: service_healthy }
       gitea-admin-init: { condition: service_completed_successfully }
@@ -226,7 +226,7 @@ services:
       context: ../secret-service
     image: "${SECRET_SERVICE_IMAGE:-omcgitea-secret-service:local}"
     restart: unless-stopped
-    cgroup_parent: pbench.slice
+    cgroup_parent: agensh.slice
     depends_on:
       bootstrap: { condition: service_completed_successfully }
     environment:
@@ -245,7 +245,7 @@ services:
   act-runner:
     image: gitea/act_runner:0.2.11
     restart: unless-stopped
-    cgroup_parent: pbench.slice
+    cgroup_parent: agensh.slice
     depends_on:
       bootstrap: { condition: service_completed_successfully }
     environment:
@@ -254,7 +254,7 @@ services:
       GITEA_RUNNER_LABELS: "ubuntu-latest:docker://${AGENT_IMAGE:?AGENT_IMAGE required}"
       ACT_JOB_NETWORK: "${ACT_JOB_NETWORK:-omcgitea-${PROFILE}_default}"
       ACT_CAPACITY: "${ACT_CAPACITY:-2}"
-      ACT_JOB_LIMITS: "${ACT_JOB_LIMITS:---memory=8g --memory-swap=8g --cpus=4 --pids-limit=512 --cgroup-parent=pbench.slice}"
+      ACT_JOB_LIMITS: "${ACT_JOB_LIMITS:---memory=8g --memory-swap=8g --cpus=4 --pids-limit=512 --cgroup-parent=agensh.slice}"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ${DATA_ROOT:-../.claude-team-data}/${PROFILE}/tokens:/run/omcgitea/tokens:ro
@@ -285,7 +285,7 @@ services:
   mysql:
     image: mysql:8.4
     restart: unless-stopped
-    cgroup_parent: pbench.slice
+    cgroup_parent: agensh.slice
     command: ["--innodb-use-native-aio=0", "--max-connections=${MYSQL_MAX_CONNECTIONS:-1000}", "--innodb-buffer-pool-size=${MYSQL_INNODB_BUFFER_POOL_SIZE:-134217728}"]
     environment:
       MYSQL_ROOT_PASSWORD: "${MYSQL_ROOT_PASSWORD:?MYSQL_ROOT_PASSWORD required}"
@@ -305,7 +305,7 @@ services:
   mattermost:
     image: mattermost/mattermost-team-edition:10.6
     restart: unless-stopped
-    cgroup_parent: pbench.slice
+    cgroup_parent: agensh.slice
     ulimits:
       nofile: { soft: "${MM_NOFILE:-65536}", hard: "${MM_NOFILE:-65536}" }
     environment:
@@ -335,7 +335,7 @@ services:
   board-service:
     image: "${BOARD_IMAGE:-omcgitea-board:local}"
     restart: unless-stopped
-    cgroup_parent: pbench.slice
+    cgroup_parent: agensh.slice
     depends_on:
       mysql: { condition: service_healthy }
     environment:
