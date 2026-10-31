@@ -128,3 +128,16 @@ the latest one.
 With `AGENSH_PLANNING=1`, worker 1 is woken first with
 [`prompts/planning.txt`](../prompts/planning.txt); the others wake when a PR
 titled `[plan] ...` is merged, or after `AGENSH_PLANNING_TIMEOUT_S`.
+
+## Peer review and per-worker models
+
+With `AGENSH_REVIEW_PATHS` (a project's `[coordination] review_paths`), the
+driver posts `agensh/review` on every open PR and makes it a required check on
+`main`: PRs that touch those paths stay `pending` until someone other than the
+author approves, and a later change request by that reviewer withdraws the
+approval. Paths decide, not PR size, which agents could game by splitting PRs.
+
+With `AGENSH_AGENT_MODELS` (`team-worker3=model,...`, from `[team.models]`), the
+egress proxy rewrites those workers' model requests to their model. The model
+must be served by the same gateway with the same wire API; usage metering
+records the model per request.

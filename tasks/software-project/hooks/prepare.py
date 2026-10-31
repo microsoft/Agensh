@@ -138,6 +138,10 @@ def main():
             'things the goal, the repository or your peers can settle.' if project.human else
             '**Fully autonomous**: there is no human to ask during this run. Settle open\n'
             '   questions yourselves from the goal and the repository, decide, and ship.'),
+        'REVIEW_RULE': (
+            ' PRs that touch ' + ', '.join(f'`{p}`' for p in project.review_paths) + ' merge only after a peer '
+            'approves them (`agensh/review`): ask one by direct message, and review peers\' PRs promptly when asked.'
+            if project.review_paths else ''),
         'PROTECTED_RULE': (
             f'Changes to these protected paths need the approval of `{project.human}`: '
             f'{protected_paths(pack, project)}. Avoid them; when one must change, open the PR, say why '

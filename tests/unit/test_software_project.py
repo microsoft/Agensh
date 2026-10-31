@@ -75,6 +75,9 @@ class ProjectFileTest(unittest.TestCase):
         self.assertEqual((project.human, project.digest_seconds, project.planning, project.planning_timeout),
                          ('owner', 1800, True, 2700))
         self.assertEqual(load_project(self.write(PROJECT.format(upstream='u'))).human, '')
+        project = load_project(self.write(PROJECT.format(upstream='u').replace('workers = 2', 'workers = 2\nmodels = { "2" = "mini" }')
+                                          + '[coordination]\nreview_paths = ["src/core/**"]\n'))
+        self.assertEqual((project.models, project.review_paths), ({2: 'mini'}, ('src/core/**',)))
 
     def test_goal_file_and_main_default_to_pr_checks(self):
         path = self.write('pack = "software-project"\nname = "n"\ngoal_file = "goal.md"\n'
@@ -101,6 +104,8 @@ class ProjectFileTest(unittest.TestCase):
             PROJECT + '[human]\nmode = "always"\n': 'mode must be',
             PROJECT + '[human]\nmode = "optional"\nusername = "team-worker1"\n': 'not used by the team',
             PROJECT + '[coordination]\nplanning = "yes"\n': 'planning must be',
+            PROJECT.replace('workers = 2', 'workers = 2\nmodels = { "3" = "m" }'): '[team.models]',
+            PROJECT + '[coordination]\nreview_paths = ["a;b"]\n': 'list of path globs',
         }
         for text, message in cases.items():
             with self.subTest(message=message):

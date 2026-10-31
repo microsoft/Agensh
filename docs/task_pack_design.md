@@ -575,7 +575,9 @@ Features:
       delivery PR), the progress digest and the optional planning phase.
       `[human]` and `[coordination] planning` are project settings; the pack
       only declares `[human] product_owner = true`.
-11. **Optional capabilities**: peer review and per-role models.
+11. **Optional capabilities** *(done)*: peer review by path
+    (`[coordination] review_paths`, enforced by the `agensh/review` status)
+    and per-worker models (`[team.models]`, applied by the egress proxy).
 
 PRs 1–8 do not change task behavior. 9–11 add features.
 

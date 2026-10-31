@@ -32,6 +32,9 @@ timeout_minutes = 15                    # per CI job
 [team]
 workers = 4                             # 1-128
 
+[team.models]                           # optional: some workers on another model
+3 = "gpt-5.6-mini"                      # worker number = model id served by the gateway
+
 [budget]
 hours = 2                               # per run segment
 max_model_tokens = 20000000             # team input + output tokens; 0: no limit
@@ -44,6 +47,7 @@ digest = "1h"                           # progress digest to the owner; 0 turns 
 [coordination]
 planning = true                         # worker 1 plans before the others wake
 planning_timeout = "45m"
+review_paths = ["src/core/**"]          # PRs touching these need one peer approval
 
 [environment]
 base_image = "default-python"           # or an image ref: Debian/Ubuntu with python3

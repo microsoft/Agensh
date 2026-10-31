@@ -149,3 +149,29 @@ class ProtectedPathTest(unittest.TestCase):
         text = quality.render_codeowners(['.gitea/workflows/**', '.gitea/CODEOWNERS'], 'owner')
         self.assertIn('^\\.gitea/workflows/.*$ @owner\n', text)
         self.assertIn('^\\.gitea/CODEOWNERS$ @owner\n', text)
+
+
+class ReviewTest(unittest.TestCase):
+    paths = ['src/core/**']
+
+    def review(self, user, state, at, **extra):
+        return {'user': {'login': user}, 'state': state, 'submitted_at': at, **extra}
+
+    def test_paths_decide(self):
+        self.assertEqual(quality.review_status(['README.md'], [], 'team-worker1', self.paths)[0], 'success')
+        state, text = quality.review_status(['src/core/a.py', 'README.md'], [], 'team-worker1', self.paths)
+        self.assertEqual((state, text), ('pending', 'needs one peer approval: touches src/core/a.py'))
+
+    def test_peer_approval(self):
+        files = ['src/core/a.py']
+        own = [self.review('team-worker1', 'APPROVED', '1')]
+        self.assertEqual(quality.review_status(files, own, 'team-worker1', self.paths)[0], 'pending')
+        peer = [self.review('team-worker2', 'APPROVED', '1')]
+        self.assertEqual(quality.review_status(files, peer, 'team-worker1', self.paths),
+                         ('success', 'approved by team-worker2'))
+        withdrawn = peer + [self.review('team-worker2', 'REQUEST_CHANGES', '2')]
+        self.assertEqual(quality.review_status(files, withdrawn, 'team-worker1', self.paths)[0], 'pending')
+        stale = [self.review('team-worker2', 'APPROVED', '1', stale=True)]
+        self.assertEqual(quality.review_status(files, stale, 'team-worker1', self.paths)[0], 'pending')
+        comment = [self.review('team-worker3', 'COMMENT', '3')]
+        self.assertEqual(quality.review_status(files, peer + comment, 'team-worker1', self.paths)[0], 'success')

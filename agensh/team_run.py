@@ -435,6 +435,7 @@ class TeamRun:
         self.push_seed()
         if self.pack.ci_gate:
             self.protect_files()
+            self.require_review()
         self.start_quality_loops()
         team_id, channel = self.mm.ensure_task_channel(self.channel_members())
         brief = self.render_brief(team_id, channel)
@@ -723,6 +724,17 @@ class TeamRun:
     def worker_names(self):
         return [f'{self.org}-worker{i}' for i in range(1, self.workers + 1)]
 
+    def require_review(self):
+        # Peer review by path joins the required checks on main.
+        if not self.review_paths():
+            return
+        status, _ = self.gitea_api('PATCH', '/branch_protections/main', {
+            'enable_status_check': True,
+            'status_check_contexts': [*quality.REQUIRED_CHECKS, quality.REVIEW_CHECK]})
+        if status != 200:
+            raise Fatal(f'could not require {quality.REVIEW_CHECK} on main (HTTP {status})')
+        log(f'PRs touching {", ".join(self.review_paths())} need one peer approval ({quality.REVIEW_CHECK})')
+
     def protect_files(self):
         # With a product owner, PRs touching protected paths need their approval:
         # CODEOWNERS (from the prepare hook) requests their review, which is official
@@ -848,6 +860,32 @@ sys.exit(json.load(urllib.request.urlopen(request, timeout=15)).get('status') !=
             self.board_note('FACT', f'main passes its full suite again at {sha[:8]}')
             self.mm.post(self.mm.channel_id, render_prompt(prompts / 'recovered.txt', **variables))
 
+    def review_paths(self):
+        return [p for p in self.values.get('AGENSH_REVIEW_PATHS', '').split(';') if p]
+
+    def review_state(self, pull):
+        # Peer review by path (quality.review_status); files are cached per head.
+        number, head = pull['number'], pull['head']['sha']
+        files = self.pr_files.get(head)
+        if files is None:
+            files = []
+            for page in range(1, 11):
+                status, batch = self.gitea_api('GET', f'/pulls/{number}/files?limit=100&page={page}')
+                if status != 200 or not batch:
+                    break
+                files += [f['filename'] for f in batch]
+            self.pr_files[head] = files
+        status, reviews = self.gitea_api('GET', f'/pulls/{number}/reviews')
+        return quality.review_status(files, reviews if status == 200 else [], pull['user']['login'], self.review_paths())
+
+    def post_status(self, posted, head, context, wanted):
+        if posted.get((head, context)) == wanted:
+            return
+        code, _ = self.gitea_api('POST', f'/statuses/{head}', {
+            'state': wanted[0], 'context': context, 'description': wanted[1][:250]})
+        if 200 <= code < 300:
+            posted[(head, context)] = wanted
+
     def health_tick(self, gate, posted):
         status, branch = self.gitea_api('GET', '/branches/main')
         if status != 200 or not isinstance(branch, dict):
@@ -864,16 +902,13 @@ sys.exit(json.load(urllib.request.urlopen(request, timeout=15)).get('status') !=
                 break
             for pull in pulls:
                 head = pull['head']['sha']
-                wanted = gate.pr_status(pull)
-                if posted.get(head) == wanted:
-                    continue
-                code, _ = self.gitea_api('POST', f'/statuses/{head}', {
-                    'state': wanted[0], 'context': quality.HEALTH_CHECK, 'description': wanted[1]})
-                if 200 <= code < 300:
-                    posted[head] = wanted
+                self.post_status(posted, head, quality.HEALTH_CHECK, gate.pr_status(pull))
+                if self.review_paths():
+                    self.post_status(posted, head, quality.REVIEW_CHECK, self.review_state(pull))
 
     def main_health(self):
         gate, posted = quality.HealthGate(), {}
+        self.pr_files = {}
         self.health_change = ''
         interval = env_int('AGENSH_HEALTH_INTERVAL_S', 15)
         record = self.task_out / 'main-health.json'

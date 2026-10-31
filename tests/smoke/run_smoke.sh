@@ -163,6 +163,9 @@ repo = "$UPSTREAM"
 pr = ["python3 -m unittest -q"]
 [team]
 workers = $WORKERS
+[team.models]
+# Worker 2's requests go to its own model, as for a cheaper reviewer role.
+2 = "smoke-reviewer-model"
 [budget]
 # The stubs make four requests of 150 tokens: 92% of this, enough for the warning.
 max_model_tokens = 650
@@ -173,6 +176,7 @@ digest = "1m"
 [coordination]
 planning = true
 planning_timeout = "5m"
+review_paths = ["review/**"]
 [environment]
 base_image = "$BASE_IMAGE"
 EOF
@@ -284,6 +288,7 @@ print(f"board entries: {len(entries)}")
         check_backlog
         check_allowlist
         check_planning
+        check_models
         [ "$HUMAN" = 1 ] && check_human
         python3 tests/smoke/check_gate.py "$ENV_FILE" "$OUT/run/$TASK" || die "CI gate check failed"
         push_upstream_change
@@ -367,6 +372,23 @@ check_allowlist() {
     sudo -n grep -q '"host": "example.com", "port": 443, "decision": "denied"' "$log_file" \
         || die "egress-filter did not log the denied request"
     log "allowlist: PyPI through egress-filter, example.com refused and logged, no direct egress"
+}
+
+check_models() {
+    # [team.models]: worker 2's model requests went to its own model.
+    local usage
+    usage="$(profile_value DATA_ROOT)/$PROFILE/usage/usage.jsonl"
+    sudo -n python3 - "$usage" "$(profile_value ORG_NAME)" <<'CHECK' >&2 || die "per-worker models were not applied"
+import json, sys
+records = [json.loads(line) for line in open(sys.argv[1])]
+models = {}
+for record in records:
+    models.setdefault(record['agent'], set()).add(record['model'])
+org = sys.argv[2]
+if models.get(f'{org}-worker2') != {'smoke-reviewer-model'} or 'smoke-reviewer-model' in models.get(f'{org}-worker1', set()):
+    sys.exit(f'unexpected models per worker: {models}')
+print(f'models per worker: { {k: sorted(v) for k, v in sorted(models.items())} }')
+CHECK
 }
 
 check_planning() {

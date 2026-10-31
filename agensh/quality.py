@@ -12,6 +12,8 @@ CODEOWNERS_PATH = '.gitea/CODEOWNERS'
 PR_CHECK = 'agensh / pr (pull_request)'
 MAIN_CHECK = 'agensh / main (push)'
 HEALTH_CHECK = 'agensh/main-health'
+# Optional: PRs touching [coordination] review_paths need one peer's approval.
+REVIEW_CHECK = 'agensh/review'
 REQUIRED_CHECKS = (PR_CHECK, HEALTH_CHECK)
 FIX_LABEL = 'fix-main'
 # The allowlist network's filtering proxy (docker/network_allowlist.yml).
@@ -147,6 +149,28 @@ class HealthGate:
         if is_fix_pr(pull):
             return 'success', 'fix-main PR: may merge while main is failing'
         return 'pending', f'main is failing; only {FIX_LABEL} PRs merge until it passes'
+
+
+def review_status(files, reviews, author, patterns):
+    """The agensh/review status for a PR: (state, description).
+
+    Paths rather than changed-line counts decide, because agents could split PRs
+    to stay under a size threshold. Only approvals by someone other than the
+    author count, and a later change request by the same reviewer withdraws theirs.
+    """
+    touched = [f for f in files if matches_any(f, patterns)]
+    if not touched:
+        return 'success', 'no path that needs peer review'
+    latest = {}
+    for review in sorted(reviews or [], key=lambda r: (r.get('submitted_at') or '', r.get('id', 0))):
+        login = (review.get('user') or {}).get('login', '')
+        if login and login != author and review.get('state') in ('APPROVED', 'REQUEST_CHANGES'):
+            latest[login] = review
+    approvers = sorted(login for login, review in latest.items()
+                       if review['state'] == 'APPROVED' and not review.get('stale') and not review.get('dismissed'))
+    if approvers:
+        return 'success', f'approved by {", ".join(approvers)}'
+    return 'pending', f'needs one peer approval: touches {", ".join(touched[:3])}' + (' …' if len(touched) > 3 else '')
 
 
 def check_state(statuses, context):

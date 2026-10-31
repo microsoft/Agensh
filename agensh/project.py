@@ -60,6 +60,9 @@ class Project:
     # [coordination]: one worker plans before the others wake.
     planning: bool = False
     planning_timeout: int = 2700
+    review_paths: tuple = ()
+    # [team.models]: worker number -> model id, for per-role models.
+    models: dict = field(default_factory=dict)
     protected_paths: tuple = ()
     ci_timeout_minutes: int = 15
     extra: dict = field(default_factory=dict)
@@ -141,10 +144,15 @@ def load_project(path):
     if not isinstance(timeout, int) or isinstance(timeout, bool) or not 1 <= timeout <= 180:
         raise ProjectError('[acceptance] timeout_minutes must be an integer from 1 to 180')
     team = data.get('team', {})
-    _known(team, ('workers',), '[team]')
+    _known(team, ('workers', 'models'), '[team]')
     workers = team.get('workers', 4)
     if not isinstance(workers, int) or isinstance(workers, bool) or not 1 <= workers <= 128:
         raise ProjectError('[team] workers must be an integer from 1 to 128')
+    models = team.get('models', {})
+    if not isinstance(models, dict) or not all(
+            str(k).isdigit() and 1 <= int(k) <= workers and isinstance(v, str) and re.fullmatch(r'[A-Za-z0-9._:/-]+', v)
+            for k, v in models.items()):
+        raise ProjectError('[team.models] maps worker numbers to model ids, e.g. "3" = "gpt-5.6-mini"')
     budget = data.get('budget', {})
     _known(budget, ('hours', 'max_model_tokens'), '[budget]')
     max_tokens = budget.get('max_model_tokens', 0)
@@ -175,7 +183,8 @@ def load_project(path):
     try:
         digest = parse_duration(human_table.get('digest', '1h'))
         coordination = data.get('coordination', {})
-        _known(coordination, ('planning', 'planning_timeout'), '[coordination]')
+        _known(coordination, ('planning', 'planning_timeout', 'review_paths'), '[coordination]')
+        review_paths = protected_path_list(coordination.get('review_paths', []), '[coordination] review_paths')
         planning_timeout = parse_duration(coordination.get('planning_timeout', '45m'))
     except PackError as error:
         raise ProjectError(str(error)) from None
@@ -189,7 +198,8 @@ def load_project(path):
                    workers=workers, hours=float(hours), base_image=base_image, network=network,
                    allow_domains=tuple(d.lower() for d in domains), max_model_tokens=max_tokens,
                    human=username if mode == 'optional' else '', digest_seconds=digest if mode == 'optional' else 0,
-                   planning=planning, planning_timeout=planning_timeout,
+                   planning=planning, planning_timeout=planning_timeout, review_paths=review_paths,
+                   models={int(k): v for k, v in models.items()},
                    protected_paths=protected, ci_timeout_minutes=timeout)
 
 
@@ -283,6 +293,11 @@ def write_profile(project, args, env_dir=ROOT):
         keys += [('AGENSH_HUMAN', project.human), ('AGENSH_DIGEST_S', project.digest_seconds)]
     if project.planning:
         keys += [('AGENSH_PLANNING', 1), ('AGENSH_PLANNING_TIMEOUT_S', project.planning_timeout)]
+    if project.review_paths:
+        keys.append(('AGENSH_REVIEW_PATHS', ';'.join(project.review_paths)))
+    if project.models:
+        # The egress proxy sends these workers' requests to their own model.
+        keys.append(('AGENSH_AGENT_MODELS', ','.join(f'team-worker{n}={m}' for n, m in sorted(project.models.items()))))
     pack = load_pack(project.pack)
     if pack.ci_gate:
         paths = dict.fromkeys(pack.protected_paths + project.protected_paths)

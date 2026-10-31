@@ -74,6 +74,8 @@ Each worker image includes only the selected harness. All expose ACP to the
 existing infrastructure; Pi, Codex, and Claude Code use adapters to their native runtimes.
 Copilot is the harness used for the 1.0 experiments.
 
+- [Software projects](tasks/software-project/README.md): run a team on your own
+  repository; [acceptance testing guide](docs/acceptance_testing.md).
 - [Reproduction guide](REPRODUCE.md): prerequisites, configuration, image builds,
   launch commands, evaluation, recovery and release differences.
 - [Repository layout](REPRODUCE.md#repository-layout): component and folder guides.

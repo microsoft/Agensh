@@ -114,9 +114,9 @@ def check_protection():
     code, protection = api('GET', '/branch_protections/main')
     if code != 200:
         fail(f'no branch protection on main ({code})')
-    if not protection.get('enable_status_check') or set(protection.get('status_check_contexts') or []) != set(
-            quality.REQUIRED_CHECKS):
-        fail(f'main does not require {quality.REQUIRED_CHECKS}: {protection.get("status_check_contexts")}')
+    required = {*quality.REQUIRED_CHECKS, quality.REVIEW_CHECK}
+    if not protection.get('enable_status_check') or set(protection.get('status_check_contexts') or []) != required:
+        fail(f'main does not require {sorted(required)}: {protection.get("status_check_contexts")}')
     if HUMAN:
         # The product owner approves protected paths through CODEOWNERS.
         if not protection.get('block_on_official_review_requests') or HUMAN not in (
@@ -131,14 +131,14 @@ def check_protection():
     code, labels = api('GET', '/labels')
     if quality.FIX_LABEL not in {label['name'] for label in labels or []}:
         fail(f'the {quality.FIX_LABEL} label is missing')
-    log(f'main requires {", ".join(quality.REQUIRED_CHECKS)}; protected: {protection["protected_file_patterns"]}')
+    log(f'main requires {", ".join(sorted(required))}; protected: {protection["protected_file_patterns"]}')
 
 
 def check_merged_prs():
     code, pulls = api('GET', '/pulls?state=closed&limit=50')
     merged = [p for p in pulls if p.get('merged')]
     for pull in merged:
-        for context in quality.REQUIRED_CHECKS:
+        for context in (*quality.REQUIRED_CHECKS, quality.REVIEW_CHECK):
             if status_of(pull['head']['sha'], context) != 'success':
                 fail(f'merged PR #{pull["number"]} lacks a successful {context}')
     sha = main_sha()
@@ -154,8 +154,8 @@ def check_protected_files(work, token):
     head = push_branch(work, 'smoke/protected', {'.agensh/acceptance.txt': 'weaker checks\n'},
                        'Change a protected acceptance file')
     number = open_pr('smoke/protected', 'smoke: change a protected file')
-    wait('both checks on the protected-file PR', lambda: all(
-        status_of(head, c) == 'success' for c in quality.REQUIRED_CHECKS), timeout=300)
+    wait('the checks on the protected-file PR', lambda: all(
+        status_of(head, c) == 'success' for c in (*quality.REQUIRED_CHECKS, quality.REVIEW_CHECK)), timeout=300)
     merged, reply = merge(number, token)
     if merged or api('GET', f'/pulls/{number}')[1].get('merged'):
         fail('a worker merged a change to a protected file')
@@ -186,8 +186,8 @@ def check_broken_main(work, token):
     fix_head = push_branch(work, 'smoke/fix', {'widget.py': 'def greet(name):\n    return f"hello {name}"\n'},
                            'Restore greet')
     fix = open_pr('smoke/fix', f'[{quality.FIX_LABEL}] restore greet')
-    wait('the fix-main PR to pass both checks', lambda: all(
-        status_of(fix_head, c) == 'success' for c in quality.REQUIRED_CHECKS), timeout=300)
+    wait('the fix-main PR to pass its checks', lambda: all(
+        status_of(fix_head, c) == 'success' for c in (*quality.REQUIRED_CHECKS, quality.REVIEW_CHECK)), timeout=300)
     merged, reply = merge(fix, token)
     if not merged:
         fail(f'the fix-main PR did not merge: {reply}')
@@ -201,6 +201,26 @@ def check_broken_main(work, token):
     log('a broken main held an ordinary PR, merged the fix-main PR, then recovered')
 
 
+def check_peer_review(work, token):
+    # The smoke project's review/** needs one peer approval before merging.
+    head = push_branch(work, 'smoke/review', {'review/core.txt': 'core\n'}, 'Change a reviewed path')
+    number = open_pr('smoke/review', 'smoke: change a reviewed path')
+    wait('the review status to hold the PR', lambda: status_of(head, quality.REVIEW_CHECK) == 'pending', timeout=120)
+    merged, reply = merge(number, token)
+    if merged:
+        fail('a PR touching a reviewed path merged without a peer approval')
+    peer = secret(f'agent-{ORG}-worker2.token')
+    code, review = api('POST', f'/pulls/{number}/reviews', {'event': 'APPROVED', 'body': 'Looks right.'}, token=peer)
+    if code != 200:
+        fail(f'worker2 could not approve PR #{number}: {code} {review}')
+    wait('the peer approval to release the PR', lambda: status_of(head, quality.REVIEW_CHECK) == 'success'
+         and status_of(head, quality.PR_CHECK) == 'success', timeout=300)
+    merged, reply = merge(number, token)
+    if not merged:
+        fail(f'the approved PR did not merge: {reply}')
+    log('a PR touching a reviewed path merged only after a peer approved it')
+
+
 def main():
     check_protection()
     check_merged_prs()
@@ -208,6 +228,7 @@ def main():
     with tempfile.TemporaryDirectory() as directory:
         work = Path(directory, 'work')
         subprocess.run(['git', 'clone', '-q', CLONE, str(work)], check=True)
+        check_peer_review(work, token)
         check_protected_files(work, token)
         check_broken_main(work, token)
     log('PASS')

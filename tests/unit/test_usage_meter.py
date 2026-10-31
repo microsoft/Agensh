@@ -202,5 +202,17 @@ class TokenBudgetTest(ProxyBase):
         self.assertEqual(snapshot['agents']['org-worker1']['requests'], 2)
 
 
+
+class AgentModelTest(ProxyBase):
+    # Per-role models: worker2's requests go to its own model.
+    EXTRA_ENV = {'UPSTREAM_AGENT_MODELS': 'org-worker2=small-model,org-worker9=other'}
+
+    def test_model_per_agent(self):
+        self.assertEqual(self.post('/v1/responses', {'Authorization': 'Bearer local-proxy-org-worker1'}, False)[0], 200)
+        self.assertEqual(self.post('/v1/responses', {'Authorization': 'Bearer local-proxy-org-worker2'}, False)[0], 200)
+        records = [json.loads(line) for line in Path(self.log).read_text().splitlines()]
+        self.assertEqual({r['agent']: r['model'] for r in records}, {'org-worker1': 'fake', 'org-worker2': 'small-model'})
+
+
 if __name__ == '__main__':
     unittest.main()

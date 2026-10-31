@@ -21,6 +21,9 @@ UPSTREAM_DISABLED_TOOLS = frozenset(name.strip() for name in os.environ.get("UPS
 CODE_MODE_OUTPUT_TOKENS = int(os.environ.get('UPSTREAM_CODE_MODE_OUTPUT_TOKENS', '0'))
 MAX_OUTPUT_TOKENS = int(os.environ.get('UPSTREAM_MAX_OUTPUT_TOKENS', '0') or '0')
 ANTHROPIC_MODEL = os.environ.get('UPSTREAM_ANTHROPIC_MODEL', '')
+# Per-role models: "agent=model,..." sends those agents' model requests to their model.
+AGENT_MODELS = dict(item.split('=', 1) for item in os.environ.get('UPSTREAM_AGENT_MODELS', '').split(',')
+                    if '=' in item)
 ANTHROPIC_EFFORT = os.environ.get('UPSTREAM_ANTHROPIC_EFFORT', '')
 TOOL_OUTPUT_BYTES = int(os.environ.get('UPSTREAM_TOOL_OUTPUT_BYTES', '0') or '0')
 AGENT_HARNESS = os.environ.get('UPSTREAM_AGENT_HARNESS', '')
@@ -309,6 +312,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                                 mutated = True
                         if TOOL_OUTPUT_BYTES > 0:
                             mutated = limit_anthropic_tool_outputs(d, TOOL_OUTPUT_BYTES) or mutated
+                    if metered and agent in AGENT_MODELS and d.get('model') != AGENT_MODELS[agent]:
+                        d['model'] = AGENT_MODELS[agent]
+                        request_model = d['model']
+                        mutated = True
                     if "metadata" in d:
                         d.pop("metadata", None)
                         mutated = True
