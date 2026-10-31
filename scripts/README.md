@@ -60,6 +60,11 @@ Pi output limits and the Codex catalog are prepared at runtime from the selected
 configuration. Both proxy Compose paths mount
 `code_mode_limits.py`, apply a 600-second total request deadline and use low
 response verbosity. Unsupported question-tool filtering remains enabled.
+Responses reasoning items and the `reasoning.encrypted_content` include are
+forwarded, so stateless (`store: false`) clients such as Copilot keep the
+model's earlier reasoning across tool calls. Set `STRIP_REASONING=1` at launch
+only for an upstream that rejects reasoning replay. The proxy's `REQUEST` log
+line reports `reasoning_items` per request.
 Proxy retries are separate from native harness retries.
 `UPSTREAM_RETRY_ATTEMPTS` counts total proxy attempts, with a default of four;
 one disables proxy retries. Selected HTTP 429/5xx and non-timeout transport

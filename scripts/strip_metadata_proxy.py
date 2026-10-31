@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-# Relay model HTTP requests, removing unsupported metadata/Responses reasoning data.
+# Relay model HTTP requests, removing unsupported metadata. Responses reasoning
+# replay is forwarded unless UPSTREAM_STRIP_REASONING is set.
 # Optionally inject the upstream credential; buffer complete responses and retry
 # selected transient failures before returning the upstream status and body.
 
@@ -23,6 +24,7 @@ ANTHROPIC_EFFORT = os.environ.get('UPSTREAM_ANTHROPIC_EFFORT', '')
 TOOL_OUTPUT_BYTES = int(os.environ.get('UPSTREAM_TOOL_OUTPUT_BYTES', '0') or '0')
 AGENT_HARNESS = os.environ.get('UPSTREAM_AGENT_HARNESS', '')
 RESPONSE_VERBOSITY = os.environ.get('UPSTREAM_RESPONSE_VERBOSITY', '')
+STRIP_REASONING = os.environ.get('UPSTREAM_STRIP_REASONING', '').strip().lower() in ('1', 'true', 'yes')
 REQUEST_TIMEOUT_SECONDS = float(os.environ.get('UPSTREAM_REQUEST_TIMEOUT_SECONDS', '600'))
 HOP_BY_HOP = {"connection", "keep-alive", "proxy-connection", "te", "trailer",
               "transfer-encoding", "upgrade", "content-length"}
@@ -88,7 +90,9 @@ def model_request_metadata(payload):
             'max_output_tokens': payload.get('max_output_tokens', payload.get('max_tokens')),
             'verbosity': text_options.get('verbosity') if isinstance(text_options, dict) else None,
             'tool_count': tool_count,
-            'input_items': len(inputs) if isinstance(inputs, list) else None}
+            'input_items': len(inputs) if isinstance(inputs, list) else None,
+            'reasoning_items': sum(1 for item in inputs if isinstance(item, dict)
+                                   and item.get('type') == 'reasoning') if isinstance(inputs, list) else None}
 
 
 def filter_tool_declarations(payload, disabled):
@@ -299,23 +303,27 @@ class Handler(http.server.BaseHTTPRequestHandler):
                             if isinstance(text_options, dict) and 'verbosity' not in text_options:
                                 text_options['verbosity'] = RESPONSE_VERBOSITY
                                 mutated = True
-                        # Drop reasoning replay items and encrypted-content includes.
-                        inc = d.get("include")
-                        if isinstance(inc, list):
-                            keep = [x for x in inc if "encrypted_content" not in str(x)]
-                            if len(keep) != len(inc):
-                                if keep:
-                                    d["include"] = keep
-                                else:
-                                    d.pop("include", None)
-                                mutated = True
-                        items = d.get("input")
-                        if isinstance(items, list):
-                            keep = [it for it in items
-                                    if not (isinstance(it, dict) and it.get("type") == "reasoning")]
-                            if len(keep) != len(items):
-                                d["input"] = keep
-                                mutated = True
+                        # Stateless clients (store: false) replay earlier reasoning as
+                        # encrypted reasoning items; dropping them makes every call
+                        # start without the model's prior reasoning. Strip only for
+                        # upstreams that reject reasoning replay.
+                        if STRIP_REASONING:
+                            inc = d.get("include")
+                            if isinstance(inc, list):
+                                keep = [x for x in inc if "encrypted_content" not in str(x)]
+                                if len(keep) != len(inc):
+                                    if keep:
+                                        d["include"] = keep
+                                    else:
+                                        d.pop("include", None)
+                                    mutated = True
+                            items = d.get("input")
+                            if isinstance(items, list):
+                                keep = [it for it in items
+                                        if not (isinstance(it, dict) and it.get("type") == "reasoning")]
+                                if len(keep) != len(items):
+                                    d["input"] = keep
+                                    mutated = True
                 if mutated:
                     body = json.dumps(d).encode()
                 if isinstance(d, dict) and ('/responses' in self.path or self.path.split('?', 1)[0].rstrip('/').endswith('/messages')):
