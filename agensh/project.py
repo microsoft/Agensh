@@ -16,7 +16,7 @@ import sys
 import tomllib
 
 from agensh import allocate
-from agensh.pack import PackError, load_pack, protected_path_list
+from agensh.pack import PackError, load_pack, parse_duration, protected_path_list
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'agent'))
@@ -54,6 +54,12 @@ class Project:
     network: str = ''
     allow_domains: tuple = ()
     max_model_tokens: int = 0
+    # [human]: an optional product owner with Gitea and Mattermost accounts.
+    human: str = ''
+    digest_seconds: int = 0
+    # [coordination]: one worker plans before the others wake.
+    planning: bool = False
+    planning_timeout: int = 2700
     protected_paths: tuple = ()
     ci_timeout_minutes: int = 15
     extra: dict = field(default_factory=dict)
@@ -92,7 +98,7 @@ def load_project(path):
     with path.open('rb') as stream:
         data = tomllib.load(stream)
     _known(data, ('pack', 'name', 'goal', 'goal_file', 'workspace', 'upstream', 'acceptance', 'team',
-                  'budget', 'environment'), path.name)
+                  'budget', 'environment', 'human', 'coordination'), path.name)
     pack = data.get('pack', '')
     if pack not in PROJECT_PACKS:
         raise ProjectError(f'pack must be one of {", ".join(PROJECT_PACKS)}; got {pack!r}')
@@ -158,12 +164,32 @@ def load_project(path):
     domains = environment.get('allow_domains', [])
     if not isinstance(domains, list) or not all(isinstance(d, str) and DOMAIN.fullmatch(d.lower()) for d in domains):
         raise ProjectError('[environment] allow_domains must be a list of domain names, e.g. ["pypi.internal.example"]')
+    human_table = data.get('human', {})
+    _known(human_table, ('mode', 'username', 'digest'), '[human]')
+    mode = human_table.get('mode', 'none')
+    if mode not in ('none', 'optional'):
+        raise ProjectError(f'[human] mode must be "none" or "optional"; got {mode!r}')
+    username = str(human_table.get('username', 'owner'))
+    if not NAME.fullmatch(username) or username in ('chairman', 'mmadmin', 'harness') or username.startswith('team-'):
+        raise ProjectError(f'[human] username {username!r} must be a lowercase name not used by the team')
+    try:
+        digest = parse_duration(human_table.get('digest', '1h'))
+        coordination = data.get('coordination', {})
+        _known(coordination, ('planning', 'planning_timeout'), '[coordination]')
+        planning_timeout = parse_duration(coordination.get('planning_timeout', '45m'))
+    except PackError as error:
+        raise ProjectError(str(error)) from None
+    planning = coordination.get('planning', False)
+    if not isinstance(planning, bool):
+        raise ProjectError('[coordination] planning must be true or false')
     return Project(path=path, pack=pack, name=name, goal=goal.strip() + '\n', seed=seed, upstream=repo,
                    base_branch=str(upstream.get('base_branch', 'main')), delivery_branch=delivery,
                    acceptance_pr=_commands(acceptance.get('pr', []), '[acceptance] pr'),
                    acceptance_main=_commands(acceptance.get('main', acceptance.get('pr', [])), '[acceptance] main'),
                    workers=workers, hours=float(hours), base_image=base_image, network=network,
                    allow_domains=tuple(d.lower() for d in domains), max_model_tokens=max_tokens,
+                   human=username if mode == 'optional' else '', digest_seconds=digest if mode == 'optional' else 0,
+                   planning=planning, planning_timeout=planning_timeout,
                    protected_paths=protected, ci_timeout_minutes=timeout)
 
 
@@ -253,6 +279,10 @@ def write_profile(project, args, env_dir=ROOT):
         keys.append(('AGENSH_NETWORK', project.network))
     if project.max_model_tokens:
         keys.append(('AGENSH_MAX_MODEL_TOKENS', project.max_model_tokens))
+    if project.human:
+        keys += [('AGENSH_HUMAN', project.human), ('AGENSH_DIGEST_S', project.digest_seconds)]
+    if project.planning:
+        keys += [('AGENSH_PLANNING', 1), ('AGENSH_PLANNING_TIMEOUT_S', project.planning_timeout)]
     pack = load_pack(project.pack)
     if pack.ci_gate:
         paths = dict.fromkeys(pack.protected_paths + project.protected_paths)

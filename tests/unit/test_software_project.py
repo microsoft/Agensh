@@ -69,6 +69,13 @@ class ProjectFileTest(unittest.TestCase):
         self.assertEqual(project.base_image_ref, 'python:3.12-bookworm')
         self.assertEqual(project.goal, 'Add a --json flag to the widget CLI.\n')
 
+    def test_human_and_planning(self):
+        project = load_project(self.write(PROJECT.format(upstream='u') + '[human]\nmode = "optional"\n'
+                                          'digest = "30m"\n[coordination]\nplanning = true\n'))
+        self.assertEqual((project.human, project.digest_seconds, project.planning, project.planning_timeout),
+                         ('owner', 1800, True, 2700))
+        self.assertEqual(load_project(self.write(PROJECT.format(upstream='u'))).human, '')
+
     def test_goal_file_and_main_default_to_pr_checks(self):
         path = self.write('pack = "software-project"\nname = "n"\ngoal_file = "goal.md"\n'
                           '[workspace]\nseed = "empty"\n[acceptance]\npr = ["make test"]\n')
@@ -91,6 +98,9 @@ class ProjectFileTest(unittest.TestCase):
             PROJECT.replace('[team]', 'protected_paths = ["a;b"]\n[team]'): 'list of path globs',
             PROJECT.replace('[team]', 'timeout_minutes = 0\n[team]'): 'timeout_minutes must be',
             PROJECT + '[budget]\nmax_model_tokens = -5\n': 'max_model_tokens must be',
+            PROJECT + '[human]\nmode = "always"\n': 'mode must be',
+            PROJECT + '[human]\nmode = "optional"\nusername = "team-worker1"\n': 'not used by the team',
+            PROJECT + '[coordination]\nplanning = "yes"\n': 'planning must be',
         }
         for text, message in cases.items():
             with self.subTest(message=message):
@@ -199,6 +209,18 @@ class HookTest(HookBase):
         self.assertEqual(brief['UPSTREAM'], str(self.upstream))
         prepare = json.loads((self.task_out / 'prepare.json').read_text())
         self.assertEqual((prepare['base_sha'], prepare['run_id']), (self.base_sha, 'unit'))
+
+    def test_prepare_with_a_product_owner(self):
+        self.project_file.write_text(PROJECT.format(upstream=self.upstream) + '[human]\nmode = "optional"\n')
+        self.assertEqual(self.hook('prepare').returncode, 0)
+        prepare = json.loads((self.task_out / 'prepare.json').read_text())
+        self.assertEqual((prepare['human'], prepare['agensh_files']),
+                         ('owner', ['.gitea/workflows/agensh.yml', '.gitea/CODEOWNERS']))
+        clone = Path((self.task_out / '.seed_git').read_text().strip())
+        self.assertIn('^\\.agensh/.*$ @owner', (clone / '.gitea/CODEOWNERS').read_text())
+        prompts = self.task_out / 'prompts'
+        self.assertIn('**Product owner**: `owner` owns the goal.', (prompts / 'objective.txt').read_text())
+        self.assertIn('need the approval of `owner`', (prompts / 'delivery.txt').read_text())
 
     def test_export_pushes_delivery_branch(self):
         self.assertEqual(self.hook('prepare').returncode, 0)

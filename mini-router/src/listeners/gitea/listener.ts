@@ -21,6 +21,8 @@ export interface GiteaListenerOptions {
   token: string;
   auth: GiteaFormAuth;
   hostHeader?: string;
+  /** The product owner's username; their issue and PR comments are urgent. */
+  human?: string;
   onIngest?: (insertedCount: number) => void;
 }
 
@@ -54,9 +56,11 @@ export class GiteaListener {
       if (page.items.length < NOTIFICATION_PAGE_SIZE) break;
     }
     const observed = Date.now();
-    const uems: UEM[] = items.map((n) =>
-      giteaNotificationToUEM(n, agent, observed),
-    );
+    const uems: UEM[] = [];
+    for (const n of items) {
+      const uem = giteaNotificationToUEM(n, agent, observed);
+      uems.push(await this.fromHuman(n) ? { ...uem, urgent: true, summary: `URGENT from the product owner: ${uem.summary}` } : uem);
+    }
     const next = advanceCursor(since, { items, maxUpdatedAt });
     let inserted = 0;
     for (const u of uems) {
@@ -65,6 +69,24 @@ export class GiteaListener {
     }
     if (next) await state.setCursor(agent, "gitea", next);
     if (inserted > 0) this.opts.onIngest?.(inserted);
+  }
+
+  /** Whether the notification's latest comment was written by the product owner. */
+  private async fromHuman(n: GiteaNotificationRaw): Promise<boolean> {
+    const url = n.subject?.latest_comment_url;
+    if (!this.opts.human || !url) return false;
+    try {
+      // Notifications carry API URLs on the external address; ask the internal one.
+      const path = new URL(url).pathname;
+      const headers: Record<string, string> = { Accept: "application/json", Authorization: `token ${this.opts.token}` };
+      if (this.opts.hostHeader) headers.Host = this.opts.hostHeader;
+      const res = await fetch(`${this.opts.baseUrl.replace(/\/$/, "")}${path}`, { headers });
+      if (!res.ok) return false;
+      const comment = (await res.json()) as { user?: { login?: string } };
+      return comment.user?.login?.toLowerCase() === this.opts.human.toLowerCase();
+    } catch {
+      return false;
+    }
   }
 
   async runPolling(opts: {

@@ -134,3 +134,18 @@ class LifecycleSettingsTest(unittest.TestCase):
                 with self.assertRaises(PackError) as caught:
                     load_pack('demo', root=directory)
                 self.assertIn(message, str(caught.exception))
+
+
+class ProtectedPathTest(unittest.TestCase):
+    def test_globs(self):
+        self.assertTrue(quality.matches_any('.gitea/workflows/agensh.yml', ['.gitea/workflows/**']))
+        self.assertTrue(quality.matches_any('.agensh/a/b.toml', ['.agensh/**']))
+        self.assertFalse(quality.matches_any('src/.agensh/x', ['.agensh/**']))
+        self.assertTrue(quality.matches_any('tests/acceptance/test_x.py', ['tests/acceptance/*.py']))
+        self.assertFalse(quality.matches_any('tests/acceptance/sub/test_x.py', ['tests/acceptance/*.py']))
+        self.assertFalse(quality.matches_any('agensh/x', ['.agensh/**']))
+
+    def test_codeowners(self):
+        text = quality.render_codeowners(['.gitea/workflows/**', '.gitea/CODEOWNERS'], 'owner')
+        self.assertIn('^\\.gitea/workflows/.*$ @owner\n', text)
+        self.assertIn('^\\.gitea/CODEOWNERS$ @owner\n', text)

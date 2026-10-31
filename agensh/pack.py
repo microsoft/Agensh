@@ -62,6 +62,8 @@ class Pack:
     stop_when: tuple = ('budget',)
     finalize_notice: int = 0
     wake_stagger: int = 30
+    # A project may name a human product owner (AGENSH_HUMAN in its profile).
+    product_owner: bool = False
 
     def hook(self, name):
         return self.hooks.get(name)
@@ -91,7 +93,7 @@ def load_pack(name, root=ROOT):
     with path.open('rb') as stream:
         data = tomllib.load(stream)
     _known(data, ('name', 'description', 'hooks', 'messages', 'team', 'environment', 'workspace', 'acceptance',
-                  'coordination', 'lifecycle'),
+                  'coordination', 'lifecycle', 'human'),
            path.name)
     if data.get('name') != name:
         raise PackError(f'{path} declares name {data.get("name")!r}, expected {name!r}')
@@ -147,6 +149,11 @@ def load_pack(name, root=ROOT):
     protected_paths = protected_path_list(acceptance.get('protected_paths', []), '[acceptance] protected_paths')
     if protected_paths and not ci_gate:
         raise PackError('[acceptance] protected_paths needs ci_gate = true')
+    human = data.get('human', {})
+    _known(human, ('product_owner',), '[human]')
+    product_owner = human.get('product_owner', False)
+    if not isinstance(product_owner, bool):
+        raise PackError('[human] product_owner must be true or false')
     lifecycle = data.get('lifecycle', {})
     _known(lifecycle, ('sync_before_end', 'resumable', 'stop_when', 'finalize_notice'), '[lifecycle]')
     sync_before_end = parse_duration(lifecycle.get('sync_before_end', '30m'))
@@ -188,4 +195,5 @@ def load_pack(name, root=ROOT):
         task_prompts=task_prompts, import_history=import_history, channel=channel,
         ci_gate=ci_gate, protected_paths=protected_paths, backlog=backlog, sync_before_end=sync_before_end,
         resumable=resumable, stop_when=tuple(stop_when), finalize_notice=finalize_notice, wake_stagger=wake_stagger,
+        product_owner=product_owner,
     )

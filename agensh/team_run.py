@@ -436,11 +436,14 @@ class TeamRun:
         if self.pack.ci_gate:
             self.protect_files()
         self.start_quality_loops()
-        team_id, channel = self.mm.ensure_task_channel(self.worker_names())
+        team_id, channel = self.mm.ensure_task_channel(self.channel_members())
         brief = self.render_brief(team_id, channel)
         kickoff = render_prompt(ROOT / 'prompts/kickoff.txt', TASK_BRIEF=brief)
         self.open_issue(brief)
-        self.wake(kickoff)
+        if self.values.get('AGENSH_PLANNING') == '1' and self.workers > 1:
+            self.planning_phase(kickoff)
+        else:
+            self.wake(kickoff)
         if channel:
             if self.mm.post(channel, kickoff):
                 log(f'task posted to MM channel {self.pack.channel} (record; agents already woken)')
@@ -454,10 +457,89 @@ class TeamRun:
         self.sync('resume')
         self.fresh_sessions()
         self.start_quality_loops()
-        team_id, channel = self.mm.ensure_task_channel(self.worker_names())
+        team_id, channel = self.mm.ensure_task_channel(self.channel_members())
         message = render_prompt(ROOT / 'prompts/lifecycle/resume.txt',
                                 TASK_BRIEF=self.render_brief(team_id, channel), STATE_SUMMARY=self.state_summary())
         self.wake(message)
+
+    def human(self):
+        return self.values.get('AGENSH_HUMAN', '').strip() if self.pack.product_owner else ''
+
+    def channel_members(self):
+        return self.worker_names() + ([self.human()] if self.human() else [])
+
+    def planning_phase(self, kickoff):
+        # Worker 1 writes the architecture and the issue breakdown; the others wake
+        # when its `[plan]` PR is merged, or after the planning timeout.
+        timeout = env_int('AGENSH_PLANNING_TIMEOUT_S', 2700)
+        plan = render_prompt(ROOT / 'prompts/planning.txt', KICKOFF=kickoff, MINUTES=str(timeout // 60),
+                             PEERS=str(self.workers - 1))
+        log(f'planning phase: {self.org}-worker1 plans; the others wake when a [plan] PR merges (at most {timeout}s)')
+        self.wake(plan, indices=[1])
+        deadline = time.time() + timeout
+        while time.time() < deadline and not self.stop.is_set():
+            status, pulls = self.gitea_api('GET', '/pulls?state=closed&sort=recentupdate&limit=50')
+            merged = [p for p in pulls or [] if status == 200 and p.get('merged')
+                      and str(p.get('title', '')).lower().startswith('[plan]')]
+            if merged:
+                log(f'plan merged (PR #{merged[0]["number"]}); waking the rest of the team')
+                break
+            self.stop.wait(15)
+        else:
+            log('planning timed out; waking the rest of the team')
+        self.wake(kickoff, indices=range(2, self.workers + 1))
+
+    def digest_text(self, since):
+        # Progress since the last digest, from Gitea, CI, the board and usage metering.
+        import datetime
+        def after(stamp):
+            try:
+                return datetime.datetime.fromisoformat(str(stamp).replace('Z', '+00:00')).timestamp() > since
+            except ValueError:
+                return False
+        lines = [f'**Progress digest** ({time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime())})']
+        status, closed = self.gitea_api('GET', '/pulls?state=closed&sort=recentupdate&limit=50')
+        merged = [p for p in closed or [] if status == 200 and p.get('merged') and after(p.get('merged_at'))]
+        lines.append(f'- Merged since the last digest: {len(merged)} PR(s)'
+                     + ''.join(f'\n  - #{p["number"]} {p["title"]} ({p["user"]["login"]})' for p in merged[:15]))
+        _, issues = self.gitea_api('GET', '/issues?state=open&type=issues&limit=50')
+        _, pulls = self.gitea_api('GET', '/pulls?state=open&limit=50')
+        lines.append(f'- Open: {len(issues or [])} issue(s), {len(pulls or [])} PR(s)')
+        if self.pack.ci_gate:
+            code, branch = self.gitea_api('GET', '/branches/main')
+            if code == 200:
+                sha = branch['commit']['id']
+                code, combined = self.gitea_api('GET', f'/commits/{sha}/status')
+                state = quality.check_state((combined or {}).get('statuses'), quality.MAIN_CHECK) if code == 200 else None
+                lines.append(f'- `main` {sha[:12]}: full suite {state or "not run yet"}')
+        entries = self.board_entries() or []
+        recent = [e for e in entries if float(e.get('ts') or 0) > since]
+        counts = {kind: sum(1 for e in recent if e.get('type') == kind) for kind in ('PATCH_SUMMARY', 'FAIL', 'FACT')}
+        lines.append('- Board: ' + ', '.join(f'{n} {kind}' for kind, n in counts.items()))
+        used, limit = self.team_tokens(), int(self.values.get('AGENSH_MAX_MODEL_TOKENS', '') or 0)
+        if used is not None:
+            lines.append(f'- Model tokens used: {used}' + (f' of {limit} ({100 * used // limit}%)' if limit else ''))
+        return '\n'.join(lines)
+
+    def digest_loop(self, interval):
+        directory = self.task_out / 'digests'
+        directory.mkdir(exist_ok=True)
+        since = time.time()
+        while not self.stop.wait(interval):
+            try:
+                text = self.digest_text(since)
+            except Exception as error:  # A failed digest never stops the run.
+                log(f'WARN: progress digest failed: {error}')
+                continue
+            since = time.time()
+            (directory / f'digest-{time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())}.md').write_text(text + '\n')
+            if not self.mm.post(self.mm.channel_id, f'@{self.human()} {text}'):
+                log('WARN: could not post the progress digest')
+            log('posted a progress digest')
+
+    def latest_digest(self):
+        digests = sorted((self.task_out / 'digests').glob('digest-*.md')) if (self.task_out / 'digests').is_dir() else []
+        return digests[-1].read_text().strip() if digests else ''
 
     def fresh_sessions(self):
         mysql = next((n for n in self.docker_ps(f'name=omcgitea-{self.profile}-mysql', fmt='{{.Names}}') if n), '')
@@ -498,9 +580,14 @@ class TeamRun:
         if sync:
             lines.append(f'Upstream sync on resume: {sync["result"]} at {sync["upstream_sha"][:12]}'
                          + (f' (issue #{sync["issue"]})' if sync.get('issue') else '') + '.')
+        digest = self.latest_digest()
+        if digest:
+            lines += ['', 'Latest progress digest:', digest]
         return '\n'.join(lines) or 'No open issues or PRs.'
 
-    def wake(self, message):
+    def wake(self, message, indices=None):
+        # The planning phase wakes worker 1 first and the rest later.
+        indices = list(indices or range(1, self.workers + 1))
         base = env_int('AGENSH_WAKE_STAGGER_S', self.pack.wake_stagger)
         fast = env_int('AGENSH_WAKE_FAST_STAGGER_S', 3)
         ramp = env_int('AGENSH_WAKE_RAMP_SUBJ_S', 3600)
@@ -510,14 +597,15 @@ class TeamRun:
         else:
             log(f'waking {self.workers} agents by DM, {base}s apart')
         # Charge activation time to the shared wall-clock budget, starting before ramp-up.
-        self.run_t0 = time.time()
-        if os.environ.get('AGENSH_WATCHDOG_EARLY', '1') == '1':
+        if self.run_t0 is None:
+            self.run_t0 = time.time()
+        if os.environ.get('AGENSH_WATCHDOG_EARLY', '1') == '1' and not self.watchdog_started:
             total = schedule.budget_seconds(self.hours or 6)
             self.start_thread(self.watchdog, total)
             self.watchdog_started = True
             log(f'idle watchdog started BEFORE the ramp ({total}s)')
         woke = 0
-        for index in range(1, self.workers + 1):
+        for position, index in enumerate(indices, 1):
             name = f'{self.org}-worker{index}'
             started = time.time()
             if os.environ.get('AGENSH_STAGGERED_BRINGUP', '1') == '1':
@@ -527,16 +615,16 @@ class TeamRun:
             if dm:
                 if self.mm.post(dm, message):
                     woke += 1
-                    log(f'woke {name} ({woke}/{self.workers})')
+                    log(f'woke {name} ({woke}/{len(indices)})')
                 else:
                     log(f'WARN: DM wake failed for {name}')
             else:
                 log(f'WARN: no DM channel for {name}')
-            if index < self.workers:
+            if position < len(indices):
                 remain = schedule.wake_stagger(index, base, fast, ramp) - int(time.time() - started)
                 if remain > 0:
                     time.sleep(remain)
-        log(f'wake complete: {woke}/{self.workers} agents')
+        log(f'wake complete: {woke}/{len(indices)} agents')
 
     # Background loops.
     def start_thread(self, target, *arguments):
@@ -636,8 +724,20 @@ class TeamRun:
         return [f'{self.org}-worker{i}' for i in range(1, self.workers + 1)]
 
     def protect_files(self):
-        # Only the administrator may change these; set once main exists, because Gitea
-        # 1.22 cannot check protected files on the push that creates the branch.
+        # With a product owner, PRs touching protected paths need their approval:
+        # CODEOWNERS (from the prepare hook) requests their review, which is official
+        # because they are the only approver, and pending official requests block
+        # the merge. Gitea 1.22 has no separate code-owner requirement. Otherwise only the administrator may
+        # change them; set once main exists, because Gitea 1.22 cannot check protected
+        # files on the push that creates the branch.
+        if self.human():
+            status, _ = self.gitea_api('PATCH', '/branch_protections/main', {
+                'block_on_official_review_requests': True, 'enable_approvals_whitelist': True,
+                'approvals_whitelist_username': [self.human()]})
+            if status != 200:
+                raise Fatal(f'could not require the product owner\'s review on main (HTTP {status})')
+            log(f'protected paths on main need the approval of {self.human()} (CODEOWNERS)')
+            return
         patterns = self.values.get('AGENSH_PROTECTED_FILES', '').strip() or ';'.join(self.pack.protected_paths)
         if not patterns:
             return
@@ -862,8 +962,9 @@ sys.exit(json.load(urllib.request.urlopen(request, timeout=15)).get('status') !=
                 return
 
     def finalize_notice(self, remaining):
+        # A segment shorter than the notice gets none: the brief already gives its length.
         notice = self.pack.finalize_notice
-        if not self.stop.wait(max(0, remaining - notice)):
+        if remaining > notice and not self.stop.wait(remaining - notice):
             message = render_prompt(ROOT / 'prompts/lifecycle/before_finalize.txt',
                                     MINUTES=str(max(1, min(notice, remaining) // 60)))
             log('telling workers the run is about to finalize')
@@ -872,6 +973,9 @@ sys.exit(json.load(urllib.request.urlopen(request, timeout=15)).get('status') !=
 
     def start_stop_watchers(self, remaining):
         self.start_thread(self.control_watch)
+        digest = int(self.values.get('AGENSH_DIGEST_S', '') or 0)
+        if self.human() and digest > 0:
+            self.start_thread(self.digest_loop, digest)
         limit = int(self.values.get('AGENSH_MAX_MODEL_TOKENS', '') or 0)
         if 'tokens' in self.pack.stop_when and limit > 0:
             self.start_thread(self.token_watch, limit)

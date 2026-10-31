@@ -432,6 +432,10 @@ ROUTER_BLOCK = '''
       retries: 6
 '''
 
+# The router marks the product owner's DMs, mentions and comments urgent.
+ROUTER_ENV_TAIL = '  AGENSH_RUN_START_MS: "${AGENSH_RUN_START_MS:-}"\n  BOARD_SERVICE_URL: "http://board-service:8660"\n'
+ROUTER_HUMAN_ENV = '  HUMAN_USERNAME: "${AGENSH_HUMAN:-}"\n'
+
 def build():
     # Bootstrap identities, board membership and service names use the same worker list.
     agents_csv = ",".join(f"${{ORG_NAME}}-{s}" for s in ALL_AGENTS)
@@ -448,12 +452,16 @@ def build():
                .replace('__WORKER_RESOURCES__', worker_resources())
                .replace('__BOARD_ID__', PACK.board_id)
                .replace('  TASK_CHANNEL: "__TASK_CHANNEL__"', f'  TASK_CHANNEL: "{PACK.channel}"{proxy_env()}')
-               .replace('${AGENT_HARNESS:-copilot}', '${AGENT_HARNESS:-' + AGENT_HARNESS + '}'))
+               .replace('${AGENT_HARNESS:-copilot}', '${AGENT_HARNESS:-' + AGENT_HARNESS + '}')
+               .replace(ROUTER_ENV_TAIL, ROUTER_ENV_TAIL + ROUTER_HUMAN_ENV if PACK.product_owner else ROUTER_ENV_TAIL))
     members = ",\n".join(f'          "${{ORG_NAME}}-{s}"' for s in ALL_AGENTS)
     # Imported histories become main as is: no initial commit and no CODEOWNERS commit.
     bootstrap_import = ('      REPO_AUTO_INIT: "false"\n      BOOTSTRAP_CODEOWNERS: "false"\n'
                         if PACK.import_history else '')
     runner_env = ''
+    if PACK.product_owner:
+        # The product owner's accounts; empty when the project names none.
+        bootstrap_import += '      AGENSH_HUMAN: "${AGENSH_HUMAN:-}"\n'
     if PACK.ci_gate:
         # Required checks on main (agensh/quality.py); the driver adds protected files.
         bootstrap_import += (f'      AGENSH_REQUIRED_CHECKS: "{";".join(quality.REQUIRED_CHECKS)}"\n'

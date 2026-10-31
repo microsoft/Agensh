@@ -4,7 +4,13 @@
  */
 import type { EventStore } from "../../state.ts";
 import { MattermostWS } from "./ws.ts";
-import { isSelfAuthored, isSystemPost, mattermostEventToUEM, type MattermostWsEvent } from "./notification.ts";
+import {
+  isSelfAuthored,
+  isSystemPost,
+  markUrgentFromHuman,
+  mattermostEventToUEM,
+  type MattermostWsEvent,
+} from "./notification.ts";
 
 export interface MattermostListenerOptions {
   agent: string;
@@ -12,6 +18,8 @@ export interface MattermostListenerOptions {
   baseUrl: string;
   token: string;
   hostHeader?: string;
+  /** The product owner's username; their DMs and mentions are urgent. */
+  human?: string;
   onIngest?: (insertedCount: number) => void;
   onError?: (e: unknown) => void;
 }
@@ -133,7 +141,7 @@ export class MattermostListener {
     if (isSelfAuthored(ev, this.opts.agent)) return;
     if (isSystemPost(ev)) return;
     const observed = Date.now();
-    const uem = mattermostEventToUEM(ev, this.opts.agent, observed);
+    const uem = markUrgentFromHuman(mattermostEventToUEM(ev, this.opts.agent, observed), ev, this.opts.human);
     try {
       const id = await this.opts.state.ingest(uem, observed);
       if (id !== null) this.opts.onIngest?.(1);

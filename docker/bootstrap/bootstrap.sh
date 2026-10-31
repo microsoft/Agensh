@@ -171,6 +171,18 @@ done
 
 rm -f "$TOKENS_DIR"/webhook-*.secret 2>/dev/null || true
 
+# The optional human product owner shares the coders team; the password is kept
+# in the tokens directory for the person to sign in to Gitea and Mattermost.
+HUMAN_USER="${AGENSH_HUMAN:-}"
+if [ -n "$HUMAN_USER" ]; then
+    human_pwfile="$PASSWORDS_DIR/human-${HUMAN_USER}.password"
+    if [ ! -f "$human_pwfile" ]; then
+        openssl rand -hex 16 > "$human_pwfile"
+        chmod 600 "$human_pwfile"
+    fi
+    ensure_user "$HUMAN_USER" "$(cat "$human_pwfile")"
+fi
+
 ensure_org() {
     local code
     code=$(api_token_status GET "/api/v1/orgs/${GITEA_ORG}")
@@ -246,7 +258,9 @@ ensure_team_membership_strict() {
 
 ensure_org
 ensure_team "coders" "write"
-ensure_team_membership_strict "coders" "${AGENT_LIST[@]}"
+CODERS=("${AGENT_LIST[@]}")
+[ -z "$HUMAN_USER" ] || CODERS+=("$HUMAN_USER")
+ensure_team_membership_strict "coders" "${CODERS[@]}"
 
 ensure_repo() {
     local repo="$1"
@@ -496,6 +510,12 @@ if [ -n "${MATTERMOST_HOST:-}" ]; then
         for agent in "${AGENT_LIST[@]}"; do
             ensure_mm_user_token "$agent" || true
         done
+        if [ -n "$HUMAN_USER" ]; then
+            # Same login as Gitea; the session token is not needed by any service.
+            cp "$human_pwfile" "$TOKENS_DIR/agent-${HUMAN_USER}.password"
+            ensure_mm_user_token "$HUMAN_USER" || true
+            rm -f "$TOKENS_DIR/agent-${HUMAN_USER}.password" "$TOKENS_DIR/agent-${HUMAN_USER}-mm.token"
+        fi
     fi
     fi
 fi

@@ -10,6 +10,7 @@ Template contents are experiment inputs; keep them fixed when comparing runs.
 |---|---|
 | `agents.txt` | Core worker instructions: identity, shared services, events and the observe/claim/build/verify/merge/publish cycle |
 | `kickoff.txt` | Wraps the task brief for initial agent DMs and the task-channel record |
+| `planning.txt` | Worker 1's brief in the optional planning phase: architecture and issue breakdown in a `[plan]` PR before the others wake |
 | `lifecycle/` | Messages for resumable packs: token budget nearly spent, before a pause, before a finalize, and the resume brief with the project-state summary |
 | `main_health/` | Messages from the CI merge gate when `main` breaks, stays broken, has the restriction lifted, or recovers (packs with `ci_gate` only) |
 

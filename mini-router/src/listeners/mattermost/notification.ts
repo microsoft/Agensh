@@ -107,6 +107,29 @@ export function mattermostEventToUEM(
   };
 }
 
+/**
+ * Mark the product owner's DMs and posts that @mention the worker as urgent, so
+ * the board service delivers them mid-turn like DMs.
+ */
+export function markUrgentFromHuman(
+  uem: UEM,
+  ev: MattermostWsEvent,
+  human: string | undefined,
+): UEM {
+  if (!human || ev.event !== "posted") return uem;
+  const norm = (s: string) => s.replace(/^@/, "").trim().toLowerCase();
+  const sender = ev.data?.sender_name ?? "";
+  if (norm(sender) !== norm(human)) return uem;
+  const text = parsePostMaybe(ev.data?.post)?.message ?? "";
+  if (uem.kind !== "dm" && !mentions(text, uem.target_agent)) return uem;
+  return { ...uem, urgent: true, summary: `URGENT from the product owner: ${uem.summary}` };
+}
+
+export function mentions(text: string, agent: string): boolean {
+  const escaped = agent.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`(^|[^\\w@-])@${escaped}(?![\\w-])`, "i").test(text);
+}
+
 // DM classification also determines eligibility for mid-turn notice delivery.
 function mapKind(ev: MattermostWsEvent): string {
   if (ev.event === "post_edited") return "post_edited";

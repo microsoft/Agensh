@@ -104,3 +104,27 @@ the task brief plus a state summary of open issues and PRs, recent merges,
 the stored session, as the router always did. `run_state.json` records each
 segment and the state (`running`, `paused`, `finalized` or `failed`);
 `service-logs-<n>` keeps each later segment's logs.
+
+## Product owner, digest and planning
+
+A pack with `[human] product_owner = true` lets a project name a person
+(`AGENSH_HUMAN` in the profile). Bootstrap creates their Gitea account in the
+coders team and their Mattermost account with one password, kept in
+`$DATA_ROOT/<profile>/tokens/human-<name>.password`; the driver adds them to the
+task channel. Their direct messages, posts that `@`-mention a worker, and their
+issue and PR comments are marked urgent by the router, so the board service
+delivers them to that worker mid-turn like a peer's DM. Protected paths then
+need their approval instead of the administrator's: the prepare hook adds
+`.gitea/CODEOWNERS` (which covers itself), which requests the owner's review on
+such PRs; the driver makes the owner the only official approver on `main` and
+blocks merges while an official review request is pending (Gitea 1.22 has no
+separate code-owner requirement).
+
+Every `AGENSH_DIGEST_S` seconds the driver posts a progress digest to the task
+channel for the owner (merges, open work, `main`'s suite, board activity and
+token use) and keeps it in `$AGENSH_TASK_OUT/digests/`; resume summaries include
+the latest one.
+
+With `AGENSH_PLANNING=1`, worker 1 is woken first with
+[`prompts/planning.txt`](../prompts/planning.txt); the others wake when a PR
+titled `[plan] ...` is merged, or after `AGENSH_PLANNING_TIMEOUT_S`.

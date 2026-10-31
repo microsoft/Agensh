@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 # Smoke checks for the CI merge gate on a live software-project stack: required checks
-# and protected files on main, CI statuses on merged PRs, a protected-file PR that a
-# worker cannot merge, and a broken main that holds ordinary PRs while a fix-main PR
-# merges, then recovers. Usage: check_gate.py ENV_FILE TASK_OUT
+# and protected paths on main, CI statuses on merged PRs, a protected-path PR that a
+# worker cannot merge (with a product owner: until the owner approves it), and a broken
+# main that holds ordinary PRs while a fix-main PR merges, then recovers.
+# Usage: check_gate.py ENV_FILE TASK_OUT
 
 import base64
 import json
@@ -24,6 +25,7 @@ ORG, PORT = ENV['ORG_NAME'], ENV['EDGE_HTTP_PORT']
 ADMIN = (ENV['GITEA_ADMIN_USER'], ENV['GITEA_ADMIN_PASSWORD'])
 BASE = f'http://localhost:{PORT}/api/v1/repos/{ORG}/main'
 CLONE = f'http://{ADMIN[0]}:{ADMIN[1]}@localhost:{PORT}/{ORG}/main.git'
+HUMAN = json.loads((TASK_OUT / 'prepare.json').read_text()).get('human', '')
 
 
 def log(message):
@@ -35,8 +37,8 @@ def fail(message):
     sys.exit(1)
 
 
-def api(method, path, body=None, token=None):
-    auth = f'token {token}' if token else 'Basic ' + base64.b64encode(':'.join(ADMIN).encode()).decode()
+def api(method, path, body=None, token=None, login=ADMIN):
+    auth = f'token {token}' if token else 'Basic ' + base64.b64encode(':'.join(login).encode()).decode()
     request = urllib.request.Request(BASE + path, method=method,
                                      data=None if body is None else json.dumps(body).encode(),
                                      headers={'Content-Type': 'application/json', 'Authorization': auth})
@@ -72,9 +74,13 @@ def health():
     return json.loads(path.read_text()) if path.is_file() else {}
 
 
-def worker_token():
-    path = Path(ENV['DATA_ROOT']) / ENV['PROFILE'] / f'tokens/agent-{ORG}-worker1.token'
+def secret(name):
+    path = Path(ENV['DATA_ROOT']) / ENV['PROFILE'] / 'tokens' / name
     return subprocess.run(['sudo', '-n', 'cat', str(path)], check=True, capture_output=True, text=True).stdout.strip()
+
+
+def worker_token():
+    return secret(f'agent-{ORG}-worker1.token')
 
 
 def push_branch(work, branch, files, message, base='main'):
@@ -111,7 +117,16 @@ def check_protection():
     if not protection.get('enable_status_check') or set(protection.get('status_check_contexts') or []) != set(
             quality.REQUIRED_CHECKS):
         fail(f'main does not require {quality.REQUIRED_CHECKS}: {protection.get("status_check_contexts")}')
-    if '.gitea/workflows/**' not in (protection.get('protected_file_patterns') or ''):
+    if HUMAN:
+        # The product owner approves protected paths through CODEOWNERS.
+        if not protection.get('block_on_official_review_requests') or HUMAN not in (
+                protection.get('approvals_whitelist_username') or []):
+            fail(f'main does not require {HUMAN}\'s code-owner review: {protection}')
+        code, owners = api('GET', f'/contents/{quality.CODEOWNERS_PATH}?ref=main')
+        if code != 200:
+            fail(f'{quality.CODEOWNERS_PATH} is not on main ({code})')
+        protection['protected_file_patterns'] = f'CODEOWNERS for @{HUMAN}'
+    elif '.gitea/workflows/**' not in (protection.get('protected_file_patterns') or ''):
         fail(f'workflow files are not protected: {protection.get("protected_file_patterns")!r}')
     code, labels = api('GET', '/labels')
     if quality.FIX_LABEL not in {label['name'] for label in labels or []}:
@@ -144,10 +159,20 @@ def check_protected_files(work, token):
     merged, reply = merge(number, token)
     if merged or api('GET', f'/pulls/{number}')[1].get('merged'):
         fail('a worker merged a change to a protected file')
-    if 'protected' not in reply.lower():
-        fail(f'the merge was refused for another reason: {reply}')
-    api('PATCH', f'/pulls/{number}', {'state': 'closed'})
-    log(f'a worker cannot merge a protected-file change, though its checks pass ({reply.split()[0]})')
+    if not HUMAN:
+        if 'protected' not in reply.lower():
+            fail(f'the merge was refused for another reason: {reply}')
+        api('PATCH', f'/pulls/{number}', {'state': 'closed'})
+        log(f'a worker cannot merge a protected-file change, though its checks pass ({reply.split()[0]})')
+        return
+    owner = (HUMAN, secret(f'human-{HUMAN}.password'))
+    code, review = api('POST', f'/pulls/{number}/reviews', {'event': 'APPROVED', 'body': 'Approved.'}, login=owner)
+    if code != 200:
+        fail(f'{HUMAN} could not approve PR #{number}: {code} {review}')
+    merged, reply = merge(number, token)
+    if not merged:
+        fail(f'the worker could not merge after {HUMAN} approved: {reply}')
+    log(f'a protected-path PR merged only after {HUMAN} approved it, though its checks passed')
 
 
 def check_broken_main(work, token):

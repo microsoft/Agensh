@@ -40,3 +40,6 @@ sync_before_end = "30m"  # sync upstream this long before the end, so conflicts 
 resumable = true         # the token budget or `agensh.project pause` pauses; `resume` continues with fresh sessions
 stop_when = ["budget", "tokens", "issue_closed"]
 finalize_notice = "15m"  # tell workers to wrap up this long before a timed finalize
+
+[human]
+product_owner = true     # a project file may add [human] mode = "optional" with a username

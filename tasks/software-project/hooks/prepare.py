@@ -72,18 +72,26 @@ def resolve_network(project, pack):
     return 'allowlist', f'auto: {reason}'
 
 
-def add_workflow(clone, project, network):
-    # The team's CI runs from this commit on; export removes it again before delivery.
-    path = clone / quality.WORKFLOW_PATH
-    if path.exists():
-        raise RuntimeError(f'{quality.WORKFLOW_PATH} already exists upstream; rename it so the team workflow can be added')
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(quality.render_workflow(project.acceptance_pr, project.acceptance_main,
-                                            project.ci_timeout_minutes,
-                                            proxy=quality.ALLOWLIST_PROXY if network == 'allowlist' else None))
-    git(*IDENTITY, 'add', quality.WORKFLOW_PATH, cwd=clone)
+def add_workflow(clone, project, pack, network):
+    # The team's CI (and, with a product owner, CODEOWNERS for the protected paths)
+    # runs from this commit on; export removes these files again before delivery.
+    files = {quality.WORKFLOW_PATH: quality.render_workflow(
+        project.acceptance_pr, project.acceptance_main, project.ci_timeout_minutes,
+        proxy=quality.ALLOWLIST_PROXY if network == 'allowlist' else None)}
+    if project.human:
+        # CODEOWNERS covers itself, so no PR can drop the owner's review.
+        files[quality.CODEOWNERS_PATH] = quality.render_codeowners(
+            list(dict.fromkeys(pack.protected_paths + project.protected_paths + (quality.CODEOWNERS_PATH,))),
+            project.human)
+    for name, text in files.items():
+        path = clone / name
+        if path.exists():
+            raise RuntimeError(f'{name} already exists upstream; Agensh adds its own for the run')
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+        git(*IDENTITY, 'add', name, cwd=clone)
     git(*IDENTITY, 'commit', '--quiet', '-m', 'Add the Agensh team workflow', cwd=clone)
-    return quality.WORKFLOW_PATH
+    return list(files)
 
 
 def protected_paths(pack, project):
@@ -111,9 +119,7 @@ def main():
     base_sha = git('rev-parse', 'HEAD', cwd=clone, capture=True)
     network, network_reason = resolve_network(project, pack)
     log(f'network: {network_reason}')
-    workflow = None
-    if pack.ci_gate:
-        workflow = add_workflow(clone, project, network)
+    agensh_files = add_workflow(clone, project, pack, network) if pack.ci_gate else []
     (task_out / '.seed_git').write_text(f'{clone}\n')
 
     template_values = {
@@ -125,7 +131,20 @@ def main():
                      if project.seed == 'git' else
                      'This is a new project: use Python unless the goal says otherwise.'),
         'NETWORK': NETWORK_RULES[network].format(domains=', '.join(project.allow_domains) or 'none'),
-        'PROTECTED_PATHS': protected_paths(pack, project),
+        'HUMAN_RULE': (
+            f'**Product owner**: `{project.human}` owns the goal. When a requirement is ambiguous, ask in '
+            f'the task channel and mention `@{project.human}`, then continue with other work instead of '
+            "waiting; their answers, comments and issues reach you as urgent events. Do not ask about "
+            'things the goal, the repository or your peers can settle.' if project.human else
+            '**Fully autonomous**: there is no human to ask during this run. Settle open\n'
+            '   questions yourselves from the goal and the repository, decide, and ship.'),
+        'PROTECTED_RULE': (
+            f'Changes to these protected paths need the approval of `{project.human}`: '
+            f'{protected_paths(pack, project)}. Avoid them; when one must change, open the PR, say why '
+            f'in it, mention `@{project.human}` in the channel, and keep working on something else.'
+            if project.human else
+            f'These paths are protected and no PR can change them: {protected_paths(pack, project)}. '
+            'If one needs to change, open an issue that\nexplains why instead.'),
     }
     prompts = task_out / 'prompts'
     prompts.mkdir(mode=0o755, exist_ok=True)
@@ -140,7 +159,7 @@ def main():
         'run_id': os.environ.get('RUN_ID') or time.strftime('%Y%m%dt%H%M%Sz', time.gmtime()),
         'seed': project.seed, 'upstream': project.upstream, 'base_branch': project.base_branch,
         'base_sha': base_sha, 'network': network, 'network_reason': network_reason,
-        'allow_domains': list(project.allow_domains), 'workflow': workflow,
+        'allow_domains': list(project.allow_domains), 'agensh_files': agensh_files, 'human': project.human,
     })
     log(f'seed ready at {base_sha[:12]}; prompts rendered in {prompts}')
 

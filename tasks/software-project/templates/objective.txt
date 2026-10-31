@@ -14,8 +14,7 @@ ${ACCEPTANCE_MAIN}
 
 ## Rules
 
-1. **Fully autonomous**: there is no human to ask during this run. Settle open
-   questions yourselves from the goal and the repository, decide, and ship.
+1. ${HUMAN_RULE}
 2. ${LANGUAGE}
 3. ${NETWORK}
 4. Follow the repository's conventions: its build, test and style tools, layout and

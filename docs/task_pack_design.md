@@ -246,10 +246,12 @@ merge normally, and the human reviews the complete change on the delivery PR,
 where changes to sensitive paths are listed separately. The exception is
 `acceptance.protected_paths` (CI workflows and acceptance scripts): if agents
 could change them freely, they could weaken the checks that gate their own
-work. Bootstrap writes these paths to `.gitea/CODEOWNERS` with the human as
-owner and enables `require_code_owner_review`, which Gitea 1.22 supports. Agents
-rarely need to touch these files; when they do, they open an issue for the
-human instead of waiting on a PR.
+work. The prepare hook writes these paths to `.gitea/CODEOWNERS` with the
+human as owner, so PRs touching them request the human's review; the driver
+makes the human the only official approver and enables
+`block_on_official_review_requests` (Gitea 1.22 has no separate code-owner
+requirement). Agents rarely need to touch these files; when they do, they open
+the PR, explain why, and keep working on something else.
 
 `human.mode = "none"` reproduces the current fully autonomous setting. Protected
 paths then use Gitea's `protected_file_patterns`, so only the admin can change
@@ -568,9 +570,11 @@ Features:
       the token budget (warning at 90%, proxy refusal and pause at 100%),
       lifecycle messages, stopping when issue #1 closes, and a 5-second wake
       stagger for software projects.
-    - **10b**: the human product owner (accounts, urgent routing, approval of
-      protected paths, sensitive paths in the delivery PR), the progress
-      digest and the optional planning phase.
+    - **10b** *(done)*: the human product owner (accounts, urgent routing,
+      approval of protected paths through CODEOWNERS, sensitive paths in the
+      delivery PR), the progress digest and the optional planning phase.
+      `[human]` and `[coordination] planning` are project settings; the pack
+      only declares `[human] product_owner = true`.
 11. **Optional capabilities**: peer review and per-role models.
 
 PRs 1–8 do not change task behavior. 9–11 add features.

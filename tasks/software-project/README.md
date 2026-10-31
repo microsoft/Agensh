@@ -36,6 +36,15 @@ workers = 4                             # 1-128
 hours = 2                               # per run segment
 max_model_tokens = 20000000             # team input + output tokens; 0: no limit
 
+[human]
+mode = "optional"                       # "none" (default): fully autonomous
+username = "owner"                      # Gitea and Mattermost login for the person
+digest = "1h"                           # progress digest to the owner; 0 turns it off
+
+[coordination]
+planning = true                         # worker 1 plans before the others wake
+planning_timeout = "45m"
+
 [environment]
 base_image = "default-python"           # or an image ref: Debian/Ubuntu with python3
 network = "auto"                        # open, allowlist, offline or auto (the default)
@@ -141,7 +150,17 @@ change the checks that gate its work. Export removes the workflow again, so the
 delivery pull request carries only the team's changes. See the
 [CI merge gate](../../agensh/README.md#ci-merge-gate) for the details.
 
-## Not yet included
+## Product owner
 
-A human product owner, the progress digest and the planning phase follow in
-the next step of the [task pack design](../../docs/task_pack_design.md).
+With `[human] mode = "optional"`, the person signs in to Gitea and Mattermost
+as `username` with the password in
+`.claude-team-data/<profile>/tokens/human-<username>.password` (through the SSH
+port-forward to `EDGE_HTTP_PORT` and `EDGE_MM_PORT`). Workers ask them in the
+task channel when the goal is ambiguous and carry on meanwhile; the person's
+DMs, mentions of a worker, and issue and PR comments reach that worker
+mid-turn. Issues they open become work items. PRs that touch protected paths
+merge only after they approve; everything else merges on CI, and the person
+reviews the whole change on the delivery PR, where protected-path changes are
+listed separately. They get a progress digest in the channel every `digest`.
+Closing issue #1 ends the run and delivers it.
+

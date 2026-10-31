@@ -84,7 +84,7 @@ def model_requests():
             raise RuntimeError(f'model request failed: {status} {str(reply)[:200]}')
 
 
-def contribute():
+def contribute(plan=False):
     # One fixed change per worker; repeated prompts after success do nothing.
     if DONE.exists():
         return json.loads(DONE.read_text())
@@ -112,7 +112,8 @@ def contribute():
 
     def open_pr():
         status, reply = gitea('POST', f'/repos/{ORG}/{REPO}/pulls',
-                              {'head': branch, 'base': 'main', 'title': f'smoke: add {path}'})
+                              {'head': branch, 'base': 'main',
+                               'title': f'{"[plan] " if plan else ""}smoke: add {path}'})
         if status == 409:  # An earlier attempt already opened it.
             status, pulls = gitea('GET', f'/repos/{ORG}/{REPO}/pulls?state=open&limit=50')
             matches = [p for p in pulls or [] if p['head']['ref'] == branch] if status == 200 else []
@@ -185,7 +186,8 @@ class Adapter:
         text = '\n\n'.join(block.get('text', '') for block in parameters.get('prompt', []))
         self.record({'event': 'prompt', 'chars': len(text), 'head': text[:200]})
         try:
-            result = contribute()
+            # A planner's PR is titled `[plan] ...` so the driver wakes the rest of the team.
+            result = contribute(plan='`[plan] <summary>`' in text)
         except Exception as error:
             self.record({'event': 'error', 'message': str(error)})
             log(f'contribution failed: {error}')
