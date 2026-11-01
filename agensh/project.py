@@ -346,10 +346,30 @@ def write_profile(project, args, env_dir=ROOT):
     return out
 
 
+# Images the team stack needs besides the worker image; Compose builds bootstrap and
+# secret-service itself. The environment names another tag for each (as in the profile).
+SHARED_IMAGES = (('AGENT_BASE_IMAGE', 'omcgitea-agent-base:pbench', 'agent/Dockerfile.base', 'agent'),
+                 ('MINI_ROUTER_IMAGE', 'omcgitea-mini-router:local', 'mini-router/Dockerfile', 'mini-router'),
+                 ('BOARD_IMAGE', 'omcgitea-board:local', 'board-service/Dockerfile', 'board-service'))
+
+
+def build_shared_images(docker):
+    # A fresh host has none of them; existing ones are reused, as Docker's cache would.
+    for variable, default, dockerfile, context in SHARED_IMAGES:
+        tag = os.environ.get(variable) or default
+        if subprocess.run([*docker, 'image', 'inspect', tag], capture_output=True).returncode == 0:
+            continue
+        print(f'agensh.project: building {tag} from {dockerfile}', file=sys.stderr)
+        if subprocess.run([*docker, 'build', '-q', '-f', dockerfile, '-t', tag, context], cwd=ROOT,
+                          stdout=subprocess.DEVNULL).returncode != 0:
+            raise ProjectError(f'building {tag} failed')
+
+
 def build_image(project, args):
     config = harness_settings(args)
     image = f'omcgitea-agent-{project.image_slug}-{config.harness}:{os.environ.get("AGENT_IMAGE_TAG") or "agensh"}'
     docker = os.environ.get('DOCKER', 'sudo -n docker').split()
+    build_shared_images(docker)
     command = [*docker, 'build', '-f', 'agent/Dockerfile', '--build-arg', f'TASK_IMAGE={project.base_image_ref}',
                '--build-arg', f'AGENT_HARNESS={config.harness}',
                '--build-arg', f'{config.harness.upper()}_CLI_VERSION={config.version}', '-t', image, '.']

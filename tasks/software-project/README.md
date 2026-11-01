@@ -72,7 +72,8 @@ python3 -m agensh.project run     path/to/.agensh/project.toml
 ```
 
 `build` makes `omcgitea-agent-<base-image>-<harness>:agensh` (`AGENT_IMAGE_TAG`
-changes the tag; `AGENT_BASE_IMAGE` the Gitea MCP artifact). `profile` writes
+changes the tag; `AGENT_BASE_IMAGE` the Gitea MCP artifact), and first builds the
+agent base, router and board images when the host does not have them yet. `profile` writes
 `.env.software-project-<name>` with ports and subnets chosen from 23000 and
 `10.217.x` so they stay clear of ProgramBench's table; regenerating keeps the
 allocation and passwords. `run` starts [`scripts/team_run.sh`](../../scripts/team_run.sh)
