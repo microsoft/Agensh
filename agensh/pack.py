@@ -61,11 +61,16 @@ class Pack:
     resumable: bool = False
     stop_when: tuple = ('budget',)
     finalize_notice: int = 0
+    # Run the evaluate hook while the services still run (for model calls), before stopping them.
+    evaluate_with_services: bool = False
     wake_stagger: int = 30
     # A project may name a human product owner (AGENSH_HUMAN in its profile).
     product_owner: bool = False
     # `inline`: the router adds the latest comment or thread start to each event.
     event_context: str = 'summary'
+    # Workers and CI get AGENSH_MODEL_BASE, the egress proxy's unmodified /raw route,
+    # for a project's own model calls (metered and budgeted with the team's).
+    model_route: bool = False
 
     def hook(self, name):
         return self.hooks.get(name)
@@ -137,7 +142,10 @@ def load_pack(name, root=ROOT):
         raise PackError(f'invalid channel {channel!r}')
 
     environment = data.get('environment', {})
-    _known(environment, ('network', 'mounts', 'task_prompts'), '[environment]')
+    _known(environment, ('network', 'mounts', 'task_prompts', 'model_route'), '[environment]')
+    model_route = environment.get('model_route', False)
+    if not isinstance(model_route, bool):
+        raise PackError('[environment] model_route must be true or false')
     task_prompts = environment.get('task_prompts', 'pack')
     if task_prompts not in ('pack', 'run'):
         raise PackError(f'task_prompts must be "pack" or "run"; got {task_prompts!r}')
@@ -160,7 +168,11 @@ def load_pack(name, root=ROOT):
     if not isinstance(product_owner, bool):
         raise PackError('[human] product_owner must be true or false')
     lifecycle = data.get('lifecycle', {})
-    _known(lifecycle, ('sync_before_end', 'resumable', 'stop_when', 'finalize_notice'), '[lifecycle]')
+    _known(lifecycle, ('sync_before_end', 'resumable', 'stop_when', 'finalize_notice', 'evaluate_with_services'),
+           '[lifecycle]')
+    evaluate_with_services = lifecycle.get('evaluate_with_services', False)
+    if not isinstance(evaluate_with_services, bool):
+        raise PackError('[lifecycle] evaluate_with_services must be true or false')
     sync_before_end = parse_duration(lifecycle.get('sync_before_end', '30m'))
     resumable = lifecycle.get('resumable', False)
     if not isinstance(resumable, bool):
@@ -200,5 +212,6 @@ def load_pack(name, root=ROOT):
         task_prompts=task_prompts, import_history=import_history, channel=channel,
         ci_gate=ci_gate, protected_paths=protected_paths, backlog=backlog, sync_before_end=sync_before_end,
         resumable=resumable, stop_when=tuple(stop_when), finalize_notice=finalize_notice, wake_stagger=wake_stagger,
-        product_owner=product_owner, event_context=event_context,
+        evaluate_with_services=evaluate_with_services,
+        product_owner=product_owner, event_context=event_context, model_route=model_route,
     )

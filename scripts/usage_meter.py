@@ -172,9 +172,10 @@ class UsageLedger:
         return entry
 
     def budget_tokens(self):
-        # The token budget counts input and output tokens across the team.
+        # The token budget counts the team's input and output tokens, not the final evaluation's.
         with self.lock:
-            return sum(v['input_tokens'] + v['output_tokens'] for v in self.totals.values())
+            return sum(v['input_tokens'] + v['output_tokens'] for name, v in self.totals.items()
+                       if name != 'final-evaluation')
 
     def snapshot(self):
         with self.lock:

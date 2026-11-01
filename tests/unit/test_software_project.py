@@ -298,6 +298,74 @@ class NetworkTest(unittest.TestCase):
                 self.project(PROJECT.format(upstream='u') + f'[environment]\nallow_domains = {bad}\n')
 
 
+class SnapshotTest(HookBase):
+    """history = "snapshot": a sanitized tree without history, replayed onto upstream at delivery."""
+
+    def setUp(self):
+        super().setUp()
+        work = Path(self.directory.name, 'work')
+        (work / 'holdout.json').write_text('{"secret": true}\n')
+        git('add', '.', cwd=work)
+        git('commit', '-qm', 'Add held-out data', cwd=work)
+        git('push', '-q', str(self.upstream), 'HEAD:main', cwd=work)
+        self.base_sha = git('rev-parse', 'HEAD', cwd=work)
+        sanitize = Path(self.directory.name, 'private', 'sanitize.sh')
+        sanitize.parent.mkdir()
+        sanitize.write_text('#!/bin/sh\nrm -f "$1/holdout.json"\n')
+        sanitize.chmod(0o755)
+        self.project_file.write_text(PROJECT.format(upstream=self.upstream)
+                                     + f'[workspace]\nhistory = "snapshot"\nsanitize = "{sanitize}"\n')
+
+    def test_snapshot_hides_history_and_delivery_replays(self):
+        result = self.hook('prepare')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        clone = Path((self.task_out / '.seed_git').read_text().strip())
+        prepare = json.loads((self.task_out / 'prepare.json').read_text())
+        # What the team gets: the snapshot and the workflow commit, without the held-out file.
+        self.assertEqual(git('log', '--format=%s', 'HEAD', cwd=clone).splitlines(),
+                         ['Add the Agensh team workflow', f'Snapshot of {self.upstream} main at {self.base_sha[:12]} '
+                          '(history not imported)'])
+        self.assertFalse((clone / 'holdout.json').exists())
+        self.assertEqual((prepare['history'], prepare['base_sha']), ('snapshot', self.base_sha))
+        # Stand in for push_history, which pushes only HEAD.
+        gitea = Path(self.directory.name, 'gitea.git')
+        git('init', '-q', '--bare', '--initial-branch=main', str(gitea))
+        git('push', '-q', str(gitea), 'HEAD:refs/heads/main', cwd=clone)
+        self.assertEqual(git('rev-list', '--count', 'main', cwd=gitea), '2')
+        team = Path(self.directory.name, 'team')
+        git('clone', '-q', str(gitea), str(team))
+        (team / 'json_flag.py').write_text('FLAG = "--json"\n')
+        git('add', '.', cwd=team)
+        git('commit', '-qm', 'Add --json flag', cwd=team)
+        git('push', '-q', 'origin', 'HEAD:main', cwd=team)
+        result = self.hook('export', AGENSH_GITEA_URL=str(gitea))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        delivery = json.loads((self.task_out / 'delivery.json').read_text())
+        self.assertEqual((delivery['mode'], delivery['commits']), ('branch', 1))
+        # Upstream gets its own history plus one commit with the team's change and nothing else.
+        self.assertEqual(git('rev-parse', 'agensh/unit~1', cwd=self.upstream), self.base_sha)
+        self.assertEqual(git('diff', '--name-only', self.base_sha, 'agensh/unit', cwd=self.upstream), 'json_flag.py')
+        message = git('log', '-1', '--format=%B', 'agensh/unit', cwd=self.upstream)
+        self.assertIn('Agensh team changes (unit)', message)
+        self.assertIn('- Add --json flag', message)
+        self.assertNotIn('workflow', message)
+        # Upstream would reintroduce held-out data, so the sync hook leaves snapshots alone.
+        result = self.hook('sync', AGENSH_GITEA_URL=str(gitea))
+        self.assertIn('snapshot import', result.stderr)
+        self.assertFalse((self.task_out / 'sync.json').exists())
+
+    def test_sanitize_needs_a_snapshot(self):
+        text = self.project_file.read_text().replace('history = "snapshot"\n', '')
+        self.project_file.write_text(text)
+        with self.assertRaises(ProjectError) as caught:
+            load_project(self.project_file)
+        self.assertIn('stay in the imported history', str(caught.exception))
+        self.project_file.write_text(PROJECT.format(upstream=self.upstream).replace(
+            '[acceptance]', '[acceptance]\nprivate_dir = "nowhere"'))
+        with self.assertRaises(ProjectError):
+            load_project(self.project_file)
+
+
 class FakeGitea:
     """Records issues the sync hook opens; answers like Gitea's issue API."""
 

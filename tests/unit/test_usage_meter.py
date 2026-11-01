@@ -189,7 +189,8 @@ class ProxyMeteringTest(ProxyBase):
 
 class TokenBudgetTest(ProxyBase):
     # Each fake Responses reply reports 120 input and 30 output tokens.
-    EXTRA_ENV = {'UPSTREAM_MAX_MODEL_TOKENS': '300'}
+    OPEN_FILE = os.path.join(tempfile.gettempdir(), f'final-evaluation-{os.getpid()}.open')
+    EXTRA_ENV = {'UPSTREAM_MAX_MODEL_TOKENS': '300', 'UPSTREAM_FINAL_OPEN_FILE': OPEN_FILE}
 
     def test_requests_stop_at_the_budget(self):
         worker = {'Authorization': 'Bearer local-proxy-org-worker1'}
@@ -200,6 +201,18 @@ class TokenBudgetTest(ProxyBase):
         self.assertEqual(json.loads(body)['error']['type'], 'budget_exhausted')
         snapshot = json.load(urllib.request.urlopen(f'http://127.0.0.1:{self.port}/usage', timeout=5))
         self.assertEqual(snapshot['agents']['org-worker1']['requests'], 2)
+        # The final evaluation's route is held to the budget until the driver opens it ...
+        self.assertEqual(self.post('/raw-final/v1/responses', {}, False)[0], 429)
+        Path(self.OPEN_FILE).touch()
+        self.addCleanup(Path(self.OPEN_FILE).unlink, missing_ok=True)
+        self.assertEqual(self.post('/raw-final/v1/responses', {}, False)[0], 200)
+        self.assertEqual(self.post('/raw-final/v1/responses', {}, False)[0], 200)
+        # ... and its tokens do not count against the team's.
+        self.assertEqual(self.post('/raw/v1/responses', {}, False)[0], 429)
+        Path(self.OPEN_FILE).unlink()
+        self.assertEqual(self.post('/raw-final/v1/responses', {}, False)[0], 429)
+        snapshot = json.load(urllib.request.urlopen(f'http://127.0.0.1:{self.port}/usage', timeout=5))
+        self.assertEqual(snapshot['agents']['final-evaluation']['requests'], 2)
 
 
 
@@ -212,6 +225,29 @@ class AgentModelTest(ProxyBase):
         self.assertEqual(self.post('/v1/responses', {'Authorization': 'Bearer local-proxy-org-worker2'}, False)[0], 200)
         records = [json.loads(line) for line in Path(self.log).read_text().splitlines()]
         self.assertEqual({r['agent']: r['model'] for r in records}, {'org-worker1': 'fake', 'org-worker2': 'small-model'})
+
+
+
+class RawRouteTest(ProxyBase):
+    # /raw forwards a project's own requests unchanged apart from the credential.
+    EXTRA_ENV = {'UPSTREAM_RESPONSE_VERBOSITY': 'low', 'UPSTREAM_MAX_OUTPUT_TOKENS': '100',
+                 'UPSTREAM_AGENT_MODELS': 'org-worker1=other-model'}
+
+    def test_raw_requests_are_not_rewritten(self):
+        fake_upstream.RECEIVED.clear()
+        self.assertEqual(self.post('/v1/responses', {'Authorization': 'Bearer local-proxy-org-worker1'}, False)[0], 200)
+        harness = fake_upstream.RECEIVED[-1]
+        self.assertEqual((harness['path'], harness['request']['text'], harness['request']['model']),
+                         ('/v1/responses', {'verbosity': 'low'}, 'other-model'))
+        self.assertEqual(self.post('/raw/v1/responses', {}, False)[0], 200)
+        raw = fake_upstream.RECEIVED[-1]
+        self.assertEqual(raw['path'], '/v1/responses')
+        self.assertEqual(raw['request'], {'model': 'fake', 'stream': False, 'fail': False})
+        self.assertEqual(raw['authorization'], 'Bearer upstream-secret')
+        self.assertEqual(self.post('/raw/v1/responses', {'Authorization': 'Bearer local-proxy-org-worker1'}, False)[0], 200)
+        self.assertEqual(fake_upstream.RECEIVED[-1]['request']['model'], 'fake')
+        records = [json.loads(line) for line in Path(self.log).read_text().splitlines()]
+        self.assertEqual([(r['agent'], r['model']) for r in records[-2:]], [('project', 'fake'), ('org-worker1', 'fake')])
 
 
 if __name__ == '__main__':

@@ -77,7 +77,7 @@ def add_workflow(clone, project, pack, network):
     # runs from this commit on; export removes these files again before delivery.
     files = {quality.WORKFLOW_PATH: quality.render_workflow(
         project.acceptance_pr, project.acceptance_main, project.ci_timeout_minutes,
-        proxy=quality.ALLOWLIST_PROXY if network == 'allowlist' else None)}
+        proxy=quality.ALLOWLIST_PROXY if network == 'allowlist' else None, model_route=pack.model_route)}
     if project.human:
         # CODEOWNERS covers itself, so no PR can drop the owner's review.
         files[quality.CODEOWNERS_PATH] = quality.render_codeowners(
@@ -92,6 +92,19 @@ def add_workflow(clone, project, pack, network):
         git(*IDENTITY, 'add', name, cwd=clone)
     git(*IDENTITY, 'commit', '--quiet', '-m', 'Add the Agensh team workflow', cwd=clone)
     return list(files)
+
+
+def snapshot(clone, project, base_sha):
+    # The team starts from the (sanitized) tree alone: its history could bring back
+    # whatever the sanitize script removed, such as held-out evaluation data.
+    if project.sanitize:
+        log(f'sanitizing the imported tree with {project.sanitize}')
+        subprocess.run([project.sanitize, str(clone)], cwd=clone, check=True)
+    git('checkout', '--quiet', '--orphan', 'agensh-snapshot', cwd=clone)
+    git('add', '--all', cwd=clone)
+    git(*IDENTITY, 'commit', '--quiet', '--allow-empty', '-m',
+        f'Snapshot of {project.upstream} {project.base_branch} at {base_sha[:12]} (history not imported)', cwd=clone)
+    return git('rev-parse', 'HEAD', cwd=clone, capture=True)
 
 
 def protected_paths(pack, project):
@@ -117,6 +130,7 @@ def main():
         git(*IDENTITY, 'commit', '--quiet', '-m', f'Start {project.name}', cwd=clone)
         source = 'a new, empty repository'
     base_sha = git('rev-parse', 'HEAD', cwd=clone, capture=True)
+    team_base = snapshot(clone, project, base_sha) if project.history == 'snapshot' and project.seed == 'git' else base_sha
     network, network_reason = resolve_network(project, pack)
     log(f'network: {network_reason}')
     agensh_files = add_workflow(clone, project, pack, network) if pack.ci_gate else []
@@ -138,6 +152,11 @@ def main():
             'things the goal, the repository or your peers can settle.' if project.human else
             '**Fully autonomous**: there is no human to ask during this run. Settle open\n'
             '   questions yourselves from the goal and the repository, decide, and ship.'),
+        'MODEL_RULE': (
+            '\n7. Model calls made by the project\'s own code (experiments, evaluation scripts) go to '
+            '`$AGENSH_MODEL_BASE`, which forwards them unchanged with the credential added; use it as the '
+            'API base URL and send no key. These calls count against the team\'s token budget.'
+            if pack.model_route else ''),
         'REVIEW_RULE': (
             ' PRs that touch ' + ', '.join(f'`{p}`' for p in project.review_paths) + ' merge only after a peer '
             'approves them (`agensh/review`): ask one by direct message, and review peers\' PRs promptly when asked.'
@@ -162,7 +181,8 @@ def main():
     write_json(task_out / 'prepare.json', {
         'run_id': os.environ.get('RUN_ID') or time.strftime('%Y%m%dt%H%M%Sz', time.gmtime()),
         'seed': project.seed, 'upstream': project.upstream, 'base_branch': project.base_branch,
-        'base_sha': base_sha, 'network': network, 'network_reason': network_reason,
+        'base_sha': base_sha, 'history': project.history, 'team_base': team_base,
+        'network': network, 'network_reason': network_reason,
         'allow_domains': list(project.allow_domains), 'agensh_files': agensh_files, 'human': project.human,
     })
     log(f'seed ready at {base_sha[:12]}; prompts rendered in {prompts}')

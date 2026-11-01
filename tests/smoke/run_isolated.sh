@@ -60,7 +60,7 @@ log "inner daemon ready: $("${DOCKER[@]}" exec "$NAME" docker version --format '
 env_args=()
 while IFS= read -r setting; do
     env_args+=(-e "$setting")
-done < <(env | grep -E '^(SMOKE_(PACK|WORKERS|MINUTES|KEEP|INTERRUPT|HUMAN|PORT_BASE|SUBNET_OCTET)|LIVE_[A-Z_]+)=' || true)
+done < <(env | grep -E '^(SMOKE_(PACK|WORKERS|MINUTES|KEEP|INTERRUPT|HUMAN|SNAPSHOT|PORT_BASE|SUBNET_OCTET)|LIVE_[A-Z_]+)=' || true)
 
 log "running ${COMMAND[*]} inside $NAME"
 "${DOCKER[@]}" exec "${env_args[@]}" "$NAME" "${COMMAND[@]}"

@@ -82,6 +82,10 @@ def main():
     if not project.upstream:
         log('no upstream repository; nothing to sync')
         return
+    if project.history == 'snapshot':
+        # Upstream commits could bring back what the sanitize script removed.
+        log('snapshot import: upstream is not synced into the team repository')
+        return
     path = task_out / 'sync.json'
     record = read_json(path, {'history': []})
     for attempt in range(1, 4):

@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
-# software-project evaluate hook: run the full acceptance suite on the delivered main
-# inside the worker image and record each command's outcome in acceptance.json.
+# software-project evaluate hook: run the final acceptance commands ([acceptance] final,
+# else main) on the delivered main inside the worker image and record each command's
+# outcome in acceptance.json. [acceptance] private_dir (held-out data the team never
+# saw) is mounted read-only at /private for these commands only. With the pack's model
+# route, the commands run on the team network so AGENSH_MODEL_BASE reaches the proxy.
 # A failing check is a result, not a hook failure; only an unusable setup exits 1.
 
 import os
@@ -10,13 +13,16 @@ import subprocess
 import sys
 import time
 
-from common import context, log, read_json, write_json
+from common import ROOT, context, log, read_json, write_json
+
+sys.path.insert(0, str(ROOT))
+from agensh import quality  # noqa: E402
 
 OUTPUT_TAIL = 4000
 
 
 def main():
-    task_out, values, project, _pack = context()
+    task_out, values, project, pack = context()
     checkout = task_out / '_deliver'
     if not checkout.is_dir():
         raise RuntimeError(f'{checkout} is missing; the export hook did not complete')
@@ -24,11 +30,18 @@ def main():
     image = values['AGENT_IMAGE']
     docker = shlex.split(os.environ.get('DOCKER', 'sudo -n docker'))
     network = ['--network', 'none'] if prepare.get('network') == 'offline' else []
+    if pack.model_route:
+        team_network = f'omcgitea-{os.environ["AGENSH_PROFILE"]}_default'
+        if subprocess.run([*docker, 'network', 'inspect', team_network], capture_output=True).returncode == 0:
+            network = ['--network', team_network, '-e', f'AGENSH_MODEL_BASE={quality.FINAL_MODEL_ROUTE}']
+        else:
+            log(f'WARN: {team_network} is gone; the final commands cannot reach the model route')
+    private = ['-v', f'{project.private_dir}:/private:ro', '-e', 'AGENSH_PRIVATE_DIR=/private'] if project.private_dir else []
     results = []
-    for command in project.acceptance_main:
+    for command in project.final_commands:
         started = time.monotonic()
-        run = subprocess.run([*docker, 'run', '--rm', *network, '--entrypoint', 'bash', '-v', f'{checkout}:/work',
-                              '-w', '/work', image, '-lc', command], capture_output=True, text=True)
+        run = subprocess.run([*docker, 'run', '--rm', *network, *private, '--entrypoint', 'bash', '-v',
+                              f'{checkout}:/work', '-w', '/work', image, '-lc', command], capture_output=True, text=True)
         output = (run.stdout + run.stderr)[-OUTPUT_TAIL:]
         results.append({'command': command, 'exit_status': run.returncode,
                         'seconds': round(time.monotonic() - started, 1), 'output_tail': output})

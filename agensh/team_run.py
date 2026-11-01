@@ -1067,12 +1067,27 @@ sys.exit(json.load(urllib.request.urlopen(request, timeout=15)).get('status') !=
         if not self.quiesce():
             self.save_service_logs()
             raise Fatal('incomplete shutdown archives; preserving containers and DATA_ROOT for recovery')
+        skip_eval = os.environ.get('SKIP_EVAL', '0') == '1'
+        # Workers are stopped; the model proxy still runs for an evaluation that calls models,
+        # and its final-evaluation route is opened outside the team's token budget.
+        evaluated = False
+        if self.pack.evaluate_with_services and not skip_eval:
+            gate = self.profile_data / 'usage' / 'final-evaluation.open'
+            run(['sudo', '-n', 'touch', str(gate)], quiet=True)
+            try:
+                evaluated = self.run_hook('evaluate')
+            finally:
+                run(['sudo', '-n', 'rm', '-f', str(gate)], quiet=True)
         self.save_service_logs()
         self.make('down', quiet=True)
         if self.pack.resumable:
             self.write_state('finalized', reason=reason)
-        if os.environ.get('SKIP_EVAL', '0') == '1':
+        if skip_eval:
             log(f'SKIP_EVAL=1 → deferring programbench eval (submission left at {self.task_out}/submission.tar.gz)')
+            return
+        if self.pack.evaluate_with_services:
+            if not evaluated:
+                raise Fatal('evaluate hook failed')
             return
         if not self.run_hook('evaluate'):
             raise Fatal('evaluate hook failed')

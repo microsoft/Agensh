@@ -69,6 +69,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             request = json.loads(body or b'{}')
         except ValueError:
             request = {}
+        # Tests read what the proxy actually forwarded.
+        RECEIVED.append({'path': self.path, 'request': request, 'authorization': self.headers.get('Authorization')})
         stream = bool(request.get('stream'))
         path = self.path.split('?', 1)[0].rstrip('/')
         if request.get('fail'):
@@ -88,6 +90,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_header('Content-Length', str(len(payload)))
         self.end_headers()
         self.wfile.write(payload)
+
+
+RECEIVED = []
 
 
 def serve(host='0.0.0.0', port=None):

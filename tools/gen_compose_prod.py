@@ -28,14 +28,15 @@ PROXY = quality.ALLOWLIST_PROXY
 
 
 def proxy_env():
+    route = f'\n  AGENSH_MODEL_BASE: "{quality.MODEL_ROUTE}"' if PACK.model_route else ''
     if NETWORK_MODE != 'allowlist':
-        return ''
+        return route
     internal = ['localhost', '127.0.0.1', 'gitea', 'mattermost', 'board-service', 'egress-proxy',
                 'secret-service', 'mysql', *(f'mini-router-{a}' for a in ALL_AGENTS)]
     names = ('HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy')
     lines = [f'  {name}: "{PROXY}"' for name in names]
     lines += [f'  {name}: "{",".join(internal)}"' for name in ('NO_PROXY', 'no_proxy')]
-    return '\n' + '\n'.join(lines)
+    return '\n' + '\n'.join(lines) + route
 
 
 def worker_cpus(value, workers, host_cpus=None):
