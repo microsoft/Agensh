@@ -118,7 +118,8 @@ def main():
     shutil.rmtree(clone, ignore_errors=True)
     if project.seed == 'git':
         url, _ = git_url(project.upstream)
-        log(f'importing {project.upstream} ({project.base_branch}) with its history')
+        log(f'importing {project.upstream} ({project.base_branch})'
+            + (' as a snapshot without history' if project.history == 'snapshot' else ' with its history'))
         git('clone', '--quiet', '--branch', project.base_branch, '--single-branch', url, str(clone))
         source = project.upstream
     else:
