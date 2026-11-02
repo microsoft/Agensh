@@ -101,7 +101,9 @@ check_lifecycle() {
     # Pause keeps every piece of state; resume continues with fresh sessions and the
     # resume message; the resumed segment then finalizes and delivers.
     local runner="$1" before after resumed rc=0 state
-    grep -q 'token budget at 9[0-9]%' "$OUT/run.log" || die "no token budget warning above 90% in $OUT/run.log"
+    # The budget is calibrated for the default two workers.
+    [ "$WORKERS" != 2 ] || grep -q 'token budget at 9[0-9]%' "$OUT/run.log" \
+        || die "no token budget warning above 90% in $OUT/run.log"
     before="$(sessions)"
     [ -n "$before" ] || die "no stored ACP sessions before the pause"
     log "pausing the team"
@@ -187,13 +189,12 @@ final = ["python3 -m unittest -q", "test -s /private/answers.txt", "python3 /pri
 private_dir = "$private"
 [team]
 workers = $WORKERS
-[team.models]
-# Worker 2's requests go to its own model, as for a cheaper reviewer role.
-2 = "smoke-reviewer-model"
+$([ "$WORKERS" -ge 2 ] && printf '[team.models]\n# Worker 2'"'"'s requests go to its own model, as for a cheaper reviewer role.\n2 = "smoke-reviewer-model"\n')
 [budget]
-# The stubs make four requests of 150 tokens and a worker one more through the model route:
-# 91% of this, enough for the warning. The final evaluation's request is outside the budget.
-max_model_tokens = 820
+# Two workers' stubs make four requests of 150 tokens and a worker one more through the model
+# route: 91% of this, enough for the warning. Other team sizes get room instead (no warning
+# check). The final evaluation's request is outside the budget.
+max_model_tokens = $([ "$WORKERS" = 2 ] && echo 820 || echo $((1000 * WORKERS)))
 [human]
 mode = "$([ "$HUMAN" = 1 ] && echo optional || echo none)"
 username = "owner"
@@ -201,7 +202,7 @@ digest = "1m"
 [coordination]
 planning = true
 planning_timeout = "5m"
-review_paths = ["review/**"]
+$([ "$WORKERS" -ge 2 ] && echo 'review_paths = ["review/**"]')
 [environment]
 base_image = "$BASE_IMAGE"
 EOF
@@ -312,10 +313,12 @@ print(f"board entries: {len(entries)}")
         check_imported_history
         check_backlog
         # The assignment above notifies each worker about issue #1.
-        check_event_context
+        # A worker's own actions are not events for it, so a team of one has none.
+        [ "$WORKERS" -lt 2 ] || check_event_context
         check_allowlist
-        check_planning
-        check_models
+        # A team of one has no planning phase: its only worker starts at once.
+        [ "$WORKERS" -lt 2 ] || check_planning
+        [ "$WORKERS" -lt 2 ] || check_models
         check_model_route
         [ "$HUMAN" = 1 ] && check_human
         python3 tests/smoke/check_gate.py "$ENV_FILE" "$OUT/run/$TASK" || die "CI gate check failed"

@@ -106,6 +106,7 @@ class ProjectFileTest(unittest.TestCase):
             PROJECT + '[coordination]\nplanning = "yes"\n': 'planning must be',
             PROJECT.replace('workers = 2', 'workers = 2\nmodels = { "3" = "m" }'): '[team.models]',
             PROJECT + '[coordination]\nreview_paths = ["a;b"]\n': 'list of path globs',
+            PROJECT.replace('workers = 2', 'workers = 1') + '[coordination]\nreview_paths = ["src/**"]\n': 'at least two workers',
         }
         for text, message in cases.items():
             with self.subTest(message=message):

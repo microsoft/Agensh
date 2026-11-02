@@ -206,6 +206,8 @@ def load_project(path):
         planning_timeout = parse_duration(coordination.get('planning_timeout', '45m'))
     except PackError as error:
         raise ProjectError(str(error)) from None
+    if review_paths and workers < 2:
+        raise ProjectError('[coordination] review_paths needs at least two workers: a peer must approve')
     planning = coordination.get('planning', False)
     if not isinstance(planning, bool):
         raise ProjectError('[coordination] planning must be true or false')
