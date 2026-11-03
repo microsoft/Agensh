@@ -60,7 +60,9 @@ and creates the private task channel after bootstrap.
 
 `nginx-edge/nginx.conf` sets the connection limits, 100 MiB request limit and
 virtual-host includes. `conf.d/gitea.conf` routes container port 80 to
-`gitea:3000` with unbuffered HTTP/1.1 for SSE and Git. `conf.d/mattermost.conf`
+`gitea:3000` with unbuffered HTTP/1.1 for SSE and Git. Git pushes
+(`git-receive-pack`) have no size limit, because the task runner pushes a whole
+imported history through this port; Gitea authenticates them. `conf.d/mattermost.conf`
 routes port 81 to `mattermost:8065`, preserving WebSocket upgrades and long-lived
 connections. Both are default servers and forward client/host headers; profile
 variables determine host port mappings. Compose mounts the configuration

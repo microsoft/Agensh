@@ -13,7 +13,7 @@ import time
 import urllib.error
 import urllib.request
 
-from common import ROOT, context, git, git_url, log, write_json
+from common import NO_LFS, ROOT, context, git, git_url, log, write_json
 
 sys.path.insert(0, str(ROOT))
 from agensh import quality  # noqa: E402
@@ -106,7 +106,7 @@ def main():
     if project.seed == 'git':
         url, _ = git_url(project.upstream)
         log(f'importing {project.upstream} ({project.base_branch}) with its history')
-        git('clone', '--quiet', '--branch', project.base_branch, '--single-branch', url, str(clone))
+        git('clone', *NO_LFS, '--quiet', '--branch', project.base_branch, '--single-branch', url, str(clone))
         source = project.upstream
     else:
         log(f'starting {project.name} as a new, empty repository')

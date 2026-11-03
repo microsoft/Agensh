@@ -13,6 +13,9 @@ import time
 from common import context, log, read_json, write_json
 
 OUTPUT_TAIL = 4000
+# The checkout belongs to the host user, not the container's root, so git would refuse it
+# as dubious ownership; trust it as the worker's own git config does, then run the check.
+TRUSTED_RUN = 'git config --global --add safe.directory "*" && eval "$1"'
 
 
 def main():
@@ -28,7 +31,8 @@ def main():
     for command in project.acceptance_main:
         started = time.monotonic()
         run = subprocess.run([*docker, 'run', '--rm', *network, '--entrypoint', 'bash', '-v', f'{checkout}:/work',
-                              '-w', '/work', image, '-lc', command], capture_output=True, text=True)
+                              '-w', '/work', image, '-lc', TRUSTED_RUN, 'bash', command],
+                             capture_output=True, text=True)
         output = (run.stdout + run.stderr)[-OUTPUT_TAIL:]
         results.append({'command': command, 'exit_status': run.returncode,
                         'seconds': round(time.monotonic() - started, 1), 'output_tail': output})

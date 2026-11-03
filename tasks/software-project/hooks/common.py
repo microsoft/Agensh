@@ -38,6 +38,11 @@ def context():
 # The host's gh login for GitHub upstreams; workers never hold these credentials.
 GH_CREDENTIAL = ['-c', 'credential.helper=', '-c', 'credential.helper=!gh auth git-credential']
 IDENTITY = ['-c', 'user.name=Agensh', '-c', 'user.email=agensh@localhost']
+# `git clone` options for the host's clones of the project: Git LFS files stay pointer
+# files, since LFS objects may be unavailable and the team's Gitea holds none. Kept in
+# the clone's config, so git-lfs never runs there and installs no pre-push hook.
+NO_LFS = ['-c', 'filter.lfs.process=', '-c', 'filter.lfs.smudge=', '-c', 'filter.lfs.clean=',
+          '-c', 'filter.lfs.required=false']
 
 
 def upstream_credentials(repo):
@@ -76,5 +81,5 @@ def write_json(path, value):
     Path(path).write_text(json.dumps(value, indent=2) + '\n')
 
 
-__all__ = ['GH_CREDENTIAL', 'IDENTITY', 'ROOT', 'context', 'git', 'git_url', 'gitea_api', 'log', 'read_json',
-           'upstream_credentials', 'write_json']
+__all__ = ['GH_CREDENTIAL', 'IDENTITY', 'NO_LFS', 'ROOT', 'context', 'git', 'git_url', 'gitea_api', 'log',
+           'read_json', 'upstream_credentials', 'write_json']

@@ -12,7 +12,7 @@ import subprocess
 import sys
 import time
 
-from common import IDENTITY, context, git, gitea_api, log, read_json, upstream_credentials, write_json
+from common import IDENTITY, NO_LFS, context, git, gitea_api, log, read_json, upstream_credentials, write_json
 from common import git_url
 
 
@@ -54,7 +54,7 @@ def sync_once(task_out, values, project, record):
     url, _ = git_url(project.upstream)
     checkout = task_out / '_sync'
     shutil.rmtree(checkout, ignore_errors=True)
-    git('clone', '--quiet', '--branch', 'main', os.environ['AGENSH_GITEA_URL'], str(checkout))
+    git('clone', *NO_LFS, '--quiet', '--branch', 'main', os.environ['AGENSH_GITEA_URL'], str(checkout))
     git(*upstream_credentials(project.upstream), 'fetch', '--quiet', url, project.base_branch, cwd=checkout)
     upstream_sha = git('rev-parse', 'FETCH_HEAD', cwd=checkout, capture=True)
     git('push', '--quiet', '--force', 'origin', f'{upstream_sha}:refs/heads/upstream/{project.base_branch}',
