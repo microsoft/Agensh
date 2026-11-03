@@ -629,11 +629,13 @@ if not interrupted and not snapshot:
         sys.exit(f'the final upstream sync is missing: sync={delivery.get("sync")}')
 if not interrupted:
     acceptance = json.loads((task_out / 'acceptance.json').read_text())
-    # The final commands read the private directory and call the model route.
-    if len(acceptance['results']) != 3 or not acceptance['all_passed'] or acceptance['head'] != delivery['head']:
+    # The final commands run git on the checkout, read the private directory and call
+    # the model route.
+    if len(acceptance['results']) != 4 or not acceptance['all_passed'] or acceptance['head'] != delivery['head']:
         sys.exit(f'acceptance did not pass on the delivered head: {acceptance}')
-    if delivery['head'] not in acceptance['results'][-1]['output_tail']:
-        sys.exit(f'git did not read the delivered checkout during acceptance: {acceptance["results"][-1]}')
+    git_log = next(r for r in acceptance['results'] if r['command'].startswith('git log'))
+    if delivery['head'] not in git_log['output_tail']:
+        sys.exit(f'git did not read the delivered checkout during acceptance: {git_log}')
 print(f'delivered {branch}: {delivery["commits"]} commit(s) on upstream {base[:12]}'
       + ('' if interrupted else '; acceptance passed on the delivered head'))
 CHECK
