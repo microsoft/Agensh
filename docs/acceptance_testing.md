@@ -234,6 +234,9 @@ including token use per worker. Remove a finished team's state with
   gateway with the harness's wire API.
 - Gitea 1.22 cannot check protected files on the push that creates `main`, so
   they are protected right after the import; nothing runs in between.
+- Git LFS files are imported as pointer files: the host never fetches LFS
+  objects, so workers, CI and acceptance see the pointers, and checks that need
+  an LFS file's content fail.
 - With `open` networking, fetched content can carry prompt injection and
   workers can read the whole repository. Review every delivered PR.
 - The router marks the owner's Mattermost posts urgent only on its live

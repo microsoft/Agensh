@@ -109,13 +109,19 @@ it). See the [run lifecycle](../../agensh/README.md#run-lifecycle) for details.
 |---|---|
 | [`hooks/prepare.py`](hooks/prepare.py) | Clones the upstream base branch with its history (or starts a repository with a README), renders [`templates/`](templates/) into the run's `prompts/` with the goal, checks, language and network rules, and records `prepare.json` |
 | [`hooks/export.py`](hooks/export.py) | Clones the team's final `main`; pushes it to the delivery branch and, for GitHub, opens a pull request with the goal, commit count and change summary; never merges. Without an upstream it writes `delivery.bundle`; `AGENSH_DELIVERY=off` keeps delivery local. Records `delivery.json` |
-| [`hooks/evaluate.py`](hooks/evaluate.py) | Runs `acceptance.main` on the delivered `main` in the worker image and records `acceptance.json`; failing checks are results, not run failures |
+| [`hooks/evaluate.py`](hooks/evaluate.py) | Runs `acceptance.main` on the delivered `main` in the worker image and records `acceptance.json`; failing checks are results, not run failures. The checkout belongs to the host user, so the container trusts it (`safe.directory`) and checks can run `git` |
 
 The imported history becomes the team's `main` directly: bootstrap creates the
 repository without an initial commit and without the CODEOWNERS commit, so the
 delivery branch shares its history with upstream and the pull request shows
 only the team's work. GitHub delivery uses the host's `gh` login; workers never
 hold upstream credentials.
+
+Git LFS files stay pointer files throughout a run. The prepare, sync and export
+hooks clone with the LFS filter turned off, so the host's git-lfs never fetches
+objects (which may be missing upstream) or pushes them, and the team's Gitea
+holds none. Workers, CI and acceptance see the pointers, so a check that needs
+an LFS file's content cannot pass.
 
 Workers get their instructions from the core template with this pack's
 fragments, the `team-task` channel and the `team` board. Their events carry
