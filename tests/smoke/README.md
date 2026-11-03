@@ -40,6 +40,11 @@ The test passes when:
   contribution plus the seeded README, and each worker sealed a shutdown
   archive that the runner verified.
 
+With `SMOKE_PACK=software-project` the team imports a local upstream whose
+history is larger than the edge proxy's 100 MiB request limit, and the
+delivered head's acceptance includes a `git` command, run on a checkout that
+the evaluation container's user does not own.
+
 | Setting | Default | Meaning |
 |---|---|---|
 | `SMOKE_WORKERS` | 2 | Team size |

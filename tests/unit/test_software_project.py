@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -183,6 +184,16 @@ class HookBase(unittest.TestCase):
         git('push', '-q', 'origin', 'HEAD:main', cwd=work)
         return gitea
 
+    def upstream_commit(self, name, text):
+        work = Path(self.directory.name, 'upstream-work')
+        if not work.exists():
+            git('clone', '-q', str(self.upstream), str(work))
+        (work / name).write_text(text)
+        git('add', '.', cwd=work)
+        git('commit', '-qm', f'Upstream changes {name}', cwd=work)
+        git('push', '-q', 'origin', 'HEAD:main', cwd=work)
+        return git('rev-parse', 'HEAD', cwd=work)
+
 
 class HookTest(HookBase):
     """Run the prepare and export hooks against local repositories."""
@@ -337,16 +348,6 @@ class SyncTest(HookBase):
         self.assertEqual(self.hook('prepare').returncode, 0)
         self.team = self.team_main()
 
-    def upstream_commit(self, name, text):
-        work = Path(self.directory.name, 'upstream-work')
-        if not work.exists():
-            git('clone', '-q', str(self.upstream), str(work))
-        (work / name).write_text(text)
-        git('add', '.', cwd=work)
-        git('commit', '-qm', f'Upstream changes {name}', cwd=work)
-        git('push', '-q', 'origin', 'HEAD:main', cwd=work)
-        return git('rev-parse', 'HEAD', cwd=work)
-
     def sync(self):
         result = self.hook('sync', AGENSH_GITEA_URL=str(self.team), AGENSH_SYNC_PHASE='final')
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -382,6 +383,74 @@ class SyncTest(HookBase):
         self.assertEqual(git('log', '-1', '--format=%s', 'main', cwd=self.team), 'Team changes widget')
         self.assertEqual(self.sync()['last']['issue'], 41)
         self.assertEqual(len(self.gitea.issues), 1)
+
+
+LFS_POINTER = 'version https://git-lfs.github.com/spec/v1\noid sha256:{}\nsize 1048576\n'
+# A host's git-lfs that cannot fetch the objects: the filter fails on every LFS file.
+FAILING_LFS = '[filter "lfs"]\n\tprocess = false\n\tsmudge = false\n\tclean = false\n\trequired = true\n'
+
+
+class LfsTest(HookBase):
+    """The hooks pass Git LFS pointers through when their objects exist nowhere."""
+
+    def setUp(self):
+        super().setUp()
+        # Test repositories are written without LFS; the hooks run with the failing filter.
+        isolated = unittest.mock.patch.dict(os.environ, {'GIT_CONFIG_NOSYSTEM': '1', 'GIT_CONFIG_GLOBAL': os.devnull})
+        isolated.start()
+        self.addCleanup(isolated.stop)
+        config = Path(self.directory.name, 'lfs.gitconfig')
+        config.write_text(FAILING_LFS)
+        self.lfs = {'GIT_CONFIG_GLOBAL': str(config)}
+
+    def test_pointers_pass_through_prepare_sync_and_export(self):
+        self.upstream_commit('.gitattributes', '*.bin filter=lfs diff=lfs merge=lfs -text\n')
+        self.upstream_commit('model.bin', LFS_POINTER.format('a' * 64))
+        result = self.hook('prepare', **self.lfs)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        clone = Path((self.task_out / '.seed_git').read_text().strip())
+        self.assertEqual((clone / 'model.bin').read_text(), LFS_POINTER.format('a' * 64))
+        team = self.team_main()
+        # The sync's merge checks out a new LFS file in the clone it made.
+        self.upstream_commit('weights.bin', LFS_POINTER.format('b' * 64))
+        result = self.hook('sync', AGENSH_GITEA_URL=str(team), AGENSH_SYNC_PHASE='final', **self.lfs)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads((self.task_out / 'sync.json').read_text())['last']['result'], 'merged')
+        result = self.hook('export', AGENSH_GITEA_URL=str(team), **self.lfs)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for name in ('model.bin', 'weights.bin'):
+            self.assertEqual(git('rev-parse', f'agensh/unit:{name}', cwd=self.upstream),
+                             git('rev-parse', f'main:{name}', cwd=self.upstream), name)
+
+
+# `docker run ... -v CHECKOUT:/work -w /work IMAGE -lc ...` as a host process in the
+# checkout, as a container user with its own HOME who does not own the checkout.
+FAKE_DOCKER = '''import os, subprocess, sys, tempfile
+arguments = sys.argv[1:]
+checkout = arguments[arguments.index('-v') + 1].rsplit(':', 1)[0]
+command = arguments[arguments.index('-w') + 3:]
+with tempfile.TemporaryDirectory() as home:
+    env = {'PATH': os.environ['PATH'], 'HOME': home, 'GIT_TEST_ASSUME_DIFFERENT_OWNER': '1'}
+    sys.exit(subprocess.run(['bash', *command], cwd=checkout, env=env).returncode)
+'''
+
+
+class EvaluateTest(HookBase):
+    """The evaluate hook runs acceptance.main in the worker image on the delivered checkout."""
+
+    def test_git_works_on_a_checkout_the_container_does_not_own(self):
+        self.project_file.write_text(PROJECT.format(upstream=self.upstream).replace(
+            'main = ["python3 -m unittest"]', 'main = ["git log -1 --format=%H"]'))
+        self.assertEqual(self.hook('prepare').returncode, 0)
+        self.assertEqual(self.hook('export', AGENSH_GITEA_URL=str(self.team_main())).returncode, 0)
+        docker = Path(self.directory.name, 'fake_docker.py')
+        docker.write_text(FAKE_DOCKER)
+        result = self.hook('evaluate', DOCKER=shlex.join([sys.executable, str(docker)]))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        acceptance = json.loads((self.task_out / 'acceptance.json').read_text())
+        self.assertTrue(acceptance['all_passed'], acceptance['results'])
+        self.assertEqual(acceptance['results'][0]['output_tail'].strip(),
+                         json.loads((self.task_out / 'delivery.json').read_text())['head'])
 
 
 class RenderingTest(unittest.TestCase):

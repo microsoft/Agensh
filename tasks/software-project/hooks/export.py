@@ -11,7 +11,7 @@ import subprocess
 import sys
 import tempfile
 
-from common import GH_CREDENTIAL, IDENTITY, ROOT, context, git, git_url, log, read_json, write_json
+from common import GH_CREDENTIAL, IDENTITY, NO_LFS, ROOT, context, git, git_url, log, read_json, write_json
 
 sys.path.insert(0, str(ROOT))
 from agensh import quality  # noqa: E402
@@ -108,7 +108,7 @@ def main():
         raise RuntimeError('prepare.json is missing; the prepare hook did not complete')
     checkout = task_out / '_deliver'
     shutil.rmtree(checkout, ignore_errors=True)
-    git('clone', '--quiet', '--branch', 'main', os.environ['AGENSH_GITEA_URL'], str(checkout))
+    git('clone', *NO_LFS, '--quiet', '--branch', 'main', os.environ['AGENSH_GITEA_URL'], str(checkout))
     team_head = git('rev-parse', 'HEAD', cwd=checkout, capture=True)
     remove_workflow(checkout, prepare.get('agensh_files') or [])
     head = git('rev-parse', 'HEAD', cwd=checkout, capture=True)
