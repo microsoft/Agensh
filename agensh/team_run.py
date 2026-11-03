@@ -994,19 +994,30 @@ sys.exit(json.load(urllib.request.urlopen(request, timeout=15)).get('status') !=
         closes = [e for e in timeline or [] if status == 200 and e.get('type') == 'close']
         return (closes[-1].get('user') or {}).get('login', '') if closes else ''
 
+    def reopen_issue(self, note):
+        self.gitea_api('PATCH', '/issues/1', {'state': 'open'})
+        self.gitea_api('POST', '/issues/1/comments', {'body': note})
+        self.mm.post(self.mm.channel_id, note)
+
     def issue_watch(self):
         # With a product owner only they end the run by closing issue #1 (a worker's
-        # close is reopened); without one, the team's own close ends it.
-        while not self.stop.wait(env_int('AGENSH_ISSUE_CHECK_S', 60)):
+        # close is reopened); without one, the team's own close ends it, unless the
+        # profile asks for a fixed-length run (AGENSH_FIXED_LENGTH).
+        fixed = self.values.get('AGENSH_FIXED_LENGTH', '').strip() == '1'
+        while not self.stop.wait(env_int('AGENSH_ISSUE_CHECK_S', 15 if fixed else 60)):
             status, issue = self.gitea_api('GET', '/issues/1')
             if status != 200 or not isinstance(issue, dict) or issue.get('state') != 'closed':
                 continue
             closer = self.issue_closer()
             if self.human() and closer != self.human():
                 log(f'issue #1 closed by {closer or "unknown"}, not {self.human()}; reopening it')
-                self.gitea_api('PATCH', '/issues/1', {'state': 'open'})
-                self.gitea_api('POST', '/issues/1/comments', {'body': f'Reopened: only @{self.human()}, the product '
-                                                              'owner, ends the run by closing this issue.'})
+                self.reopen_issue(f'Reopened: only @{self.human()}, the product owner, ends the run by closing '
+                                  'this issue.')
+                continue
+            if fixed and not self.human():
+                log(f'issue #1 closed by {closer or "unknown"} in a fixed-length run; reopening it')
+                self.reopen_issue('Reopened: this run has a fixed length and does not end when this issue is '
+                                  'closed. Keep improving toward the goal until the run ends.')
                 continue
             log(f'issue #1 closed by {closer or "unknown"}')
             self.request_stop('issue_closed')
@@ -1067,12 +1078,27 @@ sys.exit(json.load(urllib.request.urlopen(request, timeout=15)).get('status') !=
         if not self.quiesce():
             self.save_service_logs()
             raise Fatal('incomplete shutdown archives; preserving containers and DATA_ROOT for recovery')
+        skip_eval = os.environ.get('SKIP_EVAL', '0') == '1'
+        # Workers are stopped; the model proxy still runs for an evaluation that calls models,
+        # and its final-evaluation route is opened outside the team's token budget.
+        evaluated = False
+        if self.pack.evaluate_with_services and not skip_eval:
+            gate = self.profile_data / 'usage' / 'final-evaluation.open'
+            run(['sudo', '-n', 'touch', str(gate)], quiet=True)
+            try:
+                evaluated = self.run_hook('evaluate')
+            finally:
+                run(['sudo', '-n', 'rm', '-f', str(gate)], quiet=True)
         self.save_service_logs()
         self.make('down', quiet=True)
         if self.pack.resumable:
             self.write_state('finalized', reason=reason)
-        if os.environ.get('SKIP_EVAL', '0') == '1':
+        if skip_eval:
             log(f'SKIP_EVAL=1 → deferring programbench eval (submission left at {self.task_out}/submission.tar.gz)')
+            return
+        if self.pack.evaluate_with_services:
+            if not evaluated:
+                raise Fatal('evaluate hook failed')
             return
         if not self.run_hook('evaluate'):
             raise Fatal('evaluate hook failed')

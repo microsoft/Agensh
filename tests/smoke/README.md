@@ -51,6 +51,8 @@ the evaluation container's user does not own.
 | `SMOKE_MINUTES` | 5 | Run budget passed to the runner |
 | `SMOKE_KEEP` | 0 | `1` keeps the profile data and containers for inspection |
 | `SMOKE_INTERRUPT` | 0 | `1` sends SIGTERM to the runner after the live checks and checks that its teardown still exported and archived |
+| `SMOKE_HUMAN` | 1 | software-project: `1` names a product owner (owner approval, urgent routing, digests); `0` keeps protected paths admin-only and makes the run fixed-length |
+| `SMOKE_SNAPSHOT` | 0 | software-project: `1` imports a sanitized snapshot without history and checks the replayed delivery |
 | `SMOKE_PORT_BASE`, `SMOKE_SUBNET_OCTET` | 26000, 231 | Host ports and Docker subnets of the smoke profile |
 
 Requirements: Docker with Compose v2, passwordless `sudo`, and network access

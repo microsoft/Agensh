@@ -24,6 +24,7 @@ event_context = "inline" # events carry the latest comment or the thread's start
 [environment]
 network = "auto"         # open for a public GitHub upstream, allowlist otherwise; a project may choose
 task_prompts = "run"     # the prepare hook renders templates/ for each project
+model_route = true       # AGENSH_MODEL_BASE for the project's own model calls (unmodified, metered)
 
 [workspace]
 import_history = true    # the upstream branch's history becomes the team's main
@@ -41,6 +42,7 @@ sync_before_end = "30m"  # sync upstream this long before the end, so conflicts 
 resumable = true         # the token budget or `agensh.project pause` pauses; `resume` continues with fresh sessions
 stop_when = ["budget", "tokens", "issue_closed"]
 finalize_notice = "15m"  # tell workers to wrap up this long before a timed finalize
+evaluate_with_services = true  # the final commands may call models through AGENSH_MODEL_BASE
 
 [human]
 product_owner = true     # a project file may add [human] mode = "optional" with a username

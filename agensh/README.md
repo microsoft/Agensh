@@ -44,7 +44,7 @@ Hooks are named in `pack.toml` and run on the host from the repository root,
 | `prepare` | Before services start | May write the seed tree path to `$AGENSH_TASK_OUT/.seed_path`, or a git clone whose `HEAD` becomes `main` with its history to `.seed_git`; `KEY=VALUE` Compose settings to `compose.env` (a pack with `network = "auto"` must set `AGENSH_RUN_NETWORK` there); extra task-brief variables to `brief_vars.json`; non-zero stops the run |
 | `sync` | `[lifecycle] sync_before_end` (default 30m) before the end, and before `export` on the normal path, with `AGENSH_SYNC_PHASE=scheduled` or `final` | Brings upstream changes into the team's `main`; failures are logged, and `main` is delivered as it is |
 | `export` | After the budget, and on the failure path | Delivers the team's result; its exit status is logged, not fatal |
-| `evaluate` | After shutdown unless `SKIP_EVAL=1` | Scores the result; non-zero makes the run exit 1 |
+| `evaluate` | After shutdown unless `SKIP_EVAL=1`; before it, while the services still run, for packs with `[lifecycle] evaluate_with_services` | Scores the result; non-zero makes the run exit 1 |
 
 ## CI merge gate
 
@@ -143,3 +143,17 @@ With `AGENSH_AGENT_MODELS` (`team-worker3=model,...`, from `[team.models]`), the
 egress proxy rewrites those workers' model requests to their model. The model
 must be served by the same gateway with the same wire API; usage metering
 records the model per request.
+
+## Project model calls and fixed-length runs
+
+A pack with `[environment] model_route` gives workers and CI `AGENSH_MODEL_BASE`,
+the egress proxy's `/raw` route, for a project's own model calls: forwarded
+unchanged apart from the credential, metered and counted in the token budget.
+`/raw-final` serves the final evaluation (see `evaluate_with_services` above): it
+is labelled `final-evaluation` and leaves the budget once the driver opens it,
+after the workers have stopped.
+
+With `AGENSH_FIXED_LENGTH=1` (a project's `[budget] fixed_length`) and no product
+owner, the issue #1 check runs every 15 seconds and reopens the issue when a
+worker closes it, telling the team in the issue and the channel, so the run uses
+its whole budget.

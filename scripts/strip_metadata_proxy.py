@@ -35,6 +35,16 @@ LEDGER = UsageLedger(os.environ.get('UPSTREAM_USAGE_LOG', '').strip() or None)
 # Team token budget (input + output); 0 means unlimited. At the limit model requests
 # are refused and the team driver pauses the run.
 MAX_MODEL_TOKENS = int(os.environ.get('UPSTREAM_MAX_MODEL_TOKENS', '0') or 0)
+# Requests under /raw (for example a project's own experiment code) are forwarded
+# unchanged apart from the credential: no harness rewriting of request or response.
+# They are still metered (as `project` unless they carry a worker label) and budgeted.
+RAW_PREFIX = '/raw'
+# The final evaluation's own route: also unmodified, labelled final-evaluation, and outside
+# the token budget while the driver has opened it (workers are stopped by then and cannot
+# write this file, which lives in the proxy's usage volume).
+FINAL_PREFIX = '/raw-final'
+FINAL_LABEL = 'final-evaluation'
+FINAL_OPEN_FILE = os.environ.get('UPSTREAM_FINAL_OPEN_FILE', '/data/usage/final-evaluation.open')
 HOP_BY_HOP = {"connection", "keep-alive", "proxy-connection", "te", "trailer",
               "transfer-encoding", "upgrade", "content-length"}
 
@@ -254,9 +264,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(usage)
             return
+        final = self.path == FINAL_PREFIX or self.path.startswith(FINAL_PREFIX + '/')
+        raw = final or self.path == RAW_PREFIX or self.path.startswith(RAW_PREFIX + '/') or self.path.startswith(RAW_PREFIX + '?')
+        if raw:
+            self.path = self.path[len(FINAL_PREFIX if final else RAW_PREFIX):] or '/'
+            if not self.path.startswith('/'):
+                self.path = '/' + self.path
         agent = agent_identity({k.lower(): v for k, v in self.headers.items()})
+        if final:
+            agent = FINAL_LABEL
+        elif raw and agent == 'unlabelled':
+            agent = 'project'
         metered = is_model_path(self.path)
-        if metered and MAX_MODEL_TOKENS > 0 and LEDGER.budget_tokens() >= MAX_MODEL_TOKENS:
+        exempt = final and os.path.exists(FINAL_OPEN_FILE)
+        if metered and not exempt and MAX_MODEL_TOKENS > 0 and LEDGER.budget_tokens() >= MAX_MODEL_TOKENS:
             refusal = json.dumps({'error': {'type': 'budget_exhausted', 'message':
                                   f'the team token budget ({MAX_MODEL_TOKENS}) is spent; the run pauses'}}).encode()
             self.send_response(429)
@@ -289,7 +310,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
         else:
             body = self.rfile.read(length) if length else b""
         ct = self.headers.get("Content-Type", "")
-        if body and "json" in ct.lower():
+        if raw and body and "json" in ct.lower():
+            try:
+                parsed = json.loads(body)
+                if isinstance(parsed, dict) and isinstance(parsed.get('model'), str):
+                    request_model = parsed['model']
+            except ValueError:
+                pass
+        elif body and "json" in ct.lower():
             try:
                 d = json.loads(body)
                 if isinstance(d, dict) and isinstance(d.get('model'), str):
@@ -439,7 +467,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 print(f"[proxy {rid}] CLIENT GONE before the error was written: {disconnected}", flush=True)
             return
 
-        if status < 400 and CODE_MODE_OUTPUT_TOKENS and '/responses' in self.path:
+        if status < 400 and CODE_MODE_OUTPUT_TOKENS and '/responses' in self.path and not raw:
             headers = dict((key.lower(), value) for key, value in resp_headers)
             encoded = headers.get('content-encoding', '').lower() == 'gzip'
             try:

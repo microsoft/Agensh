@@ -22,6 +22,9 @@ from agensh import quality  # noqa: E402
 ENV = dict(line.split('=', 1) for line in Path(sys.argv[1]).read_text().splitlines() if '=' in line)
 TASK_OUT = Path(sys.argv[2])
 ORG, PORT = ENV['ORG_NAME'], ENV['EDGE_HTTP_PORT']
+# Peer review needs a peer: a team of one has no review paths and no review check.
+PEERS = int(ENV.get('AGENSH_WORKERS', '2')) >= 2
+CHECKS = (*quality.REQUIRED_CHECKS, *([quality.REVIEW_CHECK] if PEERS else []))
 ADMIN = (ENV['GITEA_ADMIN_USER'], ENV['GITEA_ADMIN_PASSWORD'])
 BASE = f'http://localhost:{PORT}/api/v1/repos/{ORG}/main'
 CLONE = f'http://{ADMIN[0]}:{ADMIN[1]}@localhost:{PORT}/{ORG}/main.git'
@@ -114,7 +117,7 @@ def check_protection():
     code, protection = api('GET', '/branch_protections/main')
     if code != 200:
         fail(f'no branch protection on main ({code})')
-    required = {*quality.REQUIRED_CHECKS, quality.REVIEW_CHECK}
+    required = set(CHECKS)
     if not protection.get('enable_status_check') or set(protection.get('status_check_contexts') or []) != required:
         fail(f'main does not require {sorted(required)}: {protection.get("status_check_contexts")}')
     if HUMAN:
@@ -138,7 +141,7 @@ def check_merged_prs():
     code, pulls = api('GET', '/pulls?state=closed&limit=50')
     merged = [p for p in pulls if p.get('merged')]
     for pull in merged:
-        for context in (*quality.REQUIRED_CHECKS, quality.REVIEW_CHECK):
+        for context in CHECKS:
             if status_of(pull['head']['sha'], context) != 'success':
                 fail(f'merged PR #{pull["number"]} lacks a successful {context}')
     sha = main_sha()
@@ -155,7 +158,7 @@ def check_protected_files(work, token):
                        'Change a protected acceptance file')
     number = open_pr('smoke/protected', 'smoke: change a protected file')
     wait('the checks on the protected-file PR', lambda: all(
-        status_of(head, c) == 'success' for c in (*quality.REQUIRED_CHECKS, quality.REVIEW_CHECK)), timeout=300)
+        status_of(head, c) == 'success' for c in CHECKS), timeout=300)
     merged, reply = merge(number, token)
     if merged or api('GET', f'/pulls/{number}')[1].get('merged'):
         fail('a worker merged a change to a protected file')
@@ -187,7 +190,7 @@ def check_broken_main(work, token):
                            'Restore greet')
     fix = open_pr('smoke/fix', f'[{quality.FIX_LABEL}] restore greet')
     wait('the fix-main PR to pass its checks', lambda: all(
-        status_of(fix_head, c) == 'success' for c in (*quality.REQUIRED_CHECKS, quality.REVIEW_CHECK)), timeout=300)
+        status_of(fix_head, c) == 'success' for c in CHECKS), timeout=300)
     merged, reply = merge(fix, token)
     if not merged:
         fail(f'the fix-main PR did not merge: {reply}')
@@ -228,7 +231,8 @@ def main():
     with tempfile.TemporaryDirectory() as directory:
         work = Path(directory, 'work')
         subprocess.run(['git', 'clone', '-q', CLONE, str(work)], check=True)
-        check_peer_review(work, token)
+        if PEERS:
+            check_peer_review(work, token)
         check_protected_files(work, token)
         check_broken_main(work, token)
     log('PASS')

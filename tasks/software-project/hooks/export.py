@@ -44,6 +44,33 @@ def summary(checkout, base_sha, upstream_sha=None):
     return commits, stat
 
 
+class ReplayConflict(RuntimeError):
+    pass
+
+
+def replay_onto_upstream(task_out, checkout, url, credentials, prepare, run_id):
+    # A snapshot import shares no history with upstream: apply the team's net change to
+    # the upstream base commit as one commit that lists the team's commits.
+    team_base = prepare['team_base']
+    work = task_out / '_replay'
+    shutil.rmtree(work, ignore_errors=True)
+    git(*credentials, 'clone', *NO_LFS, '--quiet', '--branch', prepare['base_branch'], url, str(work))
+    git('checkout', '--quiet', '--detach', prepare['base_sha'], cwd=work)
+    patch = subprocess.run(['git', 'diff', '--binary', team_base, 'HEAD'], cwd=checkout, capture_output=True,
+                           check=True).stdout
+    if not patch.strip():
+        return work
+    applied = subprocess.run(['git', 'apply', '--3way', '--index', '-'], cwd=work, input=patch, capture_output=True)
+    if applied.returncode != 0:
+        (task_out / 'delivery.patch').write_bytes(patch)
+        raise ReplayConflict(applied.stderr.decode(errors='replace').strip()[:300])
+    subjects = git('log', '--reverse', '--format=- %s', '--invert-grep', '-E', f'--grep={WORKFLOW_COMMITS}',
+                   f'{team_base}..HEAD', cwd=checkout, capture=True)
+    git(*IDENTITY, 'commit', '--quiet', '-m', f'Agensh team changes ({run_id})\n\nThe team worked on a sanitized '
+        f'snapshot of {prepare["base_branch"]} at {prepare["base_sha"][:12]}. Its commits:\n\n{subjects}', cwd=work)
+    return work
+
+
 def sensitive_changes(checkout, since, patterns):
     # Changes to protected paths are listed on their own for reviewers.
     changed = git('diff', '--name-only', f'{since}..HEAD', cwd=checkout, capture=True).split()
@@ -113,9 +140,11 @@ def main():
     remove_workflow(checkout, prepare.get('agensh_files') or [])
     head = git('rev-parse', 'HEAD', cwd=checkout, capture=True)
     upstream_sha = synced_upstream(task_out, checkout)
-    commits, stat = summary(checkout, prepare['base_sha'], upstream_sha)
+    # A snapshot import starts from its own commit, not from upstream's.
+    team_base = prepare.get('team_base') or prepare['base_sha']
+    commits, stat = summary(checkout, team_base, upstream_sha)
     patterns = list(dict.fromkeys(pack.protected_paths + project.protected_paths))
-    sensitive = sensitive_changes(checkout, upstream_sha or prepare['base_sha'], patterns) if commits is not None else []
+    sensitive = sensitive_changes(checkout, upstream_sha or team_base, patterns) if commits is not None else []
     run_id = prepare['run_id']
     delivery = {'head': head, 'team_head': team_head, 'base_sha': prepare['base_sha'], 'commits': commits,
                 'run_id': run_id, 'upstream_sha': upstream_sha or prepare['base_sha'],
@@ -127,8 +156,18 @@ def main():
         url, github_repo = git_url(project.upstream)
         branch = project.delivery_branch.format(run_id=run_id)
         credentials = GH_CREDENTIAL if github_repo and shutil.which('gh') else []  # host gh login
+        source = checkout
+        if prepare.get('history') == 'snapshot':
+            try:
+                source = replay_onto_upstream(task_out, checkout, url, credentials, prepare, run_id)
+            except ReplayConflict as error:
+                delivery.update(mode='patch', patch=str(task_out / 'delivery.patch'), error=str(error))
+                write_json(task_out / 'delivery.json', delivery)
+                log(f'the team change does not apply to {prepare["base_sha"][:12]}; wrote delivery.patch ({error})')
+                return
+            delivery['delivered_head'] = git('rev-parse', 'HEAD', cwd=source, capture=True)
         log(f'pushing main ({head[:12]}) to {project.upstream} as {branch}')
-        git(*credentials, 'push', '--quiet', url, f'HEAD:refs/heads/{branch}', cwd=checkout)
+        git(*credentials, 'push', '--quiet', url, f'HEAD:refs/heads/{branch}', cwd=source)
         delivery.update(mode='branch', upstream=project.upstream, branch=branch)
         if github_repo and shutil.which('gh') and commits:
             with tempfile.NamedTemporaryFile('w', suffix='.md', delete=False) as body:

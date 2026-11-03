@@ -61,6 +61,15 @@ class Project:
     planning: bool = False
     planning_timeout: int = 2700
     review_paths: tuple = ()
+    # [budget] fixed_length: the run uses its whole wall-clock budget; a worker
+    # closing issue #1 does not end it (comparisons across team sizes need this).
+    fixed_length: bool = False
+    # [workspace] history = "snapshot": import the (sanitized) tree as one commit, no history.
+    history: str = 'full'
+    sanitize: str = ''
+    # [acceptance] final: the evaluate hook's commands; private_dir is mounted only there.
+    acceptance_final: tuple = ()
+    private_dir: str = ''
     # [team.models]: worker number -> model id, for per-role models.
     models: dict = field(default_factory=dict)
     protected_paths: tuple = ()
@@ -70,6 +79,10 @@ class Project:
     @property
     def profile(self):
         return f'{self.pack}-{self.name}'
+
+    @property
+    def final_commands(self):
+        return self.acceptance_final or self.acceptance_main
 
     @property
     def image_slug(self):
@@ -121,10 +134,17 @@ def load_project(path):
         raise ProjectError('the goal is empty')
 
     workspace = data.get('workspace', {})
-    _known(workspace, ('seed',), '[workspace]')
+    _known(workspace, ('seed', 'history', 'sanitize'), '[workspace]')
     seed = workspace.get('seed', 'git')
     if seed not in ('git', 'empty'):
         raise ProjectError(f'[workspace] seed must be "git" or "empty"; got {seed!r}')
+    history = workspace.get('history', 'full')
+    if history not in ('full', 'snapshot'):
+        raise ProjectError(f'[workspace] history must be "full" or "snapshot"; got {history!r}')
+    sanitize = _outside_path(workspace.get('sanitize', ''), path, '[workspace] sanitize', want='file')
+    if sanitize and (history != 'snapshot' or seed != 'git'):
+        raise ProjectError('[workspace] sanitize needs seed = "git" and history = "snapshot", '
+                           'or the removed files would stay in the imported history')
     upstream = data.get('upstream', {})
     _known(upstream, ('repo', 'base_branch', 'delivery_branch'), '[upstream]')
     repo = str(upstream.get('repo', '')).strip()
@@ -135,7 +155,8 @@ def load_project(path):
         raise ProjectError('[upstream] delivery_branch must contain {run_id}, so runs never share a branch')
 
     acceptance = data.get('acceptance', {})
-    _known(acceptance, ('pr', 'main', 'protected_paths', 'timeout_minutes'), '[acceptance]')
+    _known(acceptance, ('pr', 'main', 'final', 'private_dir', 'protected_paths', 'timeout_minutes'), '[acceptance]')
+    private_dir = _outside_path(acceptance.get('private_dir', ''), path, '[acceptance] private_dir', want='dir')
     try:
         protected = protected_path_list(acceptance.get('protected_paths', []), '[acceptance] protected_paths')
     except PackError as error:
@@ -154,7 +175,10 @@ def load_project(path):
             for k, v in models.items()):
         raise ProjectError('[team.models] maps worker numbers to model ids, e.g. "3" = "gpt-5.6-mini"')
     budget = data.get('budget', {})
-    _known(budget, ('hours', 'max_model_tokens'), '[budget]')
+    _known(budget, ('hours', 'max_model_tokens', 'fixed_length'), '[budget]')
+    fixed_length = budget.get('fixed_length', False)
+    if not isinstance(fixed_length, bool):
+        raise ProjectError('[budget] fixed_length must be true or false')
     max_tokens = budget.get('max_model_tokens', 0)
     if isinstance(max_tokens, bool) or not isinstance(max_tokens, int) or max_tokens < 0:
         raise ProjectError('[budget] max_model_tokens must be a non-negative integer (0: no limit)')
@@ -188,6 +212,8 @@ def load_project(path):
         planning_timeout = parse_duration(coordination.get('planning_timeout', '45m'))
     except PackError as error:
         raise ProjectError(str(error)) from None
+    if review_paths and workers < 2:
+        raise ProjectError('[coordination] review_paths needs at least two workers: a peer must approve')
     planning = coordination.get('planning', False)
     if not isinstance(planning, bool):
         raise ProjectError('[coordination] planning must be true or false')
@@ -199,8 +225,24 @@ def load_project(path):
                    allow_domains=tuple(d.lower() for d in domains), max_model_tokens=max_tokens,
                    human=username if mode == 'optional' else '', digest_seconds=digest if mode == 'optional' else 0,
                    planning=planning, planning_timeout=planning_timeout, review_paths=review_paths,
-                   models={int(k): v for k, v in models.items()},
+                   models={int(k): v for k, v in models.items()}, history=history, sanitize=sanitize,
+                   fixed_length=fixed_length,
+                   acceptance_final=_commands(acceptance['final'], '[acceptance] final') if 'final' in acceptance else (),
+                   private_dir=private_dir,
                    protected_paths=protected, ci_timeout_minutes=timeout)
+
+
+def _outside_path(value, project_file, where, want):
+    # Files that must stay away from the team (a sanitize script, held-out data):
+    # absolute or relative to the project file, and existing.
+    if not value:
+        return ''
+    if not isinstance(value, str):
+        raise ProjectError(f'{where} must be a path')
+    resolved = (project_file.parent / value).resolve()
+    if not (resolved.is_file() if want == 'file' else resolved.is_dir()):
+        raise ProjectError(f'{where} {value!r} is not an existing {"file" if want == "file" else "directory"}')
+    return str(resolved)
 
 
 def git_url(repo):
@@ -289,6 +331,8 @@ def write_profile(project, args, env_dir=ROOT):
         keys.append(('AGENSH_NETWORK', project.network))
     if project.max_model_tokens:
         keys.append(('AGENSH_MAX_MODEL_TOKENS', project.max_model_tokens))
+    if project.fixed_length:
+        keys.append(('AGENSH_FIXED_LENGTH', 1))
     if project.human:
         keys += [('AGENSH_HUMAN', project.human), ('AGENSH_DIGEST_S', project.digest_seconds)]
     if project.planning:
@@ -313,10 +357,30 @@ def write_profile(project, args, env_dir=ROOT):
     return out
 
 
+# Images the team stack needs besides the worker image; Compose builds bootstrap and
+# secret-service itself. The environment names another tag for each (as in the profile).
+SHARED_IMAGES = (('AGENT_BASE_IMAGE', 'omcgitea-agent-base:pbench', 'agent/Dockerfile.base', 'agent'),
+                 ('MINI_ROUTER_IMAGE', 'omcgitea-mini-router:local', 'mini-router/Dockerfile', 'mini-router'),
+                 ('BOARD_IMAGE', 'omcgitea-board:local', 'board-service/Dockerfile', 'board-service'))
+
+
+def build_shared_images(docker):
+    # A fresh host has none of them; existing ones are reused, as Docker's cache would.
+    for variable, default, dockerfile, context in SHARED_IMAGES:
+        tag = os.environ.get(variable) or default
+        if subprocess.run([*docker, 'image', 'inspect', tag], capture_output=True).returncode == 0:
+            continue
+        print(f'agensh.project: building {tag} from {dockerfile}', file=sys.stderr)
+        if subprocess.run([*docker, 'build', '-q', '-f', dockerfile, '-t', tag, context], cwd=ROOT,
+                          stdout=subprocess.DEVNULL).returncode != 0:
+            raise ProjectError(f'building {tag} failed')
+
+
 def build_image(project, args):
     config = harness_settings(args)
     image = f'omcgitea-agent-{project.image_slug}-{config.harness}:{os.environ.get("AGENT_IMAGE_TAG") or "agensh"}'
     docker = os.environ.get('DOCKER', 'sudo -n docker').split()
+    build_shared_images(docker)
     command = [*docker, 'build', '-f', 'agent/Dockerfile', '--build-arg', f'TASK_IMAGE={project.base_image_ref}',
                '--build-arg', f'AGENT_HARNESS={config.harness}',
                '--build-arg', f'{config.harness.upper()}_CLI_VERSION={config.version}', '-t', image, '.']

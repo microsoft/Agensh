@@ -17,6 +17,8 @@ goal = "Add a --json flag to the widget CLI."   # or goal_file = "docs/goal.md"
 
 [workspace]
 seed = "git"                            # "git": import upstream; "empty": new repository
+history = "full"                        # or "snapshot": one commit, no history (see below)
+sanitize = "../scripts/sanitize.sh"     # snapshot only: runs on the tree before import
 
 [upstream]
 repo = "github.com/acme/widget"         # GitHub, any git URL, or a local path
@@ -28,9 +30,11 @@ pr = ["python3 -m unittest -q"]         # quick checks before each merge
 main = ["python3 -m unittest"]          # full suite on main; defaults to pr
 protected_paths = ["tests/acceptance/**"]   # added to the pack's protected paths
 timeout_minutes = 15                    # per CI job
+final = ["python3 eval/final.py"]       # the evaluate hook's commands; defaults to main
+private_dir = "../heldout"              # mounted at /private for the final commands only
 
 [team]
-workers = 4                             # 1-128
+workers = 4                             # 1-128; one worker is a team of one
 
 [team.models]                           # optional: some workers on another model
 3 = "gpt-5.6-mini"                      # worker number = model id served by the gateway
@@ -38,6 +42,7 @@ workers = 4                             # 1-128
 [budget]
 hours = 2                               # per run segment
 max_model_tokens = 20000000             # team input + output tokens; 0: no limit
+fixed_length = false                    # true: closing issue #1 does not end the run
 
 [human]
 mode = "optional"                       # "none" (default): fully autonomous
@@ -72,7 +77,8 @@ python3 -m agensh.project run     path/to/.agensh/project.toml
 ```
 
 `build` makes `omcgitea-agent-<base-image>-<harness>:agensh` (`AGENT_IMAGE_TAG`
-changes the tag; `AGENT_BASE_IMAGE` the Gitea MCP artifact). `profile` writes
+changes the tag; `AGENT_BASE_IMAGE` the Gitea MCP artifact), and first builds the
+agent base, router and board images when the host does not have them yet. `profile` writes
 `.env.software-project-<name>` with ports and subnets chosen from 23000 and
 `10.217.x` so they stay clear of ProgramBench's table; regenerating keeps the
 allocation and passwords. `run` starts [`scripts/team_run.sh`](../../scripts/team_run.sh)
@@ -151,6 +157,38 @@ merge is pushed to `main` by the administrator; a conflict is never forced:
 an issue lists the conflicting files and asks the team to resolve it in a normal
 PR. A conflict still open at the final sync is reported in the delivery PR.
 `sync.json` records every sync.
+
+## Snapshot imports, private evaluation and project model calls
+
+`[workspace] history = "snapshot"` imports the base branch's tree as a single
+commit without its history, for repositories whose history holds what the team
+must not see. An optional `sanitize` script (outside the repository, path
+relative to the project file) runs on the tree first and can delete or rewrite
+files. Export then replays the team's net change onto the upstream base as one
+commit that lists the team's commits (or writes `delivery.patch` when it does
+not apply), and upstream sync is skipped.
+
+`[acceptance] final` replaces `main` as the evaluate hook's commands.
+`private_dir` (outside the repository) is mounted read-only at `/private`, with
+`AGENSH_PRIVATE_DIR`, for these commands only, so held-out data never reaches the
+team. Results are recorded in `acceptance.json`.
+
+The pack sets `[environment] model_route`: workers and CI get
+`AGENSH_MODEL_BASE`, the egress proxy's `/raw` route, for the project's own model
+calls. Requests there are forwarded unchanged apart from the credential,
+metered (as `project` without a worker label) and counted in the token budget.
+With `[lifecycle] evaluate_with_services`, the evaluate hook runs before the
+services stop, on the team network, so the final commands can call models too:
+their route, `/raw-final`, is labelled `final-evaluation` and is outside the
+team budget once the workers have stopped.
+
+## Teams of one and fixed-length runs
+
+`[team] workers = 1` runs a single worker with the same services; peer review
+(`review_paths`) needs at least two. `[budget] fixed_length = true` makes the run
+use its whole wall-clock budget: when a worker closes issue #1, the driver
+reopens it and tells the team, as it does for a product owner's project. Use it
+when runs are compared, for example across team sizes.
 
 ## Merge gate
 

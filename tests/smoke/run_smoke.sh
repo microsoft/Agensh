@@ -14,6 +14,8 @@ KEEP="${SMOKE_KEEP:-0}"
 INTERRUPT="${SMOKE_INTERRUPT:-0}"
 # software-project: name a product owner (1) or keep protected paths admin-only (0).
 HUMAN="${SMOKE_HUMAN:-1}"
+# software-project: import a sanitized snapshot without history (1) or the full history (0).
+SNAPSHOT="${SMOKE_SNAPSHOT:-0}"
 PORT_BASE="${SMOKE_PORT_BASE:-26000}"
 SUBNET_OCTET="${SMOKE_SUBNET_OCTET:-231}"
 IMAGE_ORG=agensh-smoke
@@ -99,7 +101,9 @@ check_lifecycle() {
     # Pause keeps every piece of state; resume continues with fresh sessions and the
     # resume message; the resumed segment then finalizes and delivers.
     local runner="$1" before after resumed rc=0 state
-    grep -q 'token budget at 92%' "$OUT/run.log" || die "no token budget warning at 92% in $OUT/run.log"
+    # The budget is calibrated for the default two workers.
+    [ "$WORKERS" != 2 ] || grep -q 'token budget at 9[0-9]%' "$OUT/run.log" \
+        || die "no token budget warning above 90% in $OUT/run.log"
     before="$(sessions)"
     [ -n "$before" ] || die "no stored ACP sessions before the pause"
     log "pausing the team"
@@ -156,6 +160,8 @@ make_upstream() {
     git -C "$work" add . && git -C "$work" -c user.name=Smoke -c user.email=smoke@localhost commit -qm "Add widget"
     printf '%s\n' 'import unittest' 'from widget import greet' '' 'class GreetTest(unittest.TestCase):' \
         '    def test_greet(self):' '        self.assertEqual(greet("x"), "hello x")' > "$work/test_widget.py"
+    # Stands in for held-out data that a snapshot import's sanitize script removes.
+    echo "held-out answers" > "$work/holdout.txt"
     git -C "$work" add . && git -C "$work" -c user.name=Smoke -c user.email=smoke@localhost commit -qm "Test widget"
     head -c 110M /dev/urandom > "$work/fixture.dat"
     git -C "$work" add . && git -C "$work" -c user.name=Smoke -c user.email=smoke@localhost commit -qm "Add a large fixture"
@@ -164,24 +170,41 @@ make_upstream() {
     git clone -q --bare "$work" "$UPSTREAM"
     rm -rf "$work"
     mkdir -p "$(dirname "$PROJECT_FILE")"
+    # Outside the team's repository: the sanitize script and data only the final evaluation sees.
+    local private="$OUT/private"
+    rm -rf "$private" && mkdir -p "$private"
+    printf '#!/bin/sh\nrm -f "$1/holdout.txt"\n' > "$private/sanitize.sh" && chmod 755 "$private/sanitize.sh"
+    echo "final answers" > "$private/answers.txt"
+    cat > "$private/check_model.py" <<'PY'
+import json, os, urllib.request
+request = urllib.request.Request(os.environ['AGENSH_MODEL_BASE'] + '/v1/responses', method='POST',
+                                 data=json.dumps({'model': 'fake'}).encode(), headers={'Content-Type': 'application/json'})
+assert urllib.request.urlopen(request, timeout=30).status == 200
+print('model route reachable from the final evaluation')
+PY
     cat > "$PROJECT_FILE" <<EOF
 pack = "software-project"
 name = "$TASK"
 goal = "Smoke test: each worker adds one file through a merged pull request."
+$([ "$SNAPSHOT" = 1 ] && printf '[workspace]\nhistory = "snapshot"\nsanitize = "%s"\n' "$private/sanitize.sh")
 [upstream]
 repo = "$UPSTREAM"
 [acceptance]
 pr = ["python3 -m unittest -q"]
 # Evaluation runs git on a checkout that the container's user does not own.
 main = ["python3 -m unittest -q", "git log -1 --format=%H"]
+final = ["python3 -m unittest -q", "git log -1 --format=%H", "test -s /private/answers.txt", "python3 /private/check_model.py"]
+private_dir = "$private"
 [team]
 workers = $WORKERS
-[team.models]
-# Worker 2's requests go to its own model, as for a cheaper reviewer role.
-2 = "smoke-reviewer-model"
+$([ "$WORKERS" -ge 2 ] && printf '[team.models]\n# Worker 2'"'"'s requests go to its own model, as for a cheaper reviewer role.\n2 = "smoke-reviewer-model"\n')
 [budget]
-# The stubs make four requests of 150 tokens: 92% of this, enough for the warning.
-max_model_tokens = 650
+# Two workers' stubs make four requests of 150 tokens and a worker one more through the model
+# route: 91% of this, enough for the warning. Other team sizes get room instead (no warning
+# check). The final evaluation's request is outside the budget.
+max_model_tokens = $([ "$WORKERS" = 2 ] && echo 820 || echo $((1000 * WORKERS)))
+# Without a product owner the run keeps its full length: a worker's close of #1 is reopened.
+fixed_length = $([ "$HUMAN" = 1 ] && echo false || echo true)
 [human]
 mode = "$([ "$HUMAN" = 1 ] && echo optional || echo none)"
 username = "owner"
@@ -189,7 +212,7 @@ digest = "1m"
 [coordination]
 planning = true
 planning_timeout = "5m"
-review_paths = ["review/**"]
+$([ "$WORKERS" -ge 2 ] && echo 'review_paths = ["review/**"]')
 [environment]
 base_image = "$BASE_IMAGE"
 EOF
@@ -300,13 +323,21 @@ print(f"board entries: {len(entries)}")
         check_imported_history
         check_backlog
         # The assignment above notifies each worker about issue #1.
-        check_event_context
+        # A worker's own actions are not events for it, so a team of one has none.
+        [ "$WORKERS" -lt 2 ] || check_event_context
         check_allowlist
-        check_planning
-        check_models
-        [ "$HUMAN" = 1 ] && check_human
+        # A team of one has no planning phase: its only worker starts at once.
+        [ "$WORKERS" -lt 2 ] || check_planning
+        [ "$WORKERS" -lt 2 ] || check_models
+        check_model_route
+        if [ "$HUMAN" = 1 ]; then
+            check_human
+        else
+            check_issue_reopened
+            log "fixed-length run: a worker's close of #1 was reopened"
+        fi
         python3 tests/smoke/check_gate.py "$ENV_FILE" "$OUT/run/$TASK" || die "CI gate check failed"
-        push_upstream_change
+        [ "$SNAPSHOT" = 1 ] || push_upstream_change
     fi
 
     local rows
@@ -344,6 +375,17 @@ check_imported_history() {
     base="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["base_sha"])' "$OUT/run/$TASK/prepare.json")"
     rm -rf "$check"
     git clone -q "$(gitea_clone_url)" "$check" || die "cannot clone the team repository"
+    if [ "$SNAPSHOT" = 1 ]; then
+        # The team sees the sanitized tree only: a snapshot commit and the workflow, no history.
+        [ "$(git -C "$check" rev-list --max-parents=0 HEAD | wc -l)" = 1 ] \
+            && git -C "$check" log -1 --format=%s "$(git -C "$check" rev-list --max-parents=0 HEAD)" | grep -q '^Snapshot of ' \
+            || die "team main does not start from the snapshot commit"
+        [ ! -e "$check/holdout.txt" ] || die "the sanitize script's file reached the team"
+        ! git -C "$check" cat-file -e "$base^{commit}" 2>/dev/null || die "upstream commits reached the team"
+        log "team main is a sanitized snapshot of upstream ${base:0:12}, without its history"
+        rm -rf "$check"
+        return
+    fi
     git -C "$check" merge-base --is-ancestor "$base" HEAD || die "team main does not descend from upstream $base"
     [ "$(git -C "$check" rev-list --count "$base")" = 4 ] || die "upstream history was not imported in full"
     # Only the product owner's CODEOWNERS from the prepare hook, never bootstrap's.
@@ -415,6 +457,19 @@ print(f'models per worker: { {k: sorted(v) for k, v in sorted(models.items())} }
 CHECK
 }
 
+check_model_route() {
+    # Workers reach the model through the proxy's unmodified /raw route, with no key.
+    local worker
+    worker="$(container agent-worker1)"
+    "${DOCKER[@]}" exec "$worker" python3 -c 'import json, os, urllib.request
+r = urllib.request.Request(os.environ["AGENSH_MODEL_BASE"] + "/v1/responses", method="POST",
+    data=json.dumps({"model": "fake"}).encode(), headers={"Content-Type": "application/json"})
+assert urllib.request.urlopen(r, timeout=30).status == 200' || die "a worker cannot use AGENSH_MODEL_BASE"
+    sudo -n grep -q '"agent":"project"' "$(profile_value DATA_ROOT)/$PROFILE/usage/usage.jsonl" \
+        || die "the model route's request was not metered as project"
+    log "model route: a worker called the model through AGENSH_MODEL_BASE, metered as project"
+}
+
 check_planning() {
     # Worker 1 planned first; its `[plan]` PR woke the others.
     grep -q 'plan merged (PR #' "$OUT/run.log" || die "the others did not wake on the merged [plan] PR"
@@ -458,7 +513,15 @@ POST
     done
     ls "$OUT/run/$TASK/digests/"digest-*.md >/dev/null 2>&1 || die "no progress digest was posted"
     # Only the owner ends the run by closing issue #1; a worker's close is reopened.
-    local token state=closed
+    check_issue_reopened
+    log "product owner: accounts exist, a mention was urgent for $org-worker1 only, digests posted, a worker's close of #1 was reopened"
+}
+
+check_issue_reopened() {
+    # A worker's close of issue #1 does not end the run: with a product owner, or in a
+    # fixed-length run without one ([budget] fixed_length).
+    local org token state=closed
+    org="$(profile_value ORG_NAME)"
     token="$(sudo -n cat "$(profile_value DATA_ROOT)/$PROFILE/tokens/agent-$org-worker1.token")"
     curl -fsS -X PATCH -H "Authorization: token $token" -H 'Content-Type: application/json' -d '{"state":"closed"}' \
         "http://localhost:$(profile_value EDGE_HTTP_PORT)/api/v1/repos/$org/main/issues/1" >/dev/null \
@@ -469,7 +532,6 @@ POST
         sleep 5
     done
     [ "$state" = open ] || die "issue #1 closed by a worker was not reopened"
-    log "product owner: accounts exist, a mention was urgent for $org-worker1 only, digests posted, a worker's close of #1 was reopened"
 }
 
 push_upstream_change() {
@@ -534,10 +596,11 @@ check_outputs() {
         log "submission has every contribution; $archives shutdown archives verified"
         return
     fi
-    python3 - "$task_out" "$UPSTREAM" "$WORKERS" "$org" "$INTERRUPT" <<'CHECK' >&2 || die "delivery check failed"
+    python3 - "$task_out" "$UPSTREAM" "$WORKERS" "$org" "$INTERRUPT" "$SNAPSHOT" <<'CHECK' >&2 || die "delivery check failed"
 import json, subprocess, sys
 from pathlib import Path
 task_out, upstream, workers, org, interrupted = Path(sys.argv[1]), sys.argv[2], int(sys.argv[3]), sys.argv[4], sys.argv[5] == '1'
+snapshot = sys.argv[6] == '1'
 delivery = json.loads((task_out / 'delivery.json').read_text())
 if delivery.get('mode') != 'branch':
     sys.exit(f'unexpected delivery {delivery}')
@@ -556,15 +619,23 @@ if missing or not {'widget.py', 'test_widget.py'} <= files:
     sys.exit(f'{branch} lacks {sorted(missing)} or the upstream files: {sorted(files)}')
 if delivery['commits'] < workers:
     sys.exit(f'expected at least {workers} new commits, got {delivery["commits"]}')
-if not interrupted:
+if snapshot:
+    # Replayed onto upstream as one commit; the sanitized file is upstream's own, untouched.
+    if git('rev-parse', f'{branch}~1').stdout.strip() != base or 'holdout.txt' not in files:
+        sys.exit(f'{branch} is not one replayed commit on {base[:12]} with the upstream files')
+if not interrupted and not snapshot:
     # The upstream commit pushed during the run arrived through a sync (on resume or final).
     if 'upstream_note.txt' not in files or delivery.get('sync') not in ('merged', 'up-to-date'):
         sys.exit(f'the final upstream sync is missing: sync={delivery.get("sync")}')
+if not interrupted:
     acceptance = json.loads((task_out / 'acceptance.json').read_text())
-    if not acceptance['all_passed'] or acceptance['head'] != delivery['head']:
+    # The final commands run git on the checkout, read the private directory and call
+    # the model route.
+    if len(acceptance['results']) != 4 or not acceptance['all_passed'] or acceptance['head'] != delivery['head']:
         sys.exit(f'acceptance did not pass on the delivered head: {acceptance}')
-    if delivery['head'] not in acceptance['results'][-1]['output_tail']:
-        sys.exit(f'git did not read the delivered checkout during acceptance: {acceptance["results"][-1]}')
+    git_log = next(r for r in acceptance['results'] if r['command'].startswith('git log'))
+    if delivery['head'] not in git_log['output_tail']:
+        sys.exit(f'git did not read the delivered checkout during acceptance: {git_log}')
 print(f'delivered {branch}: {delivery["commits"]} commit(s) on upstream {base[:12]}'
       + ('' if interrupted else '; acceptance passed on the delivered head'))
 CHECK
