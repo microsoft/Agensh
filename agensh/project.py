@@ -61,6 +61,9 @@ class Project:
     planning: bool = False
     planning_timeout: int = 2700
     review_paths: tuple = ()
+    # [budget] fixed_length: the run uses its whole wall-clock budget; a worker
+    # closing issue #1 does not end it (comparisons across team sizes need this).
+    fixed_length: bool = False
     # [workspace] history = "snapshot": import the (sanitized) tree as one commit, no history.
     history: str = 'full'
     sanitize: str = ''
@@ -172,7 +175,10 @@ def load_project(path):
             for k, v in models.items()):
         raise ProjectError('[team.models] maps worker numbers to model ids, e.g. "3" = "gpt-5.6-mini"')
     budget = data.get('budget', {})
-    _known(budget, ('hours', 'max_model_tokens'), '[budget]')
+    _known(budget, ('hours', 'max_model_tokens', 'fixed_length'), '[budget]')
+    fixed_length = budget.get('fixed_length', False)
+    if not isinstance(fixed_length, bool):
+        raise ProjectError('[budget] fixed_length must be true or false')
     max_tokens = budget.get('max_model_tokens', 0)
     if isinstance(max_tokens, bool) or not isinstance(max_tokens, int) or max_tokens < 0:
         raise ProjectError('[budget] max_model_tokens must be a non-negative integer (0: no limit)')
@@ -220,6 +226,7 @@ def load_project(path):
                    human=username if mode == 'optional' else '', digest_seconds=digest if mode == 'optional' else 0,
                    planning=planning, planning_timeout=planning_timeout, review_paths=review_paths,
                    models={int(k): v for k, v in models.items()}, history=history, sanitize=sanitize,
+                   fixed_length=fixed_length,
                    acceptance_final=_commands(acceptance['final'], '[acceptance] final') if 'final' in acceptance else (),
                    private_dir=private_dir,
                    protected_paths=protected, ci_timeout_minutes=timeout)
@@ -324,6 +331,8 @@ def write_profile(project, args, env_dir=ROOT):
         keys.append(('AGENSH_NETWORK', project.network))
     if project.max_model_tokens:
         keys.append(('AGENSH_MAX_MODEL_TOKENS', project.max_model_tokens))
+    if project.fixed_length:
+        keys.append(('AGENSH_FIXED_LENGTH', 1))
     if project.human:
         keys += [('AGENSH_HUMAN', project.human), ('AGENSH_DIGEST_S', project.digest_seconds)]
     if project.planning:

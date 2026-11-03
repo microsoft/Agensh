@@ -74,6 +74,8 @@ class ProjectFileTest(unittest.TestCase):
                                           'digest = "30m"\n[coordination]\nplanning = true\n'))
         self.assertEqual((project.human, project.digest_seconds, project.planning, project.planning_timeout),
                          ('owner', 1800, True, 2700))
+        fixed = load_project(self.write(PROJECT.format(upstream='u') + '[budget]\nfixed_length = true\n'))
+        self.assertTrue(fixed.fixed_length)
         self.assertEqual(load_project(self.write(PROJECT.format(upstream='u'))).human, '')
         project = load_project(self.write(PROJECT.format(upstream='u').replace('workers = 2', 'workers = 2\nmodels = { "2" = "mini" }')
                                           + '[coordination]\nreview_paths = ["src/core/**"]\n'))
@@ -104,6 +106,7 @@ class ProjectFileTest(unittest.TestCase):
             PROJECT + '[human]\nmode = "always"\n': 'mode must be',
             PROJECT + '[human]\nmode = "optional"\nusername = "team-worker1"\n': 'not used by the team',
             PROJECT + '[coordination]\nplanning = "yes"\n': 'planning must be',
+            PROJECT + '[budget]\nfixed_length = "yes"\n': 'fixed_length must be',
             PROJECT.replace('workers = 2', 'workers = 2\nmodels = { "3" = "m" }'): '[team.models]',
             PROJECT + '[coordination]\nreview_paths = ["a;b"]\n': 'list of path globs',
             PROJECT.replace('workers = 2', 'workers = 1') + '[coordination]\nreview_paths = ["src/**"]\n': 'at least two workers',
@@ -145,6 +148,7 @@ class ProfileTest(unittest.TestCase):
         self.assertEqual(values['AGENSH_PROTECTED_FILES'], '.gitea/workflows/**;.agensh/**;tests/acceptance/**')
         self.assertEqual(values['ACT_JOB_TIMEOUT'], '20m')
         self.assertEqual(values['AGENSH_MAX_MODEL_TOKENS'], '5000')
+        self.assertNotIn('AGENSH_FIXED_LENGTH', values)
         for key in ('EDGE_HTTP_PORT', 'AGENSH_SUBNET_DEFAULT', 'GITEA_ADMIN_PASSWORD', 'MYSQL_PASSWORD'):
             self.assertEqual(values[key], second[key], key)
 

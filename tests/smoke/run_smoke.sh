@@ -195,6 +195,8 @@ $([ "$WORKERS" -ge 2 ] && printf '[team.models]\n# Worker 2'"'"'s requests go to
 # route: 91% of this, enough for the warning. Other team sizes get room instead (no warning
 # check). The final evaluation's request is outside the budget.
 max_model_tokens = $([ "$WORKERS" = 2 ] && echo 820 || echo $((1000 * WORKERS)))
+# Without a product owner the run keeps its full length: a worker's close of #1 is reopened.
+fixed_length = $([ "$HUMAN" = 1 ] && echo false || echo true)
 [human]
 mode = "$([ "$HUMAN" = 1 ] && echo optional || echo none)"
 username = "owner"
@@ -320,7 +322,12 @@ print(f"board entries: {len(entries)}")
         [ "$WORKERS" -lt 2 ] || check_planning
         [ "$WORKERS" -lt 2 ] || check_models
         check_model_route
-        [ "$HUMAN" = 1 ] && check_human
+        if [ "$HUMAN" = 1 ]; then
+            check_human
+        else
+            check_issue_reopened
+            log "fixed-length run: a worker's close of #1 was reopened"
+        fi
         python3 tests/smoke/check_gate.py "$ENV_FILE" "$OUT/run/$TASK" || die "CI gate check failed"
         [ "$SNAPSHOT" = 1 ] || push_upstream_change
     fi
@@ -498,7 +505,15 @@ POST
     done
     ls "$OUT/run/$TASK/digests/"digest-*.md >/dev/null 2>&1 || die "no progress digest was posted"
     # Only the owner ends the run by closing issue #1; a worker's close is reopened.
-    local token state=closed
+    check_issue_reopened
+    log "product owner: accounts exist, a mention was urgent for $org-worker1 only, digests posted, a worker's close of #1 was reopened"
+}
+
+check_issue_reopened() {
+    # A worker's close of issue #1 does not end the run: with a product owner, or in a
+    # fixed-length run without one ([budget] fixed_length).
+    local org token state=closed
+    org="$(profile_value ORG_NAME)"
     token="$(sudo -n cat "$(profile_value DATA_ROOT)/$PROFILE/tokens/agent-$org-worker1.token")"
     curl -fsS -X PATCH -H "Authorization: token $token" -H 'Content-Type: application/json' -d '{"state":"closed"}' \
         "http://localhost:$(profile_value EDGE_HTTP_PORT)/api/v1/repos/$org/main/issues/1" >/dev/null \
@@ -509,7 +524,6 @@ POST
         sleep 5
     done
     [ "$state" = open ] || die "issue #1 closed by a worker was not reopened"
-    log "product owner: accounts exist, a mention was urgent for $org-worker1 only, digests posted, a worker's close of #1 was reopened"
 }
 
 push_upstream_change() {

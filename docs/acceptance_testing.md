@@ -7,8 +7,7 @@ pull request for people to review. ProgramBench remains as the regression pack.
 This guide is for people trying the build on their own projects; the
 [design](task_pack_design.md) explains the reasoning.
 
-Build under test: branch `task-pack-decoupling` of
-[sd983527/Agensh](https://github.com/sd983527/Agensh/tree/task-pack-decoupling).
+Build under test: `main` of [microsoft/Agensh](https://github.com/microsoft/Agensh).
 
 ## What to expect
 
@@ -55,7 +54,7 @@ Build under test: branch `task-pack-decoupling` of
 Get the build and check it on your host:
 
 ```bash
-git clone -b task-pack-decoupling https://github.com/sd983527/Agensh.git && cd Agensh
+git clone https://github.com/microsoft/Agensh.git && cd Agensh
 python3 -m unittest discover -s tests/unit
 SMOKE_PACK=software-project bash tests/smoke/run_smoke.sh
 ```
@@ -245,7 +244,7 @@ including token use per worker. Remove a finished team's state with
 
 ## Reporting
 
-Open an issue on [sd983527/Agensh](https://github.com/sd983527/Agensh/issues)
+Open an issue on [microsoft/Agensh](https://github.com/microsoft/Agensh/issues)
 with: the project file (without secrets), harness and model, worker count and
 budget, what you expected and what happened, and the run's
 `out/projects/<name>/` JSON files and `service-logs/` (check them for secrets
