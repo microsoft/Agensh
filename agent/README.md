@@ -9,6 +9,7 @@ loop described in [the report](../agensh.pdf).
 | `Dockerfile.base` | Caches the upstream Gitea MCP binary in an artifact image |
 | `Dockerfile` | Extends a v6 cleanroom with one selected harness, private Node and MCP tools |
 | `entrypoint.sh` | Configures team or standalone workers and starts the shared supervisor |
+| `render_agents.sh` | Renders `/work/AGENTS.md` from the core template and the task pack's prompt fragments |
 | [copilot/](copilot/) | Copilot team and standalone setup, using its native ACP runtime |
 | [pi/](pi/) | Pi configuration and native RPC-to-ACP adapter |
 | [codex/](codex/) | Codex configuration and native app-server-to-ACP adapter |
@@ -151,7 +152,7 @@ The team uses `/var/run/acp/agent.sock`; the standalone Compose entrypoint
 uses `/opt/data/acp.sock` and mounts its workspace at both `/workspace` and `/work`.
 
 Build `Dockerfile` from the repository root, or use
-[`scripts/pbench_build_pertask_images.sh`](../scripts/pbench_build_pertask_images.sh).
+[`tasks/programbench/scripts/build_images.sh`](../tasks/programbench/scripts/build_images.sh).
 For direct builds, pass `--build-arg AGENT_HARNESS=copilot`, `pi`, `codex` or `claude` alongside
 `TASK_IMAGE`. Team image names include the selected harness to avoid tag collisions.
 The [generated Compose stack](../tools/README.md) also mounts prompts, config,

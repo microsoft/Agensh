@@ -340,7 +340,8 @@ async def _shutdown() -> None:
 
 @app.get("/pending/{agent}")
 async def get_pending(agent: str, limit: int = 50) -> Dict[str, Any]:
-    # Only new DM posts and peer gists use this path; edits/reactions stay queued.
+    # Only new DM posts, events the router marked urgent (the product owner's
+    # mentions and comments) and peer gists use this path; edits/reactions stay queued.
     lease_token = await _claim_pending_lease(agent)
     if lease_token is None:
         return {"agent": agent, "notices": []}
@@ -351,7 +352,8 @@ async def get_pending(agent: str, limit: int = 50) -> Dict[str, Any]:
                 "SELECT e.id, e.payload FROM events e "
                 " LEFT JOIN shown s ON s.event_id = e.id AND s.agent = e.agent "
                 " WHERE e.agent = %s AND e.state = 'pending' "
-                "   AND JSON_UNQUOTE(JSON_EXTRACT(e.payload, '$.kind')) = 'dm' "
+                "   AND (JSON_UNQUOTE(JSON_EXTRACT(e.payload, '$.kind')) = 'dm' "
+                "        OR JSON_EXTRACT(e.payload, '$.urgent') = true) "
                 "   AND s.event_id IS NULL "
                 " ORDER BY e.id ASC LIMIT %s",
                 (agent, max(1, min(200, int(limit)))),

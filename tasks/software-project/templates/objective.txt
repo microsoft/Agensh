@@ -1,0 +1,29 @@
+# ⚙️ Current task: ${PROJECT}
+
+## Goal
+
+${GOAL}
+## How the result is judged
+
+- Every change reaches `main` through a PR that passes the PR checks:
+${ACCEPTANCE_PR}
+- `main` must keep passing the full suite:
+${ACCEPTANCE_MAIN}
+- When the run ends, `main` is delivered upstream as a pull request that people review
+  before anything is merged. Only work merged into `main` is delivered.
+
+## Rules
+
+1. ${HUMAN_RULE}
+2. ${LANGUAGE}
+3. ${NETWORK}
+4. Follow the repository's conventions: its build, test and style tools, layout and
+   commit style. Do not rewrite code the goal does not need.
+5. Never commit secrets, credentials or personal data.
+6. Keep each chat message under 100 words: decisions, direct questions and short
+   conclusions. Put details, logs and reasoning in issues, PRs and board entries.
+
+## The first step is always
+
+Read issue #1 and the repository: the README, the build and test setup, and the code
+the goal touches.

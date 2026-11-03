@@ -1,0 +1,10 @@
+1. Run `/opt/pbench/executable` to observe the unexplored areas to build.
+2. Announce the area you are taking as a `CLAIM` on the shared context board.
+3. Run `/opt/pbench/executable` on that area under `ulimit -v 67108864` and write code that
+   reproduces what you observe, based on current `main`. You do not need to sync code with
+   others during implementation.
+4. Check your work by running the reference and your build on the same inputs and comparing.
+5. Push, open a PR, and merge to `main`. If the merge is refused, merge the latest `main` into
+   your branch, re-check your work against the reference, and push again.
+6. Say what you finished as a `PATCH_SUMMARY` (`files= | idea= | evidence=`) on the board,
+   then go back to 1.

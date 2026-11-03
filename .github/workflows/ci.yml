@@ -1,0 +1,85 @@
+# Unit tests, router typecheck, script syntax and the render-diff report.
+# The render check reports differences in the job summary without failing,
+# because intended prompt or Compose changes are reviewed in the PR.
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  board:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install pyyaml==6.0.2
+      - run: python -m unittest discover -s board-service/tests -v
+      - name: Host tool tests (usage metering through the real proxy)
+        run: python -m unittest discover -s tests/unit -v
+
+  router:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: mini-router
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: mini-router/package-lock.json
+      - run: npm ci --no-audit --no-fund
+      - run: npm run typecheck
+      - run: npm test
+
+  scripts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Shell syntax
+        run: git ls-files '*.sh' | xargs -r -n1 bash -n
+      - name: Python syntax
+        run: git ls-files '*.py' | xargs -r python -m py_compile
+
+  render:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: sudo apt-get install -y --no-install-recommends gettext-base
+      - name: Render check
+        run: |
+          status=0
+          bash scripts/render_check.sh "origin/${{ github.base_ref }}" || status=$?
+          {
+            if [ "$status" = 0 ]; then
+              echo "No rendered differences from \`${{ github.base_ref }}\`."
+            elif [ "$status" = 3 ]; then
+              echo "Rendered outputs differ from \`${{ github.base_ref }}\`; list intended differences in the PR."
+              echo
+              echo '```diff'
+              head -c 60000 out/render-check/render.diff
+              echo '```'
+            else
+              echo "Rendering failed (exit status $status); see the job log."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          # Status 3 means rendered differences; anything else non-zero is a failure.
+          if [ "$status" = 3 ]; then
+            echo "::warning::rendered outputs differ from ${{ github.base_ref }}"
+          elif [ "$status" != 0 ]; then
+            exit "$status"
+          fi

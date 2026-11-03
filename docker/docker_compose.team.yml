@@ -1,0 +1,75 @@
+# Overlay the generated team base with isolated worker networking and model egress.
+# Only the egress proxy and edge proxy join bridges that can leave the private network.
+networks:
+  default:
+    internal: true
+    ipam:
+      config:
+        - subnet: ${AGENSH_SUBNET_DEFAULT:-10.176.253.0/24}
+  egress:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: ${AGENSH_SUBNET_EGRESS:-10.176.254.0/24}
+  edge:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: ${AGENSH_SUBNET_EDGE:-10.176.255.0/24}
+
+services:
+  nginx-edge:
+    networks:
+      - default
+      - edge
+    ports:
+      - "${AGENSH_PUBLIC_PORT:-}:80"
+
+  egress-proxy:
+    # Inject the real model credential here; workers use a local proxy credential.
+    image: python:3.13-slim
+    restart: unless-stopped
+    cgroup_parent: agensh.slice
+    networks:
+      - default
+      - egress
+    environment:
+      UPSTREAM: "${AGENSH_LLM_UPSTREAM:?AGENSH_LLM_UPSTREAM required (the real LLM VM)}"
+      LISTEN_PORT: "4180"
+      LISTEN_HOST: "0.0.0.0"
+      UPSTREAM_DISABLED_TOOLS: functions.request_user_input,functions.request_user_input_async,request_user_input,request_user_input_async
+      UPSTREAM_CODE_MODE_OUTPUT_TOKENS: "${TOOL_OUTPUT_BYTES:-1048576}"
+      UPSTREAM_MAX_OUTPUT_TOKENS: "${OUTPUT_TOKENS:-0}"
+      UPSTREAM_TOOL_OUTPUT_BYTES: "${TOOL_OUTPUT_BYTES:-1048576}"
+      UPSTREAM_AGENT_HARNESS: "${AGENT_HARNESS:-copilot}"
+      UPSTREAM_ANTHROPIC_MODEL: "${LLM_MODEL:-gpt-5.6-sol}"
+      UPSTREAM_ANTHROPIC_EFFORT: "${REASONING_EFFORT:-high}"
+      UPSTREAM_RESPONSE_VERBOSITY: low
+      UPSTREAM_STRIP_REASONING: "${STRIP_REASONING:-0}"
+      UPSTREAM_REQUEST_TIMEOUT_SECONDS: "600"
+      UPSTREAM_AUTH_TOKEN: "${UPSTREAM_AUTH_TOKEN:-}"
+      UPSTREAM_AUTH_STYLE: "${UPSTREAM_AUTH_STYLE:-bearer}"
+      UPSTREAM_RETRY_ATTEMPTS: "${UPSTREAM_RETRY_ATTEMPTS:-4}"
+      UPSTREAM_USAGE_LOG: /data/usage/usage.jsonl
+      UPSTREAM_MAX_MODEL_TOKENS: "${AGENSH_MAX_MODEL_TOKENS:-0}"
+      UPSTREAM_AGENT_MODELS: "${AGENSH_AGENT_MODELS:-}"
+    volumes:
+      - ../scripts/strip_metadata_proxy.py:/opt/strip_metadata_proxy.py:ro
+      - ../scripts/code_mode_limits.py:/opt/code_mode_limits.py:ro
+      - ../scripts/usage_meter.py:/opt/usage_meter.py:ro
+      - ${DATA_ROOT:-../.claude-team-data}/${PROFILE}/usage:/data/usage
+    command: ["python3", "/opt/strip_metadata_proxy.py"]
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request,sys; urllib.request.urlopen('http://127.0.0.1:4180/healthz', timeout=2); sys.exit(0)\" 2>/dev/null || python3 -c \"import socket,sys; s=socket.socket(); s.settimeout(2); sys.exit(0 if s.connect_ex(('127.0.0.1',4180))==0 else 1)\""]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  mysql:
+    # TCP readiness waits for the serving database rather than its initialization socket.
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -P 3306 --protocol=TCP -uroot -p$$MYSQL_ROOT_PASSWORD"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 300s

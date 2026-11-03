@@ -1,0 +1,1 @@
+The team has used ${PERCENT}% of its model token budget (${USED} of ${LIMIT} tokens). Wrap up: finish and merge the work you are on, push anything worth keeping to a branch, and record open threads as issues or board entries. Do not start new large pieces. When the budget is spent the run pauses and later resumes from the repository, the issues and the board.

@@ -1,61 +1,23 @@
-# Launch scripts
+# Core scripts
 
-Host-side setup, launch, evaluation and recovery for the released single-node
-team and standalone baseline. Run commands from the repository root; full
-prerequisites and configuration examples are in the
+Task-neutral host scripts for running a team and its model proxy. Task packs
+bring their own launch scripts; the ProgramBench ones are in
+[`tasks/programbench/`](../tasks/programbench/README.md). Run commands from the
+repository root; full prerequisites and configuration examples are in the
 [reproduction guide](../REPRODUCE.md).
 
 | File(s) | Responsibility |
 |---|---|
-| `pbench_gen_env.sh` | Writes private per-task profiles, preserving passwords and allocating ports/subnets |
-| `launch_single_node.sh` | Checks all team profiles, images, host guards and the live model route before launch |
-| `lib_launch.sh` | Profile/run naming, environment precedence and inference/evaluation sequencing |
-| `pbench_run.sh` | Seeds one task, starts workers, sends reminders/idle nudges, exports and stops workers |
-| `pbench_chain.sh` | Separates run/eval phases, salvages interrupted output and verifies trajectory copies before cleanup |
-| `pbench_build_pertask_images.sh`, `lib_pbench_images.sh` | Builds v6-based worker images and enforces the reference cleanroom tag |
-| `launch_single_agent.py` | Runs the standalone baseline from JSON config with provenance, snapshots and export |
-| `acp_driver.py`, `single_agent_stdio.py` | Drives immediate ACP continuation through the worker's Unix socket |
+| `team_run.sh` | Runs one task with the [team driver](../agensh/README.md) and the profile's task pack |
+| `team_status.py` | Summarizes a running profile: containers, native activity, events, token usage, board entries and PRs |
 | `strip_metadata_proxy.py` | Relays model HTTP traffic, removes unsupported fields, injects auth and retries selected failures |
 | `code_mode_limits.py` | Supplies native Code Mode defaults and the strict Codex tool-result text byte guard |
-| `pbench_docker_sudo.sh` | Evaluator Docker shim for memory/network settings and appended pytest options |
-| `pbench_reboot_guard.sh` | Stops labeled orphan stacks after reboot while retaining their data |
+| `egress_filter.py` | Forward proxy for the `allowlist` network: package registries plus project domains, every decision logged |
+| `usage_meter.py` | Parses token usage from buffered model responses and keeps per-agent totals for the proxy |
+| `agensh_reboot_guard.sh` | Stops labeled orphan stacks after reboot while retaining their data |
+| `lib_prompts.sh` | `render_prompt`, shared by the runner and the render snapshot |
+| `render_check.sh` | Diffs rendered prompts, profiles and Compose files against a base revision (default `upstream/main`, then `origin/main`); exits 3 on differences |
 
-Team inference runs one task at a time; completed-task evaluation can overlap
-the next task. `RUN_ID` names trajectories, while profile suffixes, ports,
-subnets and data roots isolate concurrent stacks. The normal team deadline
-exports committed Git HEAD before graceful worker shutdown; final state archives
-are recovery artifacts and can contain later work.
-
-The standalone driver immediately resumes completed turns while more than
-60 seconds remain, and tries to reload native sessions after transport failures.
-Its periodic and final snapshots stage and commit non-ignored workspace changes
-before source export. The team exports Gitea HEAD before shutdown, waits for
-queued events between turns and uses a separate idle watchdog. Both paths use
-[`agent/archive.py`](../agent/archive.py) to verify shutdown archives.
-Canonical comparison scores come from
-[`tools/pbench_score_report.py`](../tools/pbench_score_report.py); the chain's
-`SCORE` line counts raw attempt rows.
-
-`pbench_build_pertask_images.sh` uses `TAG` (default `pbench`) for output images
-and the fixed `omcgitea-agent-base:pbench` artifact. Profile generation instead
-uses `AGENT_IMAGE_TAG`; exporting that variable alone does not retag builds.
-All launchers resolve shared settings through
-[`agent/harness_config.py`](../agent/harness_config.py), using
-[`agent/config/harness.json`](../agent/config/harness.json) by default.
-`--harness-config` selects an override file for model, reasoning effort, prompt
-and output budgets, and compaction. Profiles retain those settings, and preflight
-validates them instead of forcing high reasoning or a fixed context budget.
-Pass `--agent-harness copilot`, `--agent-harness pi`, `--agent-harness codex` or
-`--agent-harness claude` consistently
-to both scripts and `launch_single_node.sh`, with `--harness-version VERSION`
-to select an exact release. The arguments override the environment; defaults
-are Copilot 1.0.70, Pi 1.4.0, Codex 0.164.0 and the latest Claude Code release.
-Latest versions are resolved to exact package versions before launch. Image names include the
-harness: `omcgitea-agent-<task-slug>-<harness>:<tag>`. The standalone launcher accepts
-the same arguments, overriding its optional `agent_harness` and `harness_version`
-JSON fields. Each image contains
-only the selected harness; private Node also serves the team's MCP helpers.
-The image checks reject combined or mismatched installations.
 Pi output limits and the Codex catalog are prepared at runtime from the selected
 configuration. Both proxy Compose paths mount
 `code_mode_limits.py`, apply a 600-second total request deadline and use low
@@ -77,6 +39,29 @@ tool budgets remain effective. Copilot and Pi keep their native Responses
 tool-output handling; Claude uses the Messages tool-result guard.
 The shared MCP allowlist is in
 [`agent/config/mcp_allowed_tools.json`](../agent/config/mcp_allowed_tools.json).
+
+The proxy accounts token usage per agent. Each team worker sends
+`local-proxy-<agent>` as its proxy key, which labels requests for metering and is
+not a credential; the proxy is reachable only on the private network and
+replaces the key with the upstream credential. Requests with any other key are
+counted as `unlabelled`. Usage comes from the buffered response's `usage` fields
+(Responses, Chat Completions and Anthropic Messages, as JSON or SSE). Responses
+and Chat Completions include cached tokens in `input_tokens`; Messages keep cache
+reads and writes in `cached_input_tokens` and `cache_creation_input_tokens`.
+Team runs append one record per model request, without prompt content, to
+`$DATA_ROOT/<profile>/usage/usage.jsonl`, and the proxy serves current totals at
+`GET /usage` on port 4180. Accounting failures never block forwarding.
+
+While a team runs, summarize it with:
+
+```bash
+python3 scripts/team_status.py "$PROFILE"         # table
+python3 scripts/team_status.py --json "$PROFILE"  # machine-readable
+```
+
+It reads the profile file and queries the containers through `sudo -n docker`
+(set `DOCKER` to override), without changing anything. Idle time comes from the
+same native journals the watchdog scans.
 
 Team runs save each container's timestamped stdout/stderr under the task output's
 `service-logs/` before teardown, including the model proxy and all routers.

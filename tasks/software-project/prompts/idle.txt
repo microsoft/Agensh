@@ -1,0 +1,1 @@
+There is always more to do toward the goal in issue #1: look at the open issues, the board and `main` for gaps, untested paths or failing checks, claim one and close it.

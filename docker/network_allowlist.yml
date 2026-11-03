@@ -1,0 +1,24 @@
+# Overlay for network = "allowlist": workers stay on the internal network and reach
+# package registries only through egress-filter (scripts/egress_filter.py), which
+# joins the egress bridge. Workers get its address as HTTP(S)_PROXY from Compose.
+services:
+  egress-filter:
+    image: python:3.13-slim
+    restart: unless-stopped
+    cgroup_parent: agensh.slice
+    networks:
+      - default
+      - egress
+    environment:
+      LISTEN_PORT: "3128"
+      ALLOW_DOMAINS: "${AGENSH_ALLOW_DOMAINS:-}"
+      EGRESS_LOG: /data/egress/egress.jsonl
+    volumes:
+      - ../scripts/egress_filter.py:/opt/egress_filter.py:ro
+      - ${DATA_ROOT:-../.claude-team-data}/${PROFILE}/egress:/data/egress
+    command: ["python3", "/opt/egress_filter.py"]
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import socket,sys; s=socket.socket(); s.settimeout(2); sys.exit(0 if s.connect_ex(('127.0.0.1',3128))==0 else 1)\""]
+      interval: 10s
+      timeout: 5s
+      retries: 12

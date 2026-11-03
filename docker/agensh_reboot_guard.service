@@ -1,0 +1,16 @@
+# Boot-time cleanup for experiment stacks whose host-side driver did not survive.
+# Replace /opt/agensh with the checkout path when installing this systemd unit.
+[Unit]
+Description=Tear down orphaned Agensh team stacks after a reboot
+After=docker.service network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=no
+TimeoutStartSec=1800
+ExecStart=/opt/agensh/scripts/agensh_reboot_guard.sh
+SuccessExitStatus=0 1
+
+[Install]
+WantedBy=multi-user.target

@@ -31,9 +31,13 @@ Skills remain enabled in every harness.
 | Event routing and messaging | [mini-router/](mini-router/README.md) |
 | Bootstrap-issued worker tokens | [secret-service/](secret-service/README.md) |
 | Compose, provisioning and host guards | [docker/](docker/README.md) |
-| Runtime instructions and launch messages | [prompts/](prompts/README.md) |
-| Launch and lifecycle scripts | [scripts/](scripts/README.md) |
-| Compose generation, submission export and scoring | [tools/](tools/README.md) |
+| Core worker instructions and kickoff | [prompts/](prompts/README.md) |
+| Team driver, pack loading and allocation | [agensh/](agensh/README.md) |
+| ProgramBench pack: prompts, hooks, launch scripts, standalone baseline, submission and scoring | [tasks/programbench/](tasks/programbench/README.md) |
+| Software-project pack: real repositories, project files, delivery as pull requests | [tasks/software-project/](tasks/software-project/README.md) |
+| Core scripts: team runner, status, model proxy, render check | [scripts/](scripts/README.md) |
+| Compose generation and render snapshot | [tools/](tools/README.md) |
+| Unit and smoke tests | [tests/smoke/](tests/smoke/README.md) |
 
 ## Prerequisites
 
@@ -41,23 +45,23 @@ Use Linux with Docker Engine, Compose v2, systemd and cgroup v2. Host tools
 include Bash, Make, Python 3.11+, Git, curl, jq, `envsubst`, `flock` and `uv`.
 The scripts require passwordless `sudo` for Docker and container-owned data.
 
-Install the [memory slice](docker/pbench.slice) and
-[reboot-guard unit](docker/pbench_reboot_guard.service) once, replacing the
+Install the [memory slice](docker/agensh.slice) and
+[reboot-guard unit](docker/agensh_reboot_guard.service) once, replacing the
 unit's `/opt/agensh` path with this checkout:
 
 ```bash
-sudo cp docker/pbench.slice /etc/systemd/system/
-sed "s|/opt/agensh|$PWD|g" docker/pbench_reboot_guard.service \
-  | sudo tee /etc/systemd/system/pbench-reboot-guard.service >/dev/null
+sudo cp docker/agensh.slice /etc/systemd/system/
+sed "s|/opt/agensh|$PWD|g" docker/agensh_reboot_guard.service \
+  | sudo tee /etc/systemd/system/agensh-reboot-guard.service >/dev/null
 sudo systemctl daemon-reload
-sudo systemctl enable pbench-reboot-guard.service
+sudo systemctl enable agensh-reboot-guard.service
 ```
 
 On a shared host, reuse working guards and their existing checkout path.
 Do not restart Docker, move shared image tags or stop other experiments.
-The [guard script](scripts/pbench_reboot_guard.sh) stops all running
+The [guard script](scripts/agensh_reboot_guard.sh) stops all running
 `omcgitea-*` Compose projects after reboot, retaining their data; it does not
-check driver liveness. Its `PBENCH_GUARD_DRY_RUN=1` mode previews that scope.
+check driver liveness. Its `AGENSH_GUARD_DRY_RUN=1` mode previews that scope.
 Preflight requires a configured slice and enabled guard.
 
 Install ProgramBench separately. Release validation used v1.2.5 at this commit:
@@ -76,9 +80,18 @@ inference to catch access and disk-space failures early.
 
 ## Configure the experiment
 
-Choose one or more supported task IDs from `TASK_TABLE` in
-[the profile generator](scripts/pbench_gen_env.sh). Set `TASKS` explicitly:
-the generator, image builder and launcher have different built-in task lists.
+Choose one or more task IDs and set `TASKS` explicitly: the generator, image
+builder and launcher have different built-in task lists. Tasks listed in
+`TASK_TABLE` in [the profile generator](tasks/programbench/scripts/gen_env.sh) keep fixed
+port and subnet offsets. Other tasks get the first free slot after the table,
+avoiding host ports in use, host routes, Docker networks and other profiles in
+`ENV_DIR`; regenerating their profile keeps that allocation.
+
+Worker containers keep a 64 GiB memory ceiling and no CPU limit by default.
+Export `WORKER_MEMORY` (for example `32g`) or `WORKER_CPUS` (a number, or `auto`
+for an even share of 80% of the host's CPUs) before profile generation to
+record a different setting; these change the experimental conditions, so record
+them with results.
 
 Shared settings live in [`agent/config/harness.json`](agent/config/harness.json):
 
@@ -200,7 +213,7 @@ run in the listed order with a separate `HOURS` budget each. Evaluator options
 apply to the whole sequence; use separate invocations when options differ.
 For standalone baselines, prepare one configuration and fresh run ID per task.
 
-Keep gateway credentials in `~/.pbench-upstream.env`, mode 600:
+Keep gateway credentials in `~/.agensh/upstream.env`, mode 600:
 
 ```dotenv
 LLM_UPSTREAM=https://your-gateway.example
@@ -211,15 +224,15 @@ LLM_UPSTREAM_TOKEN=replace-with-your-bearer-token
 this file. The egress proxy injects the real credential; workers receive only a
 local proxy credential. Generated profiles contain secrets and must stay private.
 
-Generate profiles with [pbench_gen_env.sh](scripts/pbench_gen_env.sh):
+Generate profiles with [gen_env.sh](tasks/programbench/scripts/gen_env.sh):
 
 ```bash
-bash scripts/pbench_gen_env.sh --harness-config "$HARNESS_CONFIG" \
+bash tasks/programbench/scripts/gen_env.sh --harness-config "$HARNESS_CONFIG" \
   --agent-harness "$AGENT_HARNESS" --harness-version "$HARNESS_VERSION"
 ```
 
 The script derives task slugs, image names, ports and subnets, preserves local
-passwords and writes mode-600 `.env.pbench-single-node-<task-slug>` files.
+passwords and writes mode-600 `.env.programbench-<task-slug>` files.
 `PROFILE_SUFFIX` adds an optional suffix; each profile gets a separate data
 root. For commands using `PROFILE`, set it to the `PROFILE` value in the
 selected generated file. Regeneration rewrites generated settings and drops
@@ -280,11 +293,11 @@ the Dockerfile, output tag and build context for
 | [secret-service/Dockerfile](secret-service/Dockerfile) | `omcgitea-secret-service:local` | `secret-service/` |
 | [docker/bootstrap/Dockerfile](docker/bootstrap/Dockerfile) | `omcgitea-bootstrap:local` | `docker/bootstrap/` |
 
-Then use [pbench_build_pertask_images.sh](scripts/pbench_build_pertask_images.sh)
+Then use [build_images.sh](tasks/programbench/scripts/build_images.sh)
 for the selected workers:
 
 ```bash
-JOBS=1 bash scripts/pbench_build_pertask_images.sh --harness-config "$HARNESS_CONFIG" \
+JOBS=1 bash tasks/programbench/scripts/build_images.sh --harness-config "$HARNESS_CONFIG" \
   --agent-harness "$AGENT_HARNESS" --harness-version "$HARNESS_VERSION"
 ```
 
@@ -324,7 +337,7 @@ Repeat the worker build for each selected task. Build the shared services
 from the table with private tags and `--no-cache` as well. If Docker's default
 build bridge is unavailable, `RUN` steps may need `--network host`.
 
-The [profile generator](scripts/pbench_gen_env.sh) accepts these image overrides
+The [profile generator](tasks/programbench/scripts/gen_env.sh) accepts these image overrides
 when exported before generation:
 
 | Setting | Value |
@@ -342,14 +355,14 @@ the baked worker entrypoint and rejects stale router/board images. See the
 
 ## Launch
 
-Use [launch_single_node.sh](scripts/launch_single_node.sh) for preflight and
+Use [launch.sh](tasks/programbench/scripts/launch.sh) for preflight and
 team launch, with the configured environment still exported:
 
 ```bash
-PREFLIGHT_ONLY=1 bash scripts/launch_single_node.sh --harness-config "$HARNESS_CONFIG" \
+PREFLIGHT_ONLY=1 bash tasks/programbench/scripts/launch.sh --harness-config "$HARNESS_CONFIG" \
   --agent-harness "$AGENT_HARNESS" --harness-version "$HARNESS_VERSION"
 mkdir -p out
-setsid nohup bash scripts/launch_single_node.sh --harness-config "$HARNESS_CONFIG" \
+setsid nohup bash tasks/programbench/scripts/launch.sh --harness-config "$HARNESS_CONFIG" \
   --agent-harness "$AGENT_HARNESS" --harness-version "$HARNESS_VERSION" \
   > out/single-node.launch.log 2>&1 < /dev/null &
 ```
@@ -358,11 +371,13 @@ Preflight checks all selected profiles, images, empty state, subnet capacity,
 prompt mounts and rendered worker counts. It makes a small live model request
 and starts temporary image-check containers. Launch only after it passes.
 
-The launcher uses [lib_launch.sh](scripts/lib_launch.sh) and
-[pbench_chain.sh](scripts/pbench_chain.sh) to sequence tasks and overlap
-completed-task evaluation with the next task. [pbench_run.sh](scripts/pbench_run.sh)
-handles service startup, task seeding, kickoff messages, reminders, idle nudges,
-submission export and shutdown.
+The launcher uses [lib_launch.sh](tasks/programbench/scripts/lib_launch.sh) and
+[chain.sh](tasks/programbench/scripts/chain.sh) to sequence tasks and overlap
+completed-task evaluation with the next task. [team_run.sh](scripts/team_run.sh)
+runs the task-neutral [team driver](agensh/team_run.py), which handles service
+startup, the seed push, kickoff messages, reminders, idle nudges and shutdown.
+The [ProgramBench pack](tasks/programbench/README.md) supplies cleanroom seeding,
+submission export and evaluation as hooks.
 
 | Artifact | Location |
 |---|---|
@@ -379,20 +394,20 @@ Pi, with 1.4.0 shown as the default release:
 
 ```bash
 HARNESS_VERSION=1.4.0
-bash scripts/pbench_gen_env.sh --agent-harness pi --harness-version "$HARNESS_VERSION"
-JOBS=1 bash scripts/pbench_build_pertask_images.sh --agent-harness pi --harness-version "$HARNESS_VERSION"
-PREFLIGHT_ONLY=1 bash scripts/launch_single_node.sh --agent-harness pi --harness-version "$HARNESS_VERSION"
-bash scripts/launch_single_node.sh --agent-harness pi --harness-version "$HARNESS_VERSION"
+bash tasks/programbench/scripts/gen_env.sh --agent-harness pi --harness-version "$HARNESS_VERSION"
+JOBS=1 bash tasks/programbench/scripts/build_images.sh --agent-harness pi --harness-version "$HARNESS_VERSION"
+PREFLIGHT_ONLY=1 bash tasks/programbench/scripts/launch.sh --agent-harness pi --harness-version "$HARNESS_VERSION"
+bash tasks/programbench/scripts/launch.sh --agent-harness pi --harness-version "$HARNESS_VERSION"
 ```
 
 Codex, with 0.164.0 shown as the default release:
 
 ```bash
 HARNESS_VERSION=0.164.0
-bash scripts/pbench_gen_env.sh --agent-harness codex --harness-version "$HARNESS_VERSION"
-JOBS=1 bash scripts/pbench_build_pertask_images.sh --agent-harness codex --harness-version "$HARNESS_VERSION"
-PREFLIGHT_ONLY=1 bash scripts/launch_single_node.sh --agent-harness codex --harness-version "$HARNESS_VERSION"
-bash scripts/launch_single_node.sh --agent-harness codex --harness-version "$HARNESS_VERSION"
+bash tasks/programbench/scripts/gen_env.sh --agent-harness codex --harness-version "$HARNESS_VERSION"
+JOBS=1 bash tasks/programbench/scripts/build_images.sh --agent-harness codex --harness-version "$HARNESS_VERSION"
+PREFLIGHT_ONLY=1 bash tasks/programbench/scripts/launch.sh --agent-harness codex --harness-version "$HARNESS_VERSION"
+bash tasks/programbench/scripts/launch.sh --agent-harness codex --harness-version "$HARNESS_VERSION"
 ```
 
 Claude Code defaults to `latest`. Resolve it once, then use that exact version
@@ -401,10 +416,10 @@ for profile generation, image building and launch:
 ```bash
 HARNESS_VERSION=$(python3 agent/harness_config.py --agent-harness claude --harness-version latest \
   | python3 -c 'import json,sys; print(json.load(sys.stdin)["version"])')
-bash scripts/pbench_gen_env.sh --agent-harness claude --harness-version "$HARNESS_VERSION"
-JOBS=1 bash scripts/pbench_build_pertask_images.sh --agent-harness claude --harness-version "$HARNESS_VERSION"
-PREFLIGHT_ONLY=1 bash scripts/launch_single_node.sh --agent-harness claude --harness-version "$HARNESS_VERSION"
-bash scripts/launch_single_node.sh --agent-harness claude --harness-version "$HARNESS_VERSION"
+bash tasks/programbench/scripts/gen_env.sh --agent-harness claude --harness-version "$HARNESS_VERSION"
+JOBS=1 bash tasks/programbench/scripts/build_images.sh --agent-harness claude --harness-version "$HARNESS_VERSION"
+PREFLIGHT_ONLY=1 bash tasks/programbench/scripts/launch.sh --agent-harness claude --harness-version "$HARNESS_VERSION"
+bash tasks/programbench/scripts/launch.sh --agent-harness claude --harness-version "$HARNESS_VERSION"
 ```
 
 Change `HARNESS_VERSION` to the release you want. Each sequence builds and
@@ -445,11 +460,11 @@ scale automatically with `WORKERS`; reapply them after profile regeneration.
 
 ## Standalone single-agent baseline
 
-[launch_single_agent.py](scripts/launch_single_agent.py) runs the standalone
+[launch_single_agent.py](tasks/programbench/scripts/launch_single_agent.py) runs the standalone
 baseline from JSON. It handles cleanroom seeding, private prompts, isolation
 checks, snapshots,
-[ACP continuation](scripts/acp_driver.py), export and optional evaluation.
-Use [the standalone prompt guide](prompts/README.md#standalone-baseline) for its timing
+[ACP continuation](tasks/programbench/scripts/acp_driver.py), export and optional evaluation.
+Use [the standalone prompt guide](tasks/programbench/README.md#standalone-baseline) for its timing
 and prompt behavior.
 
 Create a private model environment file, mode 600, with the selected gateway
@@ -512,16 +527,16 @@ and proxy, publishes no host ports and reads credentials from `model_env_file`.
 
 Run the entrypoint in a persistent terminal or a systemd service
 with `Restart=no`; for a service, use the caller's UID/GID, this checkout as
-working directory, `pbench.slice` and at least 12 minutes of stop grace:
+working directory, `agensh.slice` and at least 12 minutes of stop grace:
 
 ```bash
-python3 scripts/launch_single_agent.py --harness-config "$HARNESS_CONFIG" \
+python3 tasks/programbench/scripts/launch_single_agent.py --harness-config "$HARNESS_CONFIG" \
   --agent-harness copilot --harness-version 1.0.70 \
   --config /absolute/path/to/baseline.json
 ```
 
 For Pi, Codex or Claude Code baselines, build the corresponding task image with
-`pbench_build_pertask_images.sh --agent-harness pi`, `--agent-harness codex` or
+`tasks/programbench/scripts/build_images.sh --agent-harness pi`, `--agent-harness codex` or
 `--agent-harness claude`, adding
 `--harness-version VERSION` for your chosen release. Update `agent_image` in the
 configuration, and use the same harness and version arguments on
@@ -540,20 +555,20 @@ with incomplete branches, and the chain may evaluate after an inference or
 export failure.
 
 For pytest-based branches, submitted project configuration can change JUnit
-test identities. The [Docker shim](scripts/pbench_docker_sudo.sh) can append
+test identities. The [Docker shim](tasks/programbench/scripts/eval_docker_shim.sh) can append
 `PBENCH_EVAL_PYTEST_ADDOPTS='--rootdir=.'` when identities should be relative to
 the branch working directory. For standalone runs, put the same value in
 `pytest_addopts`; exported team options are not copied into the JSON config.
 Choose options for the selected evaluator and inspect test-identity warnings.
 
 The chain's `SCORE` line counts raw attempts. Use
-[pbench_score_report.py](tools/pbench_score_report.py) for the canonical-kept
+[score_report.py](tasks/programbench/tools/score_report.py) for the canonical-kept
 score computed by ProgramBench's own helpers. Set `TASK_ID` to the full task ID
 and `RUN_DIR` to a directory containing `<task-id>/<task-id>.eval.json`:
 
 ```bash
 uv run --project "$PROGRAMBENCH_REPO" \
-  python tools/pbench_score_report.py "$RUN_DIR" "$TASK_ID"
+  python tasks/programbench/tools/score_report.py "$RUN_DIR" "$TASK_ID"
 ```
 
 For standalone runs, `RUN_DIR` is `run_dir/out`. Team archives store the JSON
@@ -564,7 +579,7 @@ Preserve the original JSON after evaluation failures. Resolve the external
 error and rerun evaluation on the unchanged submission. ProgramBench v1.2.5
 retries incomplete branches without `--force`; completed branches are retained.
 Inference does not need to be repeated. Evaluation and archiving are implemented
-in [pbench_chain.sh](scripts/pbench_chain.sh).
+in [chain.sh](tasks/programbench/scripts/chain.sh).
 
 ## Stop and recover
 
@@ -582,12 +597,12 @@ state on failure.
 
 [archive.py](agent/archive.py) seals and verifies HOME/workspace archives at
 `agents/<worker>/shutdown/<boot-id>/state.tar.gz`, including Git and ignored
-files. [pbench_chain.sh](scripts/pbench_chain.sh) copies trajectories, verifies
+files. [chain.sh](tasks/programbench/scripts/chain.sh) copies trajectories, verifies
 both copies and refuses cleanup after incomplete archives or failed copies.
 Inspect those artifacts before destructive cleanup.
 
 After `EXPORT_FAILED`, the repository remains in profile data or its archived
-trajectory. Recover committed source with [pbench_submission.py](tools/pbench_submission.py)
+trajectory. Recover committed source with [submission.py](tasks/programbench/tools/submission.py)
 before scoring. Existing output or profile data must be preserved before a
 fresh launch; the runner rejects leftover state.
 
@@ -597,16 +612,16 @@ The team budget includes staggered startup. The default ramp targets 30 seconds
 per worker for the first 120 workers, then 3 seconds, with a serial 20-second
 settle wait. Actual startup can exceed those targets; later workers get less
 time. The ramp can overrun the budget and is followed by a minimum 60-second
-wait. See [pbench_run.sh](scripts/pbench_run.sh) for
-`PBENCH_WAKE_STAGGER_S`, `PBENCH_WAKE_FAST_STAGGER_S`,
-`PBENCH_WAKE_RAMP_SUBJ_S` and `PBENCH_BRINGUP_SETTLE_S`. Deadline reminders start
+wait. See [the team driver](agensh/team_run.py) and [its timing rules](agensh/schedule.py) for
+`AGENSH_WAKE_STAGGER_S`, `AGENSH_WAKE_FAST_STAGGER_S`,
+`AGENSH_WAKE_RAMP_SUBJ_S` and `AGENSH_BRINGUP_SETTLE_S`. Deadline reminders start
 after the ramp and can be skipped when their target time has passed.
 
 The team idle watchdog checks every 60 seconds and nudges after 600 seconds of
 inactivity when queue checks permit, with at least 600 seconds between nudges.
 It uses the delivery prompt during the last 45 minutes of runs longer than
 45 minutes, or the last five minutes of runs at most 45 minutes long. The standalone
-[ACP driver](scripts/acp_driver.py) resumes immediately after a completed turn
+[ACP driver](tasks/programbench/scripts/acp_driver.py) resumes immediately after a completed turn
 and recovers silent requests after 600
 seconds. The team ACP silence watchdog defaults to 20 minutes
 (`MINI_ROUTER_STUCK_MS=1200000`).
@@ -649,10 +664,51 @@ Workers run as UID/GID 10000 and can execute the root-owned, mode-0111 reference
 at `/opt/pbench/executable` without reading its bytes. Worker networks restrict
 external access to model egress. Workers have a 64 GiB limit and routers 8 GiB;
 these are ceilings, not reservations. Team containers use the 80%-of-host-RAM
-`pbench.slice`; the evaluation Docker shim separately caps memory per container.
+`agensh.slice`; the evaluation Docker shim separately caps memory per container.
 Record host resources, competing load, gateway capacity, image digests and
 rendered settings when comparing results. Keep prompts fixed; changes to
 continuation or idle policy create a different experimental condition.
+
+## Migrating from earlier releases
+
+The task-pack refactor renamed core files and settings once, without
+compatibility aliases. Names that belong to ProgramBench keep their values in
+the pack, so worker instructions and runner messages are unchanged.
+
+| Earlier | Now |
+|---|---|
+| `scripts/pbench_gen_env.sh`, `launch_single_node.sh`, `lib_launch.sh`, `pbench_chain.sh`, `pbench_build_pertask_images.sh`, `lib_pbench_images.sh`, `pbench_docker_sudo.sh` | `tasks/programbench/scripts/` `gen_env.sh`, `launch.sh`, `lib_launch.sh`, `chain.sh`, `build_images.sh`, `lib_images.sh`, `eval_docker_shim.sh` |
+| `scripts/launch_single_agent.py`, `acp_driver.py`, `single_agent_stdio.py`, `docker/docker_compose.single_agent.yml` | `tasks/programbench/scripts/` (same names) and `tasks/programbench/docker/single_agent.yml` |
+| `tools/pbench_submission.py`, `tools/pbench_score_report.py` | `tasks/programbench/tools/submission.py`, `score_report.py` |
+| `scripts/pbench_run.sh` | `scripts/team_run.sh` (the [team driver](agensh/README.md)) |
+| `docker/docker_compose.pbench.yml`, `make render-pbench-base` | `docker/docker_compose.team.yml`, `make render-base` |
+| `pbench.slice`, `pbench-reboot-guard.service`, `scripts/pbench_reboot_guard.sh` | `agensh.slice`, `agensh-reboot-guard.service`, `scripts/agensh_reboot_guard.sh` |
+| Profiles `pbench-single-node-<task>` (`.env.pbench-single-node-<task-slug>`) | `programbench-<task>` (`.env.programbench-<task-slug>`) |
+| `~/.pbench-upstream.env` | `~/.agensh/upstream.env` |
+| `PBENCH_WORKERS_PER_TEAM`, `PBENCH_SUBNET_*`, `PBENCH_LLM_UPSTREAM`, `PBENCH_PUBLIC_PORT`, `PBENCH_RUN_START_MS`, `PBENCH_ORCHESTRATOR`, `PBENCH_REPO`, `PBENCH_WAKE_*`, `PBENCH_BRINGUP_SETTLE_S`, `PBENCH_STAGGERED_BRINGUP`, `PBENCH_WATCHDOG_EARLY`, `PBENCH_START_RETRY_S`, `PBENCH_BOOTSTRAP_FORCE`, `PBENCH_GUARD_*`, `PBENCH_SKIP_HOST_GUARDS` | The same names with `AGENSH_`; `PBENCH_WORKERS_PER_TEAM` becomes `AGENSH_WORKERS` |
+| Host lock `/tmp/pbench-make-up.lock` | `/tmp/agensh-make-up.lock` |
+
+Unchanged, because they belong to ProgramBench: `PBENCH_BIN`,
+`PBENCH_CLEANROOM_TAG`, `PBENCH_EVAL_*`, `PBENCH_DOCKER*`,
+`/opt/pbench/executable`, `ORG_NAME=pbench`, the `pbench-top` board, the
+`pbench-task` channel, `~/pbench-trajectories` and the `:pbench` image tag.
+Internal `omcgitea` names (images, Compose projects, `/opt/omcgitea` paths and
+the database) are also unchanged.
+
+To migrate a host:
+
+1. Install `agensh.slice` and enable `agensh-reboot-guard.service` as in
+   [Prerequisites](#prerequisites). The guard still matches `omcgitea-*`
+   projects, so it also covers stacks started by earlier releases; disable the
+   old `pbench-reboot-guard.service` once no earlier-release checkout relies
+   on it. Running containers keep their original cgroup until they stop.
+2. Move model credentials to `~/.agensh/upstream.env` (mode 600).
+3. Regenerate profiles with `tasks/programbench/scripts/gen_env.sh`. Earlier
+   profile files and their data roots are not read under the new names; finish
+   or archive runs that use them first.
+4. Earlier-release runs and new runs take different bring-up locks, so their
+   infrastructure start-up is no longer serialized against each other on a
+   shared host.
 
 ## Security and support
 

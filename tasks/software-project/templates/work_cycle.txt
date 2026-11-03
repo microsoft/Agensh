@@ -1,0 +1,15 @@
+1. Read issue #1, the open issues and the board, and pick an open issue nobody has
+   claimed. If the piece of the goal you want has no issue yet, open one for it.
+2. Announce it as a `CLAIM` on the shared context board that cites the issue as `#<n>`
+   (for example `CLAIM #7: add the --json flag`). While your claim lives, the issue is
+   assigned to you, so peers can see who is on it; renew the claim if you need longer.
+3. Implement it on a branch from the latest `main`, with tests where the repository
+   has them. You do not need to sync code with others during implementation.
+4. Run the PR checks on your branch:
+${ACCEPTANCE_PR}
+5. Push and open a PR. Gitea Actions runs the PR checks on it (`agensh / pr`); merge to
+   `main` once they pass, for example by merging with `merge_when_checks_succeed`. If the
+   checks fail, fix the branch and push again. If the merge is refused, merge the latest
+   `main` into your branch, re-run the checks, and push again.
+6. Say what you finished as a `PATCH_SUMMARY` (`files= | idea= | evidence=`) on the board,
+   then go back to 1.

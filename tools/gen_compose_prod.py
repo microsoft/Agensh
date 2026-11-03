@@ -1,22 +1,69 @@
 #!/usr/bin/env python3
 # Emit the team Compose base to stdout, expanding one worker/router pair per agent.
-# Make writes this to docker/_gen_prod.<profile>.yml and adds the pbench overlay.
+# Make writes this to docker/_gen_prod.<profile>.yml and adds the team overlay.
 
 import os
 from pathlib import Path
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'agent'))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from harness_config import load_config
+from agensh import quality
+from agensh.pack import load_pack
 
 SETTINGS = load_config()
+# The task pack supplies extra worker mounts, its prompt directory and the board id.
+PACK = load_pack(os.environ.get('AGENSH_PACK') or 'programbench')
 
-WORKERS_PER_TEAM = int(os.environ.get("PBENCH_WORKERS_PER_TEAM") or 16)
+WORKERS_PER_TEAM = int(os.environ.get("AGENSH_WORKERS") or 16)
 AGENT_HARNESS = SETTINGS.harness
 if AGENT_HARNESS not in ("pi", "copilot", "codex", "claude"):
     raise ValueError("AGENT_HARNESS must be pi, copilot, codex or claude")
 
 ALL_AGENTS = [f"worker{w}" for w in range(1, WORKERS_PER_TEAM + 1)]
+# Make passes the resolved mode; `allowlist` sends worker egress through egress-filter.
+NETWORK_MODE = os.environ.get('AGENSH_NETWORK_MODE') or PACK.network
+PROXY = quality.ALLOWLIST_PROXY
+
+
+def proxy_env():
+    if NETWORK_MODE != 'allowlist':
+        return ''
+    internal = ['localhost', '127.0.0.1', 'gitea', 'mattermost', 'board-service', 'egress-proxy',
+                'secret-service', 'mysql', *(f'mini-router-{a}' for a in ALL_AGENTS)]
+    names = ('HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy')
+    lines = [f'  {name}: "{PROXY}"' for name in names]
+    lines += [f'  {name}: "{",".join(internal)}"' for name in ('NO_PROXY', 'no_proxy')]
+    return '\n' + '\n'.join(lines)
+
+
+def worker_cpus(value, workers, host_cpus=None):
+    # Empty keeps the unlimited default; `auto` shares 80% of the host evenly.
+    value = (value or '').strip()
+    if not value:
+        return None
+    if value == 'auto':
+        host = host_cpus or os.cpu_count() or 1
+        return max(0.5, round(host * 0.8 / max(1, workers), 2))
+    cpus = float(value)
+    if cpus <= 0:
+        raise ValueError('WORKER_CPUS must be positive, "auto" or empty')
+    return cpus
+
+
+def worker_resources():
+    memory = (os.environ.get('WORKER_MEMORY') or '64g').strip()
+    lines = [f'  mem_limit: {memory}', f'  memswap_limit: {memory}']
+    cpus = worker_cpus(os.environ.get('WORKER_CPUS'), WORKERS_PER_TEAM)
+    if cpus is not None:
+        lines.append(f'  cpus: {cpus:g}')
+    return '\n'.join(lines)
+
+
+def pack_mounts():
+    return '\n'.join(f"      - {m['source']}:{m['target']}{':ro' if m['read_only'] else ''}"
+                     for m in PACK.mounts)
 
 # Shared anchors keep model settings, limits and board access identical across workers.
 HEADER = '''
@@ -26,9 +73,8 @@ x-agent: &agent-base
   init: true
   working_dir: /work
   stop_grace_period: 10m
-  cgroup_parent: pbench.slice
-  mem_limit: 64g
-  memswap_limit: 64g
+  cgroup_parent: agensh.slice
+__WORKER_RESOURCES__
   image: "${AGENT_IMAGE:?AGENT_IMAGE required}"
   restart: unless-stopped
   extra_hosts:
@@ -46,12 +92,13 @@ __HARNESS_ENV__
   MATTERMOST_HOST: "http://mattermost:8065"
   ACP_CHILD_UID: "10000"
   ACP_CHILD_GID: "10000"
-  PBENCH_WORKERS: "${PBENCH_WORKERS_PER_TEAM}"
+  AGENSH_WORKERS: "${AGENSH_WORKERS}"
   BOARD_SERVICE_URL: "http://board-service:8660"
-  BOARD_IDS: "pbench-top"
+  BOARD_IDS: "__BOARD_ID__"
+  TASK_CHANNEL: "__TASK_CHANNEL__"
 
 x-mini-router: &mini-router-base
-  cgroup_parent: pbench.slice
+  cgroup_parent: agensh.slice
   mem_limit: 8g
   memswap_limit: 8g
   image: "${MINI_ROUTER_IMAGE:-omcgitea-mini-router:local}"
@@ -69,9 +116,9 @@ x-mini-router-env: &mini-router-env-base
   MINI_ROUTER_PORT: "8645"
   MATTERMOST_HOST: "http://mattermost:8065"
   MINI_ROUTER_STUCK_MS: "${MINI_ROUTER_STUCK_MS:-1200000}"
-  PBENCH_RUN_START_MS: "${PBENCH_RUN_START_MS:-}"
+  AGENSH_RUN_START_MS: "${AGENSH_RUN_START_MS:-}"
   BOARD_SERVICE_URL: "http://board-service:8660"
-  BOARD_IDS: "pbench-top"
+  BOARD_IDS: "__BOARD_ID__"
 '''
 
 # Shared services and one-shot provisioning are independent of worker activation.
@@ -80,7 +127,7 @@ services:
   gitea:
     image: docker.gitea.com/gitea:1.22.6
     restart: unless-stopped
-    cgroup_parent: pbench.slice
+    cgroup_parent: agensh.slice
     depends_on:
       mysql: { condition: service_healthy }
     ulimits:
@@ -117,7 +164,7 @@ services:
   nginx-edge:
     image: nginx:1.27-alpine
     restart: unless-stopped
-    cgroup_parent: pbench.slice
+    cgroup_parent: agensh.slice
     depends_on:
       gitea:
         condition: service_healthy
@@ -136,7 +183,7 @@ services:
   gitea-admin-init:
     image: docker.gitea.com/gitea:1.22.6
     restart: "no"
-    cgroup_parent: pbench.slice
+    cgroup_parent: agensh.slice
     depends_on:
       gitea:
         condition: service_healthy
@@ -168,7 +215,7 @@ services:
       context: ./bootstrap
     image: "${BOOTSTRAP_IMAGE:-omcgitea-bootstrap:local}"
     restart: "no"
-    cgroup_parent: pbench.slice
+    cgroup_parent: agensh.slice
     depends_on:
       gitea: { condition: service_healthy }
       gitea-admin-init: { condition: service_completed_successfully }
@@ -187,7 +234,7 @@ services:
       MATTERMOST_ADMIN_EMAIL: "mmadmin@${ORG_NAME}.local"
       MATTERMOST_TEAM_NAME: "${ORG_NAME}"
       MATTERMOST_TEAM_DISPLAY: "${ORG_NAME}"
-    volumes:
+__BOOTSTRAP_IMPORT__    volumes:
       - ${DATA_ROOT:-../.claude-team-data}/${PROFILE}:/data
 
   secret-service:
@@ -195,7 +242,7 @@ services:
       context: ../secret-service
     image: "${SECRET_SERVICE_IMAGE:-omcgitea-secret-service:local}"
     restart: unless-stopped
-    cgroup_parent: pbench.slice
+    cgroup_parent: agensh.slice
     depends_on:
       bootstrap: { condition: service_completed_successfully }
     environment:
@@ -214,7 +261,7 @@ services:
   act-runner:
     image: gitea/act_runner:0.2.11
     restart: unless-stopped
-    cgroup_parent: pbench.slice
+    cgroup_parent: agensh.slice
     depends_on:
       bootstrap: { condition: service_completed_successfully }
     environment:
@@ -223,8 +270,8 @@ services:
       GITEA_RUNNER_LABELS: "ubuntu-latest:docker://${AGENT_IMAGE:?AGENT_IMAGE required}"
       ACT_JOB_NETWORK: "${ACT_JOB_NETWORK:-omcgitea-${PROFILE}_default}"
       ACT_CAPACITY: "${ACT_CAPACITY:-2}"
-      ACT_JOB_LIMITS: "${ACT_JOB_LIMITS:---memory=8g --memory-swap=8g --cpus=4 --pids-limit=512 --cgroup-parent=pbench.slice}"
-    volumes:
+      ACT_JOB_LIMITS: "${ACT_JOB_LIMITS:---memory=8g --memory-swap=8g --cpus=4 --pids-limit=512 --cgroup-parent=agensh.slice}"
+__ACT_RUNNER_ENV__    volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ${DATA_ROOT:-../.claude-team-data}/${PROFILE}/tokens:/run/omcgitea/tokens:ro
       - ${DATA_ROOT:-../.claude-team-data}/${PROFILE}/act-runner:/data
@@ -254,7 +301,7 @@ services:
   mysql:
     image: mysql:8.4
     restart: unless-stopped
-    cgroup_parent: pbench.slice
+    cgroup_parent: agensh.slice
     command: ["--innodb-use-native-aio=0", "--max-connections=${MYSQL_MAX_CONNECTIONS:-1000}", "--innodb-buffer-pool-size=${MYSQL_INNODB_BUFFER_POOL_SIZE:-134217728}"]
     environment:
       MYSQL_ROOT_PASSWORD: "${MYSQL_ROOT_PASSWORD:?MYSQL_ROOT_PASSWORD required}"
@@ -274,7 +321,7 @@ services:
   mattermost:
     image: mattermost/mattermost-team-edition:10.6
     restart: unless-stopped
-    cgroup_parent: pbench.slice
+    cgroup_parent: agensh.slice
     ulimits:
       nofile: { soft: "${MM_NOFILE:-65536}", hard: "${MM_NOFILE:-65536}" }
     environment:
@@ -304,7 +351,7 @@ services:
   board-service:
     image: "${BOARD_IMAGE:-omcgitea-board:local}"
     restart: unless-stopped
-    cgroup_parent: pbench.slice
+    cgroup_parent: agensh.slice
     depends_on:
       mysql: { condition: service_healthy }
     environment:
@@ -312,7 +359,7 @@ services:
       BOARD_LISTEN_PORT: "8660"
       BOARD_LIFECYCLE_DIR: "/data/lifecycle"
       BOARD_MEMBERS_JSON: >-
-        {"pbench-top":[
+        {"__BOARD_ID__":[
 {BOARD_MEMBERS}
         ]}
     volumes:
@@ -334,15 +381,18 @@ AGENT_BLOCK = '''
     environment:
       <<: *agent-env-base
       AGENT_NAME: "${ORG_NAME}-__SHORT__"
+      # Labels this worker's model requests for usage metering; not a credential.
+      ANTHROPIC_API_KEY: "local-proxy-${ORG_NAME}-__SHORT__"
       GITEA_TOKEN_FILE: "/run/omcgitea/tokens/agent-${ORG_NAME}-__SHORT__.token"
     volumes:
       - ${DATA_ROOT:-../.claude-team-data}/${PROFILE}/agents/${ORG_NAME}-__SHORT__:/opt/data
       - ${DATA_ROOT:-../.claude-team-data}/${PROFILE}/acp/${ORG_NAME}-__SHORT__:/var/run/acp
       - ${DATA_ROOT:-../.claude-team-data}/${PROFILE}/tokens/agent-${ORG_NAME}-__SHORT__.token:/run/omcgitea/tokens/agent-${ORG_NAME}-__SHORT__.token:ro
       - ${DATA_ROOT:-../.claude-team-data}/${PROFILE}/tokens/agent-${ORG_NAME}-__SHORT__-mm.token:/run/omcgitea/tokens/agent-${ORG_NAME}-__SHORT__-mm.token:ro
-      - ${PBENCH_BIN:-/dev/null}:/opt/pbench/executable:ro
+__PACK_MOUNTS__
       - ../prompts/agents.txt:/opt/omcgitea/prompts/agents.md:ro
-      - ../prompts/pbench_brief.txt:/opt/omcgitea/prompts/pbench_brief.md:ro
+      - __TASK_PROMPTS__:/opt/omcgitea/task-prompts:ro
+      - ../agent/render_agents.sh:/opt/omcgitea/render_agents.sh:ro
       - ../agent/config/mcp_deny_tools.json:/opt/omcgitea/config/mcp_deny_tools.json:ro
       - ../agent/config/mcp_allowed_tools.json:/opt/omcgitea/config/mcp_allowed_tools.json:ro
       - ../agent/config/mcp_tool_metadata.json:/opt/omcgitea/config/mcp_tool_metadata.json:ro
@@ -382,6 +432,17 @@ ROUTER_BLOCK = '''
       retries: 6
 '''
 
+# The router marks the product owner's DMs, mentions and comments urgent.
+ROUTER_ENV_TAIL = '  AGENSH_RUN_START_MS: "${AGENSH_RUN_START_MS:-}"\n  BOARD_SERVICE_URL: "http://board-service:8660"\n'
+ROUTER_HUMAN_ENV = '  HUMAN_USERNAME: "${AGENSH_HUMAN:-}"\n'
+
+
+def router_env():
+    extra = ROUTER_HUMAN_ENV if PACK.product_owner else ''
+    if PACK.event_context != 'summary':
+        extra += f'  EVENT_CONTEXT: "{PACK.event_context}"\n'
+    return extra
+
 def build():
     # Bootstrap identities, board membership and service names use the same worker list.
     agents_csv = ",".join(f"${{ORG_NAME}}-{s}" for s in ALL_AGENTS)
@@ -395,16 +456,41 @@ def build():
     if AGENT_HARNESS == 'copilot':
         harness_env += '\n  COPILOT_PROVIDER_TYPE: "${COPILOT_PROVIDER_TYPE:-openai}"'
     out.append(HEADER.replace('__HARNESS_ENV__', harness_env)
-               .replace('${AGENT_HARNESS:-copilot}', '${AGENT_HARNESS:-' + AGENT_HARNESS + '}'))
+               .replace('__WORKER_RESOURCES__', worker_resources())
+               .replace('__BOARD_ID__', PACK.board_id)
+               .replace('  TASK_CHANNEL: "__TASK_CHANNEL__"', f'  TASK_CHANNEL: "{PACK.channel}"{proxy_env()}')
+               .replace('${AGENT_HARNESS:-copilot}', '${AGENT_HARNESS:-' + AGENT_HARNESS + '}')
+               .replace(ROUTER_ENV_TAIL, ROUTER_ENV_TAIL + router_env()))
     members = ",\n".join(f'          "${{ORG_NAME}}-{s}"' for s in ALL_AGENTS)
+    # Imported histories become main as is: no initial commit and no CODEOWNERS commit.
+    bootstrap_import = ('      REPO_AUTO_INIT: "false"\n      BOOTSTRAP_CODEOWNERS: "false"\n'
+                        if PACK.import_history else '')
+    runner_env = ''
+    if PACK.product_owner:
+        # The product owner's accounts; empty when the project names none.
+        bootstrap_import += '      AGENSH_HUMAN: "${AGENSH_HUMAN:-}"\n'
+    if PACK.ci_gate:
+        # Required checks on main (agensh/quality.py); the driver adds protected files.
+        bootstrap_import += (f'      AGENSH_REQUIRED_CHECKS: "{";".join(quality.REQUIRED_CHECKS)}"\n'
+                             f'      AGENSH_LABELS: "{quality.FIX_LABEL}"\n')
+        runner_env = '      ACT_JOB_TIMEOUT: "${ACT_JOB_TIMEOUT:-15m}"\n'
     out.append(INFRA.replace("{AGENTS_CSV}", agents_csv)
-               .replace("{BOARD_MEMBERS}", members))
+               .replace("{BOARD_MEMBERS}", members)
+               .replace("__BOARD_ID__", PACK.board_id)
+               .replace("__BOOTSTRAP_IMPORT__", bootstrap_import)
+               .replace("__ACT_RUNNER_ENV__", runner_env))
     for short in ALL_AGENTS:
         harness_files = ('config.sh',) if AGENT_HARNESS == 'copilot' else ('acp.py', 'config.py')
         harness_mounts = '\n'.join(
             f"      - ../agent/{AGENT_HARNESS}/{name}:/opt/omcgitea/{AGENT_HARNESS}/{name}:ro"
             for name in harness_files)
-        out.append(AGENT_BLOCK.replace("__SHORT__", short).replace("__HARNESS_MOUNTS__", harness_mounts))
+        block = AGENT_BLOCK.replace("__SHORT__", short).replace("__HARNESS_MOUNTS__", harness_mounts)
+        mounts = pack_mounts()
+        block = block.replace("__PACK_MOUNTS__\n", mounts + "\n" if mounts else "")
+        # Per-run prompts are rendered by the pack's prepare hook (see agensh/README.md).
+        prompts = ('${AGENSH_TASK_PROMPTS:?AGENSH_TASK_PROMPTS is set by the prepare hook}'
+                   if PACK.task_prompts == 'run' else f'../tasks/{PACK.name}/prompts')
+        out.append(block.replace("__TASK_PROMPTS__", prompts))
     for short in ALL_AGENTS:
         out.append(ROUTER_BLOCK.replace("__SHORT__", short))
     return "".join(out)

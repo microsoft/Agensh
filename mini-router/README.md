@@ -32,7 +32,10 @@ Group messages wait for a turn boundary. Delivered batches containing more than
 
 For local development, use Node.js 20.10 or newer and run `npm ci`, then
 `npm run typecheck` or `npm run build` in this folder. Docker builds supply
-their own Node runtime.
+their own Node runtime. `npm test` builds `dist/` and runs the unit tests in
+[test/](test/) with Node's built-in test runner. They cover listener
+normalization, group-message backlogs and dispatcher delivery against
+in-memory stand-ins; the MySQL event store is not covered.
 [`tools/gen_compose_prod.py`](../tools/gen_compose_prod.py) supplies service
 URLs, identity, database credentials and socket mounts. `/healthz` on port 8645
 reports Gitea SSE connectivity.
@@ -56,7 +59,7 @@ then `retrying` when due, with at most five recorded attempts. Startup returns
 interrupted `sending` rows to `pending`. Normal delivery and retries share one
 serialization chain. The ACP session ID is stored under
 `acp_session_id:<harness>` in `agent_kv`; native rollouts remain in worker HOME.
-`PBENCH_RUN_START_MS` aligns event timestamps across workers, otherwise router
+`AGENSH_RUN_START_MS` aligns event timestamps across workers, otherwise router
 startup supplies the time origin.
 
 Gitea listeners under `src/listeners/gitea/` use cookie-authenticated
@@ -72,6 +75,15 @@ queued turn. Self-authored and system posts are filtered when identity is known.
 The process-local catch-up cursor initially looks back ten minutes; cached
 channels are reused, and REST catch-up does not replay reaction/deletion events.
 Both listeners reconnect with backoff and use stable event IDs for deduplication.
+
+With `EVENT_CONTEXT=inline` (packs with `[team] event_context = "inline"`),
+summaries carry the context a worker would otherwise fetch first. A Gitea event
+adds the latest comment's author and its first 200 characters (or the issue or
+PR body's, for a new subject), with the comment id; longer text is cut and the
+summary names the API path that returns it. A Mattermost reply names its thread
+and the author and opening of the post that started it; a channel post longer
+than the summary limit names its post id. `HUMAN_USERNAME` marks the product
+owner's DMs, mentions and comments urgent, reusing the same comment read.
 
 ## Database schema
 

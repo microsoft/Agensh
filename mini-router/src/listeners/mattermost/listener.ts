@@ -4,7 +4,14 @@
  */
 import type { EventStore } from "../../state.ts";
 import { MattermostWS } from "./ws.ts";
-import { isSelfAuthored, isSystemPost, mattermostEventToUEM, type MattermostWsEvent } from "./notification.ts";
+import {
+  isSelfAuthored,
+  isSystemPost,
+  markUrgentFromHuman,
+  mattermostEventToUEM,
+  withThreadContext,
+  type MattermostWsEvent,
+} from "./notification.ts";
 
 export interface MattermostListenerOptions {
   agent: string;
@@ -12,6 +19,10 @@ export interface MattermostListenerOptions {
   baseUrl: string;
   token: string;
   hostHeader?: string;
+  /** The product owner's username; their DMs and mentions are urgent. */
+  human?: string;
+  /** "inline": replies carry how their thread started (withThreadContext). */
+  eventContext?: string;
   onIngest?: (insertedCount: number) => void;
   onError?: (e: unknown) => void;
 }
@@ -128,12 +139,41 @@ export class MattermostListener {
     }
   }
 
+  /** The post that started a reply's thread, with its author's username. */
+  private async threadRoot(ev: MattermostWsEvent): Promise<{ author: string; message: string } | null> {
+    let rootId: string | undefined;
+    try {
+      rootId = (JSON.parse(String(ev.data?.post ?? "{}")) as { root_id?: string }).root_id;
+    } catch {
+      return null;
+    }
+    if (!rootId) return null;
+    const base = this.opts.baseUrl.replace(/\/$/, "");
+    const headers: Record<string, string> = { Authorization: `Bearer ${this.opts.token}` };
+    if (this.opts.hostHeader) headers.Host = this.opts.hostHeader;
+    const get = async (path: string) => {
+      const r = await fetch(`${base}${path}`, { headers, signal: AbortSignal.timeout(10_000) });
+      return r.ok ? ((await r.json()) as Record<string, unknown>) : null;
+    };
+    try {
+      const root = await get(`/api/v4/posts/${rootId}`);
+      if (!root) return null;
+      const user = typeof root.user_id === "string" ? await get(`/api/v4/users/${root.user_id}`) : null;
+      return { author: String(user?.username ?? root.user_id ?? "?"), message: String(root.message ?? "") };
+    } catch {
+      return null;
+    }
+  }
+
   private async ingestEvent(ev: MattermostWsEvent): Promise<void> {
     if (!isInterestingEvent(ev.event)) return;
     if (isSelfAuthored(ev, this.opts.agent)) return;
     if (isSystemPost(ev)) return;
     const observed = Date.now();
-    const uem = mattermostEventToUEM(ev, this.opts.agent, observed);
+    let uem = markUrgentFromHuman(mattermostEventToUEM(ev, this.opts.agent, observed), ev, this.opts.human);
+    if (this.opts.eventContext === "inline") {
+      uem = withThreadContext(uem, ev, await this.threadRoot(ev));
+    }
     try {
       const id = await this.opts.state.ingest(uem, observed);
       if (id !== null) this.opts.onIngest?.(1);

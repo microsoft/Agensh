@@ -1,0 +1,37 @@
+# ProgramBench: rebuild a reference program from its behavior and documentation.
+# Fields are those the team driver reads today; see docs/task_pack_design.md.
+name = "programbench"
+description = "Rebuild a reference program from observed behavior; graded by ProgramBench"
+
+[hooks]
+# Each hook runs on the host with the run's environment (see agensh/team_run.py).
+prepare = "hooks/prepare.sh"    # cleanroom seed and reference binary
+export = "hooks/export.sh"      # committed main -> submission.tar.gz
+evaluate = "hooks/evaluate.sh"  # programbench eval, skipped with SKIP_EVAL=1
+
+[messages]
+task_brief = "prompts/task_brief.txt"
+idle = "prompts/idle.txt"
+idle_delivery = "prompts/idle_delivery.txt"
+
+[[messages.reminders]]
+before_end = "45m"
+message = "prompts/deadline_45m.txt"
+
+[[messages.reminders]]
+before_end = "5m"
+message = "prompts/deadline_5m.txt"
+
+[team]
+issue_title = "[pbench] {task}"
+seed_message = "pbench: seed cleanroom workspace ({task})"
+board_id = "pbench-top"
+channel = "pbench-task"
+
+[environment]
+# Workers reach only the model proxy; the reference is executable, not readable.
+network = "offline"
+
+[[environment.mounts]]
+source = "${PBENCH_BIN:-/dev/null}"   # staged by the prepare hook via compose.env
+target = "/opt/pbench/executable"

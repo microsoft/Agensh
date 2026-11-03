@@ -1,0 +1,13 @@
+# Aggregate cgroup ceiling for experiment containers and scoped host evaluation.
+# Install as /etc/systemd/system/agensh.slice before launching experiments.
+[Unit]
+Description=Agensh team runs (rollout, eval, sweep) — aggregate resource ceiling
+Before=slices.target
+
+[Slice]
+# Leave host memory available and prevent experiment workloads from using swap.
+MemoryMax=80%
+
+MemorySwapMax=0
+
+TasksMax=120000

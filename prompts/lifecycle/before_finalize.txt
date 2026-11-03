@@ -1,0 +1,1 @@
+The run ends in ${MINUTES} minutes and `main` is then delivered upstream. Merge what is ready and keep `main` passing its full suite; do not start new large pieces. Note unfinished work as issues so reviewers see what is left.

@@ -20,6 +20,8 @@ export interface MattermostPost {
   channel_id: string;
   message: string;
   type?: string;
+  /** Set on replies: the post that started the thread. */
+  root_id?: string;
 }
 
 export interface MattermostWsEvent {
@@ -105,6 +107,54 @@ export function mattermostEventToUEM(
     observed_at,
     raw: ev,
   };
+}
+
+/**
+ * Mark the product owner's DMs and posts that @mention the worker as urgent, so
+ * the board service delivers them mid-turn like DMs.
+ */
+export function markUrgentFromHuman(
+  uem: UEM,
+  ev: MattermostWsEvent,
+  human: string | undefined,
+): UEM {
+  if (!human || ev.event !== "posted") return uem;
+  const norm = (s: string) => s.replace(/^@/, "").trim().toLowerCase();
+  const sender = ev.data?.sender_name ?? "";
+  if (norm(sender) !== norm(human)) return uem;
+  const text = parsePostMaybe(ev.data?.post)?.message ?? "";
+  if (uem.kind !== "dm" && !mentions(text, uem.target_agent)) return uem;
+  return { ...uem, urgent: true, summary: `URGENT from the product owner: ${uem.summary}` };
+}
+
+export function mentions(text: string, agent: string): boolean {
+  const escaped = agent.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`(^|[^\\w@-])@${escaped}(?![\\w-])`, "i").test(text);
+}
+
+/**
+ * Inline context (EVENT_CONTEXT=inline): a reply says which thread it belongs to
+ * and how that thread started; a channel post cut to the summary limit names its
+ * post id, so the worker can read the rest.
+ */
+export function withThreadContext(
+  uem: UEM,
+  ev: MattermostWsEvent,
+  root: { author: string; message: string } | null,
+): UEM {
+  if (ev.event !== "posted") return uem;
+  const post = parsePostMaybe(ev.data?.post);
+  if (!post) return uem;
+  const parts: string[] = [uem.summary];
+  if (post.root_id) {
+    const start = root ? `${root.author}: "${oneLine(root.message, 120)}"` : "an earlier post";
+    parts.push(`(reply in the thread of post ${post.root_id}, started by ${start})`);
+  }
+  const isDM = ev.data?.channel_type === "D";
+  if (!isDM && post.message.replace(/\s+/g, " ").trim().length > CHANNEL_SUMMARY_MAX) {
+    parts.push(`(post ${post.id}; read the rest of it in Mattermost)`);
+  }
+  return parts.length > 1 ? { ...uem, summary: parts.join(" ") } : uem;
 }
 
 // DM classification also determines eligibility for mid-turn notice delivery.

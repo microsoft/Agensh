@@ -21,4 +21,7 @@
 !board-service/mcp.cjs
 !prompts/
 !prompts/agents.txt
-!prompts/pbench_brief.txt
+!tasks/
+!tasks/programbench/
+!tasks/programbench/prompts/
+!tasks/programbench/prompts/*.txt

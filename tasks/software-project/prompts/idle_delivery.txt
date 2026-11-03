@@ -1,0 +1,3 @@
+The run is in its delivery phase. Make sure finished work is merged into `main` and
+that `main` passes the full suite. Resolve remaining integration problems and report
+blockers. Do not start new features.

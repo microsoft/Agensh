@@ -15,6 +15,12 @@ the verification commands an agent reports.
 | `unfold.py` | Resolves `G<number>` labels to optional full stored details |
 | `mcp.cjs` | Agent-side stdio adapter for `board_read`, `board_write`, `board_grep` and `board_unfold` |
 | `Dockerfile`, `requirements.txt` | Service image and pinned Python dependencies |
+| `tests/` | Standard-library unit tests for the recent view, verification, grep parsing and unfolding |
+
+Run the unit tests from the repository root with
+`python3 -m unittest discover -s board-service/tests`. They need no service
+dependencies; the HTTP routes and MySQL persistence in `main.py` are not
+covered.
 
 `FACT`, `OBSERVED`, `FAIL` and `CLAIM` content is capped at 100 characters;
 `PATCH_SUMMARY` at 300. Claims are hidden from live reads and turn-start

@@ -9,6 +9,7 @@ import {
   type GiteaNotificationRaw,
 } from "./fetcher.ts";
 import { giteaNotificationToUEM } from "./notification.ts";
+import { detailPath, toDetail, withDetail, type GiteaDetail } from "./context.ts";
 import { GiteaSSE } from "./sse.ts";
 import type { EventStore } from "../../state.ts";
 import type { UEM } from "../../uem.ts";
@@ -21,6 +22,10 @@ export interface GiteaListenerOptions {
   token: string;
   auth: GiteaFormAuth;
   hostHeader?: string;
+  /** The product owner's username; their issue and PR comments are urgent. */
+  human?: string;
+  /** "inline": add the latest comment's author and opening text to each event. */
+  eventContext?: string;
   onIngest?: (insertedCount: number) => void;
 }
 
@@ -54,9 +59,16 @@ export class GiteaListener {
       if (page.items.length < NOTIFICATION_PAGE_SIZE) break;
     }
     const observed = Date.now();
-    const uems: UEM[] = items.map((n) =>
-      giteaNotificationToUEM(n, agent, observed),
-    );
+    const uems: UEM[] = [];
+    for (const n of items) {
+      const base = giteaNotificationToUEM(n, agent, observed);
+      // One read serves both the inline context and the product-owner check.
+      const detail = this.opts.eventContext === "inline" || this.opts.human ? await this.detail(n) : null;
+      const uem = this.opts.eventContext === "inline" ? { ...base, summary: withDetail(base.summary, detail) } : base;
+      const human = this.opts.human?.toLowerCase();
+      const fromHuman = !!human && detail?.commentId !== null && detail?.author.toLowerCase() === human;
+      uems.push(fromHuman ? { ...uem, urgent: true, summary: `URGENT from the product owner: ${uem.summary}` } : uem);
+    }
     const next = advanceCursor(since, { items, maxUpdatedAt });
     let inserted = 0;
     for (const u of uems) {
@@ -65,6 +77,22 @@ export class GiteaListener {
     }
     if (next) await state.setCursor(agent, "gitea", next);
     if (inserted > 0) this.opts.onIngest?.(inserted);
+  }
+
+  /** The latest comment (or the issue/PR body) behind a notification, if it can be read. */
+  private async detail(n: GiteaNotificationRaw): Promise<GiteaDetail | null> {
+    const target = detailPath(n);
+    if (!target) return null;
+    try {
+      // Notifications carry API URLs on the external address; ask the internal one.
+      const headers: Record<string, string> = { Accept: "application/json", Authorization: `token ${this.opts.token}` };
+      if (this.opts.hostHeader) headers.Host = this.opts.hostHeader;
+      const res = await fetch(`${this.opts.baseUrl.replace(/\/$/, "")}${target.path}`, { headers });
+      if (!res.ok) return null;
+      return toDetail((await res.json()) as Parameters<typeof toDetail>[0], target.path, target.isComment);
+    } catch {
+      return null;
+    }
   }
 
   async runPolling(opts: {

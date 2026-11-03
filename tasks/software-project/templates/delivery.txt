@@ -1,0 +1,5 @@
+Only what is merged into `main` is delivered. Every push to `main` runs the full suite
+(`agensh / main`). If it fails, the author of the breaking merge is alerted first and only
+PRs titled `[fix-main] ...` or labeled `fix-main` can merge (`agensh/main-health`) until
+`main` passes again, so fixing `main` comes before new work. ${PROTECTED_RULE}${REVIEW_RULE} Record the architecture and the decisions you make in the
+repository (for example in `ARCHITECTURE.md`) so reviewers and later runs can follow them.

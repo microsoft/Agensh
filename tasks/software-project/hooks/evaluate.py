@@ -1,0 +1,47 @@
+#!/usr/bin/env python3
+# software-project evaluate hook: run the full acceptance suite on the delivered main
+# inside the worker image and record each command's outcome in acceptance.json.
+# A failing check is a result, not a hook failure; only an unusable setup exits 1.
+
+import os
+from pathlib import Path
+import shlex
+import subprocess
+import sys
+import time
+
+from common import context, log, read_json, write_json
+
+OUTPUT_TAIL = 4000
+
+
+def main():
+    task_out, values, project, _pack = context()
+    checkout = task_out / '_deliver'
+    if not checkout.is_dir():
+        raise RuntimeError(f'{checkout} is missing; the export hook did not complete')
+    prepare = read_json(task_out / 'prepare.json', {})
+    image = values['AGENT_IMAGE']
+    docker = shlex.split(os.environ.get('DOCKER', 'sudo -n docker'))
+    network = ['--network', 'none'] if prepare.get('network') == 'offline' else []
+    results = []
+    for command in project.acceptance_main:
+        started = time.monotonic()
+        run = subprocess.run([*docker, 'run', '--rm', *network, '--entrypoint', 'bash', '-v', f'{checkout}:/work',
+                              '-w', '/work', image, '-lc', command], capture_output=True, text=True)
+        output = (run.stdout + run.stderr)[-OUTPUT_TAIL:]
+        results.append({'command': command, 'exit_status': run.returncode,
+                        'seconds': round(time.monotonic() - started, 1), 'output_tail': output})
+        log(f'{"PASS" if run.returncode == 0 else "FAIL"} ({run.returncode}) {command}')
+    write_json(task_out / 'acceptance.json', {
+        'head': read_json(task_out / 'delivery.json', {}).get('head'), 'image': image,
+        'all_passed': all(r['exit_status'] == 0 for r in results), 'results': results,
+    })
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except Exception as error:  # Report any failure as the hook's exit status.
+        log(f'FATAL: {error}')
+        sys.exit(1)

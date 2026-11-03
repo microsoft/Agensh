@@ -21,12 +21,12 @@ chmod 700 "$TOKENS_DIR"
 
 log() { echo "[bootstrap] $*" >&2; }
 
-if [ -f "$DONE_MARK" ] && [ "${PBENCH_BOOTSTRAP_FORCE:-0}" != "1" ]; then
+if [ -f "$DONE_MARK" ] && [ "${AGENSH_BOOTSTRAP_FORCE:-0}" != "1" ]; then
     log "Already done (mark=$DONE_MARK), exit 0"
     exit 0
 fi
-[ "${PBENCH_BOOTSTRAP_FORCE:-0}" = "1" ] && [ -f "$DONE_MARK" ] && \
-    log "PBENCH_BOOTSTRAP_FORCE=1 — ignoring $DONE_MARK and re-provisioning"
+[ "${AGENSH_BOOTSTRAP_FORCE:-0}" = "1" ] && [ -f "$DONE_MARK" ] && \
+    log "AGENSH_BOOTSTRAP_FORCE=1 — ignoring $DONE_MARK and re-provisioning"
 
 log "Waiting for Gitea at $GITEA_HOST ..."
 for i in $(seq 1 120); do
@@ -171,6 +171,18 @@ done
 
 rm -f "$TOKENS_DIR"/webhook-*.secret 2>/dev/null || true
 
+# The optional human product owner shares the coders team; the password is kept
+# in the tokens directory for the person to sign in to Gitea and Mattermost.
+HUMAN_USER="${AGENSH_HUMAN:-}"
+if [ -n "$HUMAN_USER" ]; then
+    human_pwfile="$PASSWORDS_DIR/human-${HUMAN_USER}.password"
+    if [ ! -f "$human_pwfile" ]; then
+        openssl rand -hex 16 > "$human_pwfile"
+        chmod 600 "$human_pwfile"
+    fi
+    ensure_user "$HUMAN_USER" "$(cat "$human_pwfile")"
+fi
+
 ensure_org() {
     local code
     code=$(api_token_status GET "/api/v1/orgs/${GITEA_ORG}")
@@ -246,7 +258,9 @@ ensure_team_membership_strict() {
 
 ensure_org
 ensure_team "coders" "write"
-ensure_team_membership_strict "coders" "${AGENT_LIST[@]}"
+CODERS=("${AGENT_LIST[@]}")
+[ -z "$HUMAN_USER" ] || CODERS+=("$HUMAN_USER")
+ensure_team_membership_strict "coders" "${CODERS[@]}"
 
 ensure_repo() {
     local repo="$1"
@@ -257,18 +271,23 @@ ensure_repo() {
         return 0
     fi
     local body
-    body=$(jq -nc --arg n "$repo" \
-        '{name:$n, private:false, auto_init:true, default_branch:"main", description:"ProgramBench agent collaboration repository"}')
+    # Imported projects push their own history as main, so the repo starts empty.
+    body=$(jq -nc --arg n "$repo" --argjson init "${REPO_AUTO_INIT:-true}" \
+        '{name:$n, private:false, auto_init:$init, default_branch:"main", description:"Agent team collaboration repository"}')
     api_token POST "/api/v1/orgs/${GITEA_ORG}/repos" "$body" >/dev/null
     log "Repo ${GITEA_ORG}/${repo} created"
 }
 
 ensure_branch_protection() {
     # Agents integrate through PR merges; direct main pushes are reserved for the admin.
+    # Packs with a CI gate add required status checks. The team driver adds protected
+    # files after the seed push: Gitea 1.22 cannot check them on the push creating main.
     local repo="$1"
-    local body
+    local body checks
+    checks=$(jq -nc --arg c "${AGENSH_REQUIRED_CHECKS:-}" '$c | split(";") | map(select(length > 0))')
     body=$(jq -nc --arg b "main" \
         --arg admin "$GITEA_ADMIN_USER" \
+        --argjson checks "$checks" \
         '{branch_name:$b,
           enable_push:true,
           enable_push_whitelist:true,
@@ -287,8 +306,8 @@ ensure_branch_protection() {
           block_on_official_review_requests:false,
           block_on_outdated_branch:false,
           require_code_owner_review:false,
-          enable_status_check:false,
-          status_check_contexts:[]}')
+          enable_status_check:($checks | length > 0),
+          status_check_contexts:$checks}')
     local code
     code=$(api_token_status GET "/api/v1/repos/${GITEA_ORG}/${repo}/branch_protections/main")
     if [ "$code" = "200" ]; then
@@ -341,10 +360,29 @@ ensure_agent_unwatched() {
     log "Unwatched ${agent} on ${GITEA_ORG}/${repo}"
 }
 
+ensure_labels() {
+    # Labels the team driver reads, such as fix-main for the main-health gate.
+    local repo="$1" label existing
+    existing=$(api_token GET "/api/v1/repos/${GITEA_ORG}/${repo}/labels?limit=50" | jq -r '.[].name' || true)
+    IFS=';' read -r -a wanted <<<"${AGENSH_LABELS:-}"
+    for label in "${wanted[@]}"; do
+        [ -n "$label" ] || continue
+        if grep -qxF "$label" <<<"$existing"; then
+            log "Label ${label} exists on ${GITEA_ORG}/${repo}"
+            continue
+        fi
+        api_token POST "/api/v1/repos/${GITEA_ORG}/${repo}/labels" \
+            "$(jq -nc --arg n "$label" '{name:$n, color:"#d93f0b", description:"Fixes a failing main; may merge while main is red"}')" >/dev/null
+        log "Label ${label} created on ${GITEA_ORG}/${repo}"
+    done
+}
+
 for repo in "${REPO_LIST[@]}"; do
     ensure_repo "$repo"
-    ensure_codeowners "$repo"
+    # The CODEOWNERS commit would otherwise become part of an imported project's history.
+    if [ "${BOOTSTRAP_CODEOWNERS:-true}" = true ]; then ensure_codeowners "$repo"; fi
     ensure_branch_protection "$repo"
+    ensure_labels "$repo"
     for agent in "${AGENT_LIST[@]}"; do
         ensure_agent_unwatched "$repo" "$agent"
     done
@@ -472,6 +510,12 @@ if [ -n "${MATTERMOST_HOST:-}" ]; then
         for agent in "${AGENT_LIST[@]}"; do
             ensure_mm_user_token "$agent" || true
         done
+        if [ -n "$HUMAN_USER" ]; then
+            # Same login as Gitea; the session token is not needed by any service.
+            cp "$human_pwfile" "$TOKENS_DIR/agent-${HUMAN_USER}.password"
+            ensure_mm_user_token "$HUMAN_USER" || true
+            rm -f "$TOKENS_DIR/agent-${HUMAN_USER}.password" "$TOKENS_DIR/agent-${HUMAN_USER}-mm.token"
+        fi
     fi
     fi
 fi

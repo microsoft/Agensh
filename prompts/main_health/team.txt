@@ -1,0 +1,1 @@
+URGENT: `main` has failed its full suite (`agensh / main`) for ${MINUTES} minutes, since ${SHA} (${CHANGE}). Only PRs titled `[fix-main] ...` or labeled `fix-main` can merge until it passes. Check the channel and the board for who is fixing it; if nobody is, take it, and settle overlaps by direct message.

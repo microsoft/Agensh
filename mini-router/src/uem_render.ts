@@ -5,7 +5,7 @@ const PROCESS_START_MS = Date.now();
 
 function anchorMs(): number {
   // Without a shared harness timestamp, measure from this router's process startup.
-  const raw = Number(process.env.PBENCH_RUN_START_MS || "");
+  const raw = Number(process.env.AGENSH_RUN_START_MS || "");
   return Number.isFinite(raw) && raw > 0 ? raw : PROCESS_START_MS;
 }
 
