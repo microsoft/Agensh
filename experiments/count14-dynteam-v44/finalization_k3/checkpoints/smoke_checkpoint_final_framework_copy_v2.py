@@ -5,6 +5,8 @@ kill, retry, overwrite, privilege escalation or old-source mutation. Metadata
 walks prevent symlink escape; no package/scientific body tree hash is required.
 """
 from __future__ import annotations
+import os as _count14_os  # endpoints/keys/host paths come from environment; see CONFIGURATION.md
+_C14_SCRATCH = _count14_os.environ.get('COUNT14_SCRATCH_ROOT', '/srv/count14/scratch2')
 
 import argparse
 import copy
@@ -19,7 +21,7 @@ import subprocess
 import sys
 import time
 
-SOURCE = Path('/mnt/ptb-scratch2/ag30v2x48/final-runtime/framework_root')
+SOURCE = Path((_C14_SCRATCH + '/ag30v2x48/final-runtime/framework_root'))
 CP = Path('/usr/bin/cp')
 MAX_METADATA_NODES = 200000
 MAX_METADATA_SECONDS = 60
@@ -175,7 +177,7 @@ def selected_row(contract,arm):
     arms=[r for r in contract['arms'] if r['arm']==arm]
     need(len(rows)==len(arms)==1,'FRAMEWORK_ONE_EXACT_SELECTED_ARM_B1')
     root=Path(rows[0]['root']);arm_root=Path(arms[0]['root'])
-    need(root.is_absolute() and root.is_relative_to(Path('/mnt/ptb-scratch2')) and
+    need(root.is_absolute() and root.is_relative_to(Path((_C14_SCRATCH))) and
          root==arm_root/'b1' and not SOURCE.is_relative_to(root) and not root.is_relative_to(SOURCE),
          'FRAMEWORK_ONLY_CURRENT_CONTRACT_SELECTED_SCRATCH2_B1_ROOT')
     return rows[0]

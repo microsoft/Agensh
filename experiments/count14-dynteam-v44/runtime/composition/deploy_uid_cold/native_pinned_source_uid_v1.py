@@ -3,6 +3,9 @@
 Only build_stager(original_stager_module, args) is the production interface.
 No chmod/chown, source writes, credential reads, retry, or root creation here.
 """
+import os as _count14_os  # endpoints/keys/host paths come from environment; see CONFIGURATION.md
+_C14_HOSTNAME = _count14_os.environ.get('COUNT14_HOSTNAME', 'count14-host')
+_C14_SCRATCH = _count14_os.environ.get('COUNT14_SCRATCH_ROOT', '/srv/count14/scratch2')
 from pathlib import Path
 from types import FunctionType, ModuleType
 import hashlib
@@ -141,12 +144,12 @@ def exact_current_native_source(original, path, roots):
     """One exact current frozen native559 root; NEVER broaden old KEEP."""
     import json
     source_home = Path(__file__).resolve().parents[2]
-    expected_home = Path('/mnt/ptb-scratch2/ct14-dynteam-formal-msg237-20261110-v33/source-msg276-n33-session-ready-repropose-v44')
+    expected_home = Path((_C14_SCRATCH + '/ct14-dynteam-formal-msg237-20261110-v33/source-msg276-n33-session-ready-repropose-v44'))
     native = source_home/'NATIVE_FINAL_SOURCE'
     if Path(path) != native:
         return original.kept(path, roots)
     need(source_home == expected_home and native.resolve() == native and native.is_dir() and
-         os.geteuid() == 0 and os.uname().nodename == 'H100DEV4',
+         os.geteuid() == 0 and os.uname().nodename == (_C14_HOSTNAME),
          'FORMAL_UID_EXACT_CURRENT_NATIVE559_INITIAL_SOURCE_ONLY')
     need(not any((source_home.parent/arm/'owner/ledger/ledger.sqlite').exists() for arm in ('u','r')),
          'FORMAL_UID_NATIVE_SOURCE_ONLY_BEFORE_OWNER_NO_LIVE_CHANGE')

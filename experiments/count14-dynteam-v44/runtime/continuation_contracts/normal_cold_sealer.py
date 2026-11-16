@@ -4,6 +4,8 @@ NOT an authoritative handoff/cold-ready proof. No SDK/CAS/PKL/private log body
 read/hash, financial rewrite/backup, model dispatch, force stop, new thread, or
 raw SID is exported. Only registered framework controls and existing refs/pins.
 """
+import os as _count14_os  # endpoints/keys/host paths come from environment; see CONFIGURATION.md
+_C14_SCRATCH = _count14_os.environ.get('COUNT14_SCRATCH_ROOT', '/srv/count14/scratch2')
 from contextlib import contextmanager
 from dataclasses import asdict
 from pathlib import Path
@@ -199,7 +201,7 @@ class NormalColdCandidateSealer:
              type(b.domain)is FullUsedDomainProducer and type(core.roles)is DynamicRoleGate and
              core.roles.ledger is core.ledger and core.gate._dynteam_role_control is core.roles and
              core.home==Path(core.contract['arms'][0]['root'])/'owner'and
-             core.home.resolve()==core.home and core.home.is_relative_to('/mnt/ptb-scratch2')and
+             core.home.resolve()==core.home and core.home.is_relative_to((_C14_SCRATCH))and
              not hasattr(core,'normal_cold_sealer'),
              'NORMAL_SEALER_FIRST_REGISTERED_COLD_SIX_NO_OWN_OR_RETAINED_PAID_INSTALL')
         self.owner,self.core,self.cohort,self.barrier=owner,core,b.cohort,b

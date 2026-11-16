@@ -4,6 +4,9 @@ No Docker call, network creation, FORWARD/policy/sysctl/NAT or daemon change.
 Only the launcher's fixed public network-inspect projection is consumed. A
 fresh real network/kernel proof remains required before scientific activation.
 """
+import os as _count14_os  # endpoints/keys/host paths come from environment; see CONFIGURATION.md
+_C14_SCRATCH1 = _count14_os.environ.get('COUNT14_SCRATCH1_ROOT', '/srv/count14/scratch1')
+_C14_SCRATCH = _count14_os.environ.get('COUNT14_SCRATCH_ROOT', '/srv/count14/scratch2')
 from dataclasses import dataclass
 from pathlib import Path
 import ipaddress
@@ -34,8 +37,8 @@ class NativeNetworkBinding:
             need(any(p.startswith('OWN-') for p in root.parts) and
                  any(p.startswith('OWN-') for p in daemon.parts), 'DYNTEAM_OWN_NETWORK_EXPLICIT_ONLY')
         else:
-            need((str(root).startswith('/mnt/ptb-scratch2/count14-dynteam') or (contract.get('mode')=='production' and digest(contract)=='9d279c1a1fb45737b675dc58800c6da154a93e793556f0f090ada7458700a391' and row in contract['trajectories'] and str(root) in ('/mnt/ptb-scratch2/ct14-dynteam-formal-msg237-20261110-v33/u/b1', '/mnt/ptb-scratch2/ct14-dynteam-formal-msg237-20261110-v33/u/b2', '/mnt/ptb-scratch2/ct14-dynteam-formal-msg237-20261110-v33/u/b3', '/mnt/ptb-scratch2/ct14-dynteam-formal-msg237-20261110-v33/r/b1', '/mnt/ptb-scratch2/ct14-dynteam-formal-msg237-20261110-v33/r/b2', '/mnt/ptb-scratch2/ct14-dynteam-formal-msg237-20261110-v33/r/b3'))) and
-                 (daemon.is_relative_to('/mnt/ptb-scratch2') or daemon.is_relative_to('/mnt/ptb-scratch')),
+            need((str(root).startswith((_C14_SCRATCH + '/count14-dynteam')) or (contract.get('mode')=='production' and digest(contract)=='9d279c1a1fb45737b675dc58800c6da154a93e793556f0f090ada7458700a391' and row in contract['trajectories'] and str(root) in ((_C14_SCRATCH + '/ct14-dynteam-formal-msg237-20261110-v33/u/b1'), (_C14_SCRATCH + '/ct14-dynteam-formal-msg237-20261110-v33/u/b2'), (_C14_SCRATCH + '/ct14-dynteam-formal-msg237-20261110-v33/u/b3'), (_C14_SCRATCH + '/ct14-dynteam-formal-msg237-20261110-v33/r/b1'), (_C14_SCRATCH + '/ct14-dynteam-formal-msg237-20261110-v33/r/b2'), (_C14_SCRATCH + '/ct14-dynteam-formal-msg237-20261110-v33/r/b3')))) and
+                 (daemon.is_relative_to((_C14_SCRATCH)) or daemon.is_relative_to((_C14_SCRATCH1))),
                  'DYNTEAM_NATIVE_DAEMON_AND_NEW_DATA_OFF_ROOT_DISK')
         need(type(self.network_id) is str and len(self.network_id)==64 and
              all(c in '0123456789abcdef' for c in self.network_id) and

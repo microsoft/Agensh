@@ -5,6 +5,8 @@ the frozen two-arm contract. OWN fixtures are explicit and cannot activate.
 The upstream Ledger class and all previously constructed instances are untouched.
 """
 from __future__ import annotations
+import os as _count14_os  # endpoints/keys/host paths come from environment; see CONFIGURATION.md
+_C14_SCRATCH = _count14_os.environ.get('COUNT14_SCRATCH_ROOT', '/srv/count14/scratch2')
 
 import ast
 import hashlib
@@ -18,13 +20,13 @@ from common import need
 
 BASE_REGISTER_SHA256 = "9304c5da778ee03923c6b6495f5ac8aff5b2a65ebddbcd96ee1a0e979503e14f"
 ROOTS = (
-    '/mnt/ptb-scratch2/ct14-dynteam-formal-msg237-20261110-v33/u',
-    '/mnt/ptb-scratch2/ct14-dynteam-formal-msg237-20261110-v33/r',
-    "/mnt/ptb-scratch2/count14-dynteam-70e2ca54-20261105",
-    "/mnt/ptb-scratch2/count14-dynteam-70e2ca54-smoke-20261105",
-    "/mnt/ptb-scratch2/count14-dynteam-racing-70e2ca54-21a0413e-20261105",
-    "/mnt/ptb-scratch2/count14-dynteam-racing-70e2ca54-21a0413e-smoke-20261105",
-    '/mnt/ptb-scratch2/ct14-dtr-smoke-20261105/u',
+    (_C14_SCRATCH + '/ct14-dynteam-formal-msg237-20261110-v33/u'),
+    (_C14_SCRATCH + '/ct14-dynteam-formal-msg237-20261110-v33/r'),
+    (_C14_SCRATCH + "/count14-dynteam-70e2ca54-20261105"),
+    (_C14_SCRATCH + "/count14-dynteam-70e2ca54-smoke-20261105"),
+    (_C14_SCRATCH + "/count14-dynteam-racing-70e2ca54-21a0413e-20261105"),
+    (_C14_SCRATCH + "/count14-dynteam-racing-70e2ca54-21a0413e-smoke-20261105"),
+    (_C14_SCRATCH + '/ct14-dtr-smoke-20261105/u'),
 )
 
 

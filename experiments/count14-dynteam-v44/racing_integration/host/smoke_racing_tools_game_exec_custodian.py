@@ -5,6 +5,9 @@ Only this fixed own exec's metadata/API is read. No general inspect/log/command
 projection, model client, signal, cancellation, retry, root exec or new daemon.
 Once start is attempted its exec ID is retained even after observation failure.
 """
+import os as _count14_os  # endpoints/keys/host paths come from environment; see CONFIGURATION.md
+_C14_SCRATCH1 = _count14_os.environ.get('COUNT14_SCRATCH1_ROOT', '/srv/count14/scratch1')
+_C14_SCRATCH = _count14_os.environ.get('COUNT14_SCRATCH_ROOT', '/srv/count14/scratch2')
 import hashlib,http.client,json,os,pathlib,socket,stat,sys,time
 
 
@@ -181,11 +184,11 @@ def main():
         plan['schema']=='count14-own-racing-exec-custodian-plan-v1',
         'DYNTEAM_RACING_EXEC_FIXED_OWN_CONTROL_PLAN')
     need(root.resolve()==root and root.is_dir() and
-        (root.is_relative_to('/mnt/ptb-scratch2') or root.is_relative_to('/mnt/ptb-scratch')),
+        (root.is_relative_to((_C14_SCRATCH)) or root.is_relative_to((_C14_SCRATCH1))),
         'DYNTEAM_RACING_EXEC_ONLY_NEW_SCRATCH_CONTROL_ROOT')
     socket_path=plan['docker_socket'];p=pathlib.Path(socket_path)
     need(p.resolve()==p and stat.S_ISSOCK(p.stat().st_mode) and
-        (p.is_relative_to('/mnt/ptb-scratch2') or p.is_relative_to('/mnt/ptb-scratch')),
+        (p.is_relative_to((_C14_SCRATCH)) or p.is_relative_to((_C14_SCRATCH1))),
         'DYNTEAM_RACING_EXEC_ORIGINAL_PRIVATE_SOCKET_ONLY')
     cid=plan['container_id'];nonce=plan['nonce']
     need(len(cid)==64 and all(c in '0123456789abcdef' for c in cid) and len(nonce)==32,

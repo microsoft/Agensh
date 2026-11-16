@@ -4,6 +4,9 @@ Import is stdlib-only and side-effect-free. Generated entry installs only pinned
 framework roots, never ambient env/cwd; actual create is explicit. No direct key,
 question/archive/description/candidate/private-context read or model operation.
 """
+import os as _count14_os  # endpoints/keys/host paths come from environment; see CONFIGURATION.md
+_C14_SCRATCH1 = _count14_os.environ.get('COUNT14_SCRATCH1_ROOT', '/srv/count14/scratch1')
+_C14_SCRATCH = _count14_os.environ.get('COUNT14_SCRATCH_ROOT', '/srv/count14/scratch2')
 from pathlib import Path
 import hashlib
 import importlib.util
@@ -200,7 +203,7 @@ def create_prefix_owner(bindings_path,bindings_sha256,*,code_root,factory_path,f
     home=Path(contract['arms'][0]['root'])/'owner'
     for row in contract['trajectories']:
         p=Path(row['root']);require(p.is_absolute() and p.resolve()==p and p.is_dir() and
-            (p.is_relative_to('/mnt/ptb-scratch2') or p.is_relative_to('/mnt/ptb-scratch')),
+            (p.is_relative_to((_C14_SCRATCH)) or p.is_relative_to((_C14_SCRATCH1))),
             'DYNTEAM_FACTORY_ONLY_REGISTERED_NEW_SCRATCH_TRAJECTORY_ROOTS')
     route=_typed(DockerRoute,b['docker_route'],{'cli','socket_path','data_root'})
     require(route.qualification_only is False,'DYNTEAM_FACTORY_REAL_PRIVATE_DOCKER_NOT_SHADOW')

@@ -179,10 +179,11 @@ an instruction to change the reviewer's host.
 
 ## Exact relationship to frozen V44
 
-**Publication edits.** Fifteen Python files differ from the frozen V44 bytes on purpose: hard-coded
-model-gateway URLs and provider-key paths were replaced by environment lookups (see
-[`CONFIGURATION.md`](CONFIGURATION.md)). Each such file gains one `import os as _count14_os` line, so
-line numbers quoted elsewhere in this README for those files are off by one. The original and
+**Publication edits.** 67 files differ from the frozen V44 bytes on purpose: hard-coded
+model-gateway URLs, provider-key paths, testbed scratch paths, host name, boot ID and filesystem
+UUID were replaced by environment lookups (see
+[`CONFIGURATION.md`](CONFIGURATION.md)). Each such Python file gains an `import os as _count14_os` line plus one constant line per setting it
+uses, so line numbers quoted elsewhere in this README for those files are shifted. The original and
 published SHA-256 of every edited file are in [`CONFIGURED_FILES.json`](CONFIGURED_FILES.json);
 `tools/verify_mapping.py` reports exactly these files as mismatches against the frozen source.
 All other files are byte-identical to the frozen source.
@@ -290,89 +291,15 @@ not a runtime configuration and is not expanded into this inventory.
 | `http://{gateway}:{port}/v1` | `ops_tools/host/task-host.py:244` |
 | `http://{host}:{port}/v1` | `adapter/runtime/native_cold_exports.py:227`; `adapter/runtime/native_host_environment.py:180` |
 
-## Frozen host/path/root/seed references — unchanged
+## Testbed host and path settings
 
-The following inventory lists every matching source line containing the frozen
-Dev4 host, scratch/development paths, experiment/container-root labels, or the
-three paired seed values. It lists locations rather than duplicating internal
-path literals. Generic variable names such as `seed` are not fixed values.
-The three paired seed values are stated above; the full frozen-source ancestry
-is intentionally recorded in `MAPPING.json`, not renamed or executed.
-
-| Review file | Lines | Marker |
-| --- | --- | --- |
-| `adapter/core/dynteam_dual_manifest.py` | 7, 8 | host/root/path |
-| `adapter/core/dynteam_manifest.py` | 5, 11, 12, 13 | host/root/path |
-| `adapter/core/dynteam_manifest.py` | 10 | paired seed |
-| `adapter/runtime/anonymous_roster_journal.py` | 81, 82, 85, 88 | host/root/path |
-| `adapter/runtime/native_docker_scope.py` | 70 | host/root/path |
-| `adapter/runtime/native_network_binding.py` | 37, 38 | host/root/path |
-| `adapter/runtime/smoke_bootstrap_task_factory.py` | 203 | host/root/path |
-| `adapter/runtime/smoke_install_layout.py` | 18 | host/root/path |
-| `admission/observer/performance_patch.py` | 11, 118 | host/root/path |
-| `admission/observer/selected_numeric.py` | 99, 100 | host/root/path |
-| `admission/policy/seed46_resources.py` | 6, 7, 8, 16, 17, 24, 63 | host/root/path |
-| `admission/resources/native_cohort_resources.py` | 39, 40, 41, 216, 226, 229 | host/root/path |
-| `admission/resources/native_resource_projections.py` | 168, 431 | host/root/path |
-| `admission/resources/native_resource_sampler.py` | 46, 47, 92, 153 | host/root/path |
-| `admission/resources/native_system_probe_child.py` | 84 | host/root/path |
-| `admission/system_probe/original_pilot_probe.py` | 5, 115 | host/root/path |
-| `contracts/production.json` | 1 | host/root/path, paired seed |
-| `finalization_k3/checkpoints/smoke_checkpoint_final_deploy.py` | 19, 20, 21 | host/root/path |
-| `finalization_k3/checkpoints/smoke_checkpoint_final_framework_copy_v2.py` | 22, 178 | host/root/path |
-| `finalization_k3/queue_approved_cold/approved_queue_install.py` | 4, 170 | host/root/path |
-| `framework/extensions/build_expansion_runtime.py` | 24 | host/root/path |
-| `framework/extensions/build_x48_host.py` | 11 | host/root/path |
-| `framework/extensions/expansion100_contract.py` | 15, 17 | host/root/path |
-| `framework/extensions/expansion100_contract.py` | 11 | paired seed |
-| `framework/extensions/glm_session_header.py` | 7 | host/root/path |
-| `framework/native/manifest.py` | 6 | paired seed |
-| `framework/native/ops_native_idle_neutral_v2.py` | 7 | host/root/path |
-| `framework/native/r16_attempt_identity.py` | 10 | paired seed |
-| `framework/native/r16_lease120_recovery.py` | 21 | paired seed |
-| `framework/native/r16_live_adoption.py` | 12 | paired seed |
-| `framework/native/r16_nofile_continuation.py` | 57, 244 | paired seed |
-| `framework/native/r16_original_session_rebind.py` | 20 | paired seed |
-| `framework/native/run_agensh_v2.py` | 105 | host/root/path |
-| `framework/native/run_agensh_v2.py` | 24 | paired seed |
-| `framework/startup/fresh48_backend_inputs.py` | 12, 13 | host/root/path |
-| `framework/startup/fresh48_bootstrap.py` | 8, 10, 36, 37 | host/root/path |
-| `framework/startup/fresh48_configuration.py` | 21 | host/root/path |
-| `framework/startup/fresh48_projection.py` | 14 | host/root/path |
-| `framework/startup/fresh48_scope.py` | 10, 13 | host/root/path |
-| `framework/startup/prepare_fresh48.py` | 14, 49, 86 | host/root/path |
-| `framework/startup/run_fresh48.py` | 10 | host/root/path |
-| `ops_tools/host/task-host.py` | 13, 48, 49, 50 | host/root/path |
-| `ops_tools/launch/count14_spawn_loop.sh` | 30 | host/root/path |
-| `ops_tools/reporting/smoke_bootstrap_task_tester.py` | 69, 70 | host/root/path |
-| `racing_integration/host/native_racing_install_layout.py` | 103, 104 | host/root/path |
-| `racing_integration/host/smoke_racing_tools_game_exec_custodian.py` | 184, 188 | host/root/path |
-| `relay/core/new_scope_ledger.py` | 21, 22, 23, 24, 25, 26, 27 | host/root/path |
-| `relay/providers/gateway_pr1_v2.py` | 78 | host/root/path |
-| `relay/providers/newroot_private_resource_sources.py` | 32, 77, 81 | host/root/path |
-| `runtime/child_assets/actualn_factory_cold/original_public_kernels/terminal.py` | 10 | host/root/path |
-| `runtime/child_assets/complete_sampler/complete_sampler_formal/complete_new_outside_scope_port_v2.py` | 10, 11, 12 | host/root/path |
-| `runtime/child_assets/provider_gateway_pr1/final/smoke_checkpoint_final_child.py` | 78 | host/root/path |
-| `runtime/child_assets/provider_gateway_pr1/sampler/gateway_pr1_v2.py` | 63 | host/root/path |
-| `runtime/child_assets/provider_gateway_pr1/system/runtime/native_system_probe_child.py` | 84 | host/root/path |
-| `runtime/composition/deploy/formal_deploy.py` | 127 | host/root/path |
-| `runtime/composition/deploy_uid_cold/native_pinned_source_uid_v1.py` | 144, 149 | host/root/path |
-| `runtime/composition/deploy_uid_cold/stage_exact_runtime_uid_v1.py` | 21 | host/root/path |
-| `runtime/composition/newroot_native_exact_metadata_cold/native_exact_control_bind.py` | 51 | host/root/path |
-| `runtime/composition/newroot_native_exact_metadata_cold/native_optional_stop_signal_validator.py` | 77 | host/root/path |
-| `runtime/composition/newroot_native_exact_metadata_cold/newroot_native_metadata.py` | 27, 35 | host/root/path |
-| `runtime/continuation_contracts/financial_runtime_source_control.py` | 343, 472 | host/root/path |
-| `runtime/continuation_contracts/normal_cold_sealer.py` | 202 | host/root/path |
-| `runtime/session_control/build_native_spawn_loop.py` | 119 | host/root/path |
-| `runtime/source_bindings/agent_bridge_user_layer.py` | 38, 41 | host/root/path |
-| `runtime/source_bindings/durable_service_source_controls.py` | 276 | host/root/path |
-| `runtime/source_bindings/exact_private_config_projection_v1.py` | 20, 109 | host/root/path |
-| `runtime/source_bindings/formal_full_used_factory.py` | 50 | host/root/path |
-| `runtime/source_bindings/formal_full_used_maps.py` | 109 | host/root/path |
-| `runtime/source_bindings/formal_gateway_cold.py` | 60 | host/root/path |
-| `runtime/source_bindings/freeze_source.py` | 27 | host/root/path |
-| `runtime/source_bindings/metadata_inert_pair.py` | 194 | host/root/path |
-| `runtime/source_bindings/native_bridge_user_cold.py` | 39 | host/root/path |
+The original testbed's scratch mounts, host name, boot ID and scratch-filesystem UUID are **not
+hard-coded**: they are read from `COUNT14_SCRATCH_ROOT`, `COUNT14_SCRATCH1_ROOT`, `COUNT14_HOSTNAME`,
+`COUNT14_HOST_BOOT_ID`, `COUNT14_RETIRED_OWNER_BOOT_ID` and `COUNT14_SCRATCH_FS_UUID`
+(see [`CONFIGURATION.md`](CONFIGURATION.md)). Experiment-root directory names (for example the
+per-run root labels under the scratch root) remain as relative names below that root. The three
+paired seeds are experiment configuration and stay in the contract. Every edited file is listed in
+[`CONFIGURED_FILES.json`](CONFIGURED_FILES.json).
 
 ### External credential-file references (paths only, no file contents)
 

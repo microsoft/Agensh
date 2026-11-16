@@ -5,6 +5,8 @@ pending; full-roster compilation is design/test coverage, NOT authority to
 apply it to dynamic roles, another root, or either formal arm. Original model
 CLI UID/GID, image defaults, commands, capabilities and science stay intact.
 """
+import os as _count14_os  # endpoints/keys/host paths come from environment; see CONFIGURATION.md
+_C14_HOSTNAME = _count14_os.environ.get('COUNT14_HOSTNAME', 'count14-host')
 from pathlib import Path
 import os
 import stat
@@ -35,10 +37,10 @@ def proposed_layer(*, contract, row, roles):
 
 
 def write_OWN_layer(path, *, contract, row, roles):
-    """Only a local OWN metadata fixture; cannot write a Dev4 runtime layer."""
+    """Only a local OWN metadata fixture; cannot write a the production host runtime layer."""
     import json
     path = Path(path)
-    need(os.uname().nodename != 'H100DEV4' and path.is_absolute() and
+    need(os.uname().nodename != (_C14_HOSTNAME) and path.is_absolute() and
          any(p.startswith('OWN-') for p in path.parts) and path.parent.resolve() == path.parent and
          not path.exists() and not path.is_symlink(), 'PROPOSED_BRIDGE_USER_OWN_ONLY_NO_PRODUCTION_WRITER')
     raw = (json.dumps(proposed_layer(contract=contract, row=row, roles=roles), sort_keys=True) + '\n').encode()

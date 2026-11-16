@@ -6,6 +6,8 @@ durably BEFORE replacing its in-memory projection. A failed publication cannot
 leave a RAM-only first/birth/session marker and silently skip it on retry.
 """
 from __future__ import annotations
+import os as _count14_os  # endpoints/keys/host paths come from environment; see CONFIGURATION.md
+_C14_SCRATCH = _count14_os.environ.get('COUNT14_SCRATCH_ROOT', '/srv/count14/scratch2')
 
 from dataclasses import asdict
 import json
@@ -78,14 +80,14 @@ class AnonymousRosterJournal:
              self.path.name == "DYNTEAM_ROSTER_PUBLIC_METADATA.sqlite",
              "DYNTEAM_PUBLIC_METADATA_FILENAME_NOT_FINANCIAL_DB")
         roots = (ROOT, SMOKE_ROOT) if arm == "DYNTEAM" else (
-            "/mnt/ptb-scratch2/count14-dynteam-racing-70e2ca54-21a0413e-20261105",
-            "/mnt/ptb-scratch2/count14-dynteam-racing-70e2ca54-21a0413e-smoke-20261105")
+            (_C14_SCRATCH + "/count14-dynteam-racing-70e2ca54-21a0413e-20261105"),
+            (_C14_SCRATCH + "/count14-dynteam-racing-70e2ca54-21a0413e-smoke-20261105"))
         scopes = [Path(root) / f"b{block}" / "metadata" for root in roots]
         if type(block) is int and block == 1 and arm in ('DYNTEAM','DYNTEAM_RACING'):
-            scopes.append(Path('/mnt/ptb-scratch2/ct14-dynteam-racing-smoke-msg232-20261109-v1')/('u' if arm=='DYNTEAM' else 'r')/'b1/metadata')
+            scopes.append(Path((_C14_SCRATCH + '/ct14-dynteam-racing-smoke-msg232-20261109-v1'))/('u' if arm=='DYNTEAM' else 'r')/'b1/metadata')
         # Exact registered formal six-track namespace, not arbitrary ancestors.
         if type(block) is int and block in (1, 2, 3) and arm in ("DYNTEAM", "DYNTEAM_RACING"):
-            scopes.append(Path("/mnt/ptb-scratch2/ct14-dynteam-formal-msg237-20261110-v33") /
+            scopes.append(Path((_C14_SCRATCH + "/ct14-dynteam-formal-msg237-20261110-v33")) /
                           ("u" if arm == "DYNTEAM" else "r") / f"b{block}" / "metadata")
         own_fixture = any(part.startswith("OWN-") for part in self.path.parts)
         need((qualification_only and own_fixture) or (not qualification_only and self.path.parent in scopes),

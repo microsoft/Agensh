@@ -4,6 +4,8 @@ Only framework control fields and fixed schema/bool queries. No bodies,
 result/event metadata, broad DB pin, live SQL under science locks, method
 mutation, default-empty custody, callback serialization, or activation.
 """
+import os as _count14_os  # endpoints/keys/host paths come from environment; see CONFIGURATION.md
+_C14_SCRATCH = _count14_os.environ.get('COUNT14_SCRATCH_ROOT', '/srv/count14/scratch2')
 from dataclasses import asdict
 from pathlib import Path
 from types import MethodType,CodeType,SimpleNamespace
@@ -340,7 +342,7 @@ def _source(owner,budget):
  current=process_birth(os.getpid());core=owner.core
  M.need(body['old_owner_birth']==asdict(current)and body['contract_sha256']==M.digest(core.contract)and
   body['owner_home']==M.descriptor(core.home)and core.home==Path(core.contract['arms'][0]['root'])/'owner'and
-  core.home.is_relative_to('/mnt/ptb-scratch2')and issuer.birth==current,
+  core.home.is_relative_to((_C14_SCRATCH))and issuer.birth==current,
   'FINANCIAL_RUNTIME_SIDECAR_SAME_REAL_SOURCE_BIRTH_HOME_CONTRACT_NOT_NEW_AUTHORITY')
  retirement=T._retired_transport(owner,budget)
  M.need(retirement==body['transport_retirement'],
@@ -469,7 +471,7 @@ def load_registered_source(owner,*,ticket,read_budget):
  pair=owner.core.metadata_inert_pair;material=proof.material
  home=M.existing(cap.owner_home,directory=True,private=True)
  M.need(home==owner.core.home==Path(material['contract']['arms'][0]['root'])/'owner'and
-  home.is_relative_to('/mnt/ptb-scratch2'),'FINANCIAL_RUNTIME_SIDECAR_FIXED_REGISTERED_HOME_NOT_CALLER_PATH')
+  home.is_relative_to((_C14_SCRATCH)),'FINANCIAL_RUNTIME_SIDECAR_FIXED_REGISTERED_HOME_NOT_CALLER_PATH')
  body,reference=_read_complete(home,own=False,budget=read_budget)
  original_ticket_body=T._read_reference(ticket,own=False,read_budget=read_budget)
  storage=body['storage']

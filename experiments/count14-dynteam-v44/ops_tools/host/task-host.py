@@ -2,6 +2,11 @@
 No alternate science loop, scores, provider dispatch, candidate inspection or
 ledger construction. The developer driver owns all scientific state machines.
 """
+import os as _count14_os  # endpoints/keys/host paths come from environment; see CONFIGURATION.md
+_C14_BOOT = _count14_os.environ.get('COUNT14_HOST_BOOT_ID', '00000000-0000-0000-0000-000000000000')
+_C14_FS_UUID = _count14_os.environ.get('COUNT14_SCRATCH_FS_UUID', '00000000-0000-0000-0000-000000000000')
+_C14_HOSTNAME = _count14_os.environ.get('COUNT14_HOSTNAME', 'count14-host')
+_C14_SCRATCH = _count14_os.environ.get('COUNT14_SCRATCH_ROOT', '/srv/count14/scratch2')
 from pathlib import Path
 import datetime,hashlib,http.client,ipaddress,json,os,re,secrets,socket,stat,subprocess,sys,time,urllib.request,urllib.parse,uuid
 BASE=Path(__file__).resolve().parent
@@ -10,8 +15,8 @@ from whole_team_backend_inventory import collect,root_identity,process
 from prepare_scientific_backend_infra import parameters,BOOTSTRAP
 from prepare_first_scientific_backend_infra_once import network_plan
 D=['docker','--host','unix:///var/run/docker.sock']
-PREFIX=Path('/mnt/ptb-scratch2/agensh-comparison-20261026/v2-20261028-a3')
-BOOT='899408ed-8919-4f90-bd63-e88d11b38868'
+PREFIX=Path((_C14_SCRATCH + '/agensh-comparison-20261026/v2-20261028-a3'))
+BOOT=(_C14_BOOT)
 SYSTEM='0ca0fc69-5a6f-4b60-abd7-9282fd010ff2'
 WORKER_IMAGE='sha256:72c6cce8ffe798d89ea17930426455f948185c9db0085eb3c1ee145bc36844b2'
 ROUTER_IMAGE='sha256:c3f2fb108890a38b22b320a5cdcf3427752a8d59002c1260fddd72885e191a66'
@@ -45,9 +50,9 @@ def config():
  p=BASE/'OPS_HOST_CONFIGURATION.json';s=p.lstat()
  need(p.resolve()==p and stat.S_ISREG(s.st_mode)and s.st_uid==0 and stat.S_IMODE(s.st_mode)==0o600 and s.st_nlink==1,'OPS_TRUSTED_CONFIG')
  c=json.loads(p.read_bytes());need(c['schema']=='agensh-ops-fixed-native-host-v1','OPS_CONFIG_SCHEMA')
- need(c.get('manifest_root')=='/mnt/ptb-scratch2/ag28v2a3'and c.get('repository')=='main-v2-a3','EXACT_NEW_SCIENTIFIC_ROOT_REPOSITORY')
- need(os.geteuid()==0 and os.uname().nodename=='H100DEV4'and Path('/proc/sys/kernel/random/boot_id').read_text().strip()==BOOT,'EXACT_HOST_BOOT')
- need(call(['findmnt','-n','-o','UUID','--target','/mnt/ptb-scratch2']).decode().strip()=='0a1562dc-9dc6-42ca-bb42-d3df91417c5c','MOUNT_UUID')
+ need(c.get('manifest_root')==(_C14_SCRATCH + '/ag28v2a3')and c.get('repository')=='main-v2-a3','EXACT_NEW_SCIENTIFIC_ROOT_REPOSITORY')
+ need(os.geteuid()==0 and os.uname().nodename==(_C14_HOSTNAME)and Path('/proc/sys/kernel/random/boot_id').read_text().strip()==BOOT,'EXACT_HOST_BOOT')
+ need(call(['findmnt','-n','-o','UUID','--target',(_C14_SCRATCH)]).decode().strip()==(_C14_FS_UUID),'MOUNT_UUID')
  need(call(D+['info','--format','{{.ID}} {{.DockerRootDir}}']).decode().strip()==SYSTEM+' /var/lib/docker','SYSTEM_DOCKER_ONLY')
  # Public host closure, not any opaque scientific or credential material.
  for name,pin in c['host_files'].items():

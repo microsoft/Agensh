@@ -4,6 +4,8 @@ The c88 frozen source is imported privately and never changed on disk/in RAM.
 Only its source_stat binding and its single mkdir call are privately replaced.
 No models/owners/SQL/Docker/credentials/scientific content are accessed.
 """
+import os as _count14_os  # endpoints/keys/host paths come from environment; see CONFIGURATION.md
+_C14_SCRATCH = _count14_os.environ.get('COUNT14_SCRATCH_ROOT', '/srv/count14/scratch2')
 from pathlib import Path
 from types import FunctionType
 import argparse
@@ -18,7 +20,7 @@ import sys
 
 ORIGINAL_ASSETS_SHA256 = '16e6ab60b88ab4c0d86e4790f461b0fd330a0313bf7071b6dafb30bec7877a16'
 CONTRACT_SHA256 = '3fa035cc45db9b9e539581c0c37d10fb46c576d79ea61f0ce52c08df44d7ae16'
-ARM_ROOT = Path('/mnt/ptb-scratch2/count14-dynteam-70e2ca54-smoke-20261105')
+ARM_ROOT = Path((_C14_SCRATCH + '/count14-dynteam-70e2ca54-smoke-20261105'))
 ASSETS_HOME = ARM_ROOT/'b1/approved-final-runtime-assets-v1'
 EXACT_SOURCE_INODES = {'image-mapping.json': 3474021663,
     'roster.json': 7577477961, 'validator-preflight.json': 7577477962}

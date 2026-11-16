@@ -6,6 +6,9 @@ No target/candidate/pickle/message/log/credential body is inspected. These
 functions must run in a finite read-only sampler child, outside science locks;
 the SAME-owner producer/publication supervisor is still a separate binding.
 """
+import os as _count14_os  # endpoints/keys/host paths come from environment; see CONFIGURATION.md
+_C14_SCRATCH1 = _count14_os.environ.get('COUNT14_SCRATCH1_ROOT', '/srv/count14/scratch1')
+_C14_SCRATCH = _count14_os.environ.get('COUNT14_SCRATCH_ROOT', '/srv/count14/scratch2')
 from pathlib import Path
 from types import ModuleType,SimpleNamespace
 import ast
@@ -165,7 +168,7 @@ def registered_outside_projection(registry_path,registry_sha256,cache_directory,
             urlopen=request.build_opener(request.ProxyHandler({})).open)) # private OWN module only
         registered=(value,registry_sha256) # ORIGINAL explicitly OWN-only seam
     else:
-        need(OWN_metrics_url is None and directory.is_relative_to('/mnt/ptb-scratch2') and
+        need(OWN_metrics_url is None and directory.is_relative_to((_C14_SCRATCH)) and
              directory.parts[3].startswith('count14-dynteam'),
              'DYNTEAM_OUTSIDE_HEALTH_INDEX_ONLY_NEW_ROOT_NO_HOST_CONFIG_CHANGE')
         O.BOOT=Path('/proc/sys/kernel/random/boot_id').read_text().strip()
@@ -428,7 +431,7 @@ def docker_projection(docker,*,dockerd_birth,containerd_socket,containerd_birth,
         need(any(v.startswith('OWN-') for v in c.parts),'DYNTEAM_OWN_CONTAINERD_EXACT_FIXTURE')
     else:
         need(dockerd_birth.uid==containerd_birth.uid==0 and
-             any(c.is_relative_to(base) for base in ('/mnt/ptb-scratch','/mnt/ptb-scratch2')),
+             any(c.is_relative_to(base) for base in ((_C14_SCRATCH1),(_C14_SCRATCH))),
              'DYNTEAM_RESOURCE_NO_SYSTEM_CONTAINERD_SOCKET')
         args=Path('/proc',str(dockerd_birth.pid),'cmdline').read_bytes().split(b'\0');selected=[]
         for i,arg in enumerate(args):

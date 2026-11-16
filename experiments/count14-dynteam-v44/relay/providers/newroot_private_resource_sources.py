@@ -5,6 +5,9 @@ call. Only the exact formal-six/isolated390 contracts may select this bundle;
 original OWN-only fixtures explicitly retain their original fixture sampler.
 Only child/hash changes. No factory/bootstrap/python/plan/body is substituted.
 """
+import os as _count14_os  # endpoints/keys/host paths come from environment; see CONFIGURATION.md
+_C14_HOSTNAME = _count14_os.environ.get('COUNT14_HOSTNAME', 'count14-host')
+_C14_SCRATCH = _count14_os.environ.get('COUNT14_SCRATCH_ROOT', '/srv/count14/scratch2')
 from pathlib import Path
 from dataclasses import replace
 import hashlib,json,os,stat
@@ -29,7 +32,7 @@ def scope(core):
     'EXACT18_ONLY_FROZEN_FORMAL_SIX_CONTRACT')
  else:
   need(c['mode']=='smoke'and digest(c)==RACING and len(core.rows)==2 and
-   tuple(a['root']for a in c['arms'])==('/mnt/ptb-scratch2/ct14-dtr-smoke-20261105/u','/mnt/ptb-scratch2/ct14-dtr-smoke-20261105/r'),
+   tuple(a['root']for a in c['arms'])==((_C14_SCRATCH + '/ct14-dtr-smoke-20261105/u'),(_C14_SCRATCH + '/ct14-dtr-smoke-20261105/r')),
    'EXACT18_ONLY_FROZEN_ISOLATED390_PAIR_CONTRACT')
  return True
 def frozen_source(original,*,directory):
@@ -74,11 +77,11 @@ def select_for_newroot(original,*,core):
        for n in('requests','unknown_charges','aux_scopes','aux_permits')),
        'EXACT18_PROSPECTIVE_BEFORE_SCIENCE_UNKNOWN_OR_AUX_ONLY')
  if core.qualification_only:
-  need(os.uname().nodename!='H100DEV4'and getattr(core.ledger,'_dynteam_qualification_only',None)is True and
+  need(os.uname().nodename!=(_C14_HOSTNAME)and getattr(core.ledger,'_dynteam_qualification_only',None)is True and
        any(p.startswith('OWN-')for p in Path(core.home).parts),'EXACT18_OWN_FIXTURE_NEVER_A_PRODUCTION_SCOPE_OVERRIDE')
   return original # Explicit original OWN allocation fixtures; no old-root reads.
  scope(core)
- need(os.geteuid()==0 and os.uname().nodename=='H100DEV4',
+ need(os.geteuid()==0 and os.uname().nodename==(_C14_HOSTNAME),
       'EXACT18_PRODUCTION_SOURCE_SELECTION_ON_REGISTERED_HOST_ONLY')
  selected=frozen_source(original,directory=HERE/'exact18-sampler-source-v1')
  from newarms_provider_sources import sampler_after_original_selection

@@ -12,6 +12,9 @@ locks. Original reserve/settle paths use immutable cached booleans/TTL only;
 no HTTP/filesystem/wait while holding the original ledger RLock. This is not
 an observer, probe producer, scientific dispatcher or complete activation.
 """
+import os as _count14_os  # endpoints/keys/host paths come from environment; see CONFIGURATION.md
+_C14_SCRATCH1 = _count14_os.environ.get('COUNT14_SCRATCH1_ROOT', '/srv/count14/scratch1')
+_C14_SCRATCH = _count14_os.environ.get('COUNT14_SCRATCH_ROOT', '/srv/count14/scratch2')
 from dataclasses import dataclass
 from pathlib import Path,PurePosixPath
 from types import MethodType
@@ -36,9 +39,9 @@ def original_mem_available():
 
 ORIGINAL_SHA='349e003f6be40ac19e80c6e639915790e96ff39c7b4c98ae2d65582cb63d3293'
 ORIGINAL_AUX_ACQUIRE_SHA='55f8ff04eee537f6bfe7d53d73ac8230df26770d7473e640037bc6ba11026272'
-SEARCH_HOST='unix:///mnt/ptb-scratch/cg-count14-search-block456-20261031/docker/docker.sock'
-SEARCH_DATA_ROOT='/mnt/ptb-scratch/cg-count14-search-block456-20261031/docker/data'
-EVAL_HOST='unix:///mnt/ptb-scratch2/count14-eval-docker-20261030/docker.sock'
+SEARCH_HOST=('unix://' + _C14_SCRATCH1 + '/cg-count14-search-block456-20261031/docker/docker.sock')
+SEARCH_DATA_ROOT=(_C14_SCRATCH1 + '/cg-count14-search-block456-20261031/docker/data')
+EVAL_HOST=('unix://' + _C14_SCRATCH + '/count14-eval-docker-20261030/docker.sock')
 SYSTEM_RESERVED=2
 NATIVE_PAIR_FORECAST=72*GIB # original native generator: agent64g + router8g
 
@@ -213,7 +216,7 @@ class NativeCohortResources:
                 'DYNTEAM_RESOURCE_COMPLETE_REGISTERED_ALLOCATIONS_EXACT_BINDING')
             predicate_value=value
             if self.core.qualification_only:
-                # OWN local test trees are /tmp, not a Dev4 scratch mount.
+                # OWN local test trees are /tmp, not a the production host scratch mount.
                 # Project ONLY those path strings for the original PURE
                 # scratch predicate; retain raw paths for actual same-object
                 # membership comparisons below. Never used in production,
@@ -223,10 +226,10 @@ class NativeCohortResources:
                 predicate_value=deepcopy(value)
                 for row in predicate_value['own_FP8_relays']['roots']:
                     path=PurePosixPath(row['root'])
-                    if not any(path.is_relative_to(base) for base in ('/mnt/ptb-scratch','/mnt/ptb-scratch2')):
+                    if not any(path.is_relative_to(base) for base in ((_C14_SCRATCH1),(_C14_SCRATCH))):
                         need(path.is_absolute() and any(part.startswith('OWN-') for part in path.parts),
                              'DYNTEAM_ONLY_EXPLICIT_OWN_FIXTURE_PATH_PROJECTION')
-                        row['root']='/mnt/ptb-scratch2/OWN-fixture-'+digest(row['root'])
+                        row['root']=(_C14_SCRATCH + '/OWN-fixture-')+digest(row['root'])
             phase=storage_lifecycle_phase(self.core)
             self.validator(predicate_value,now_ns=now,for_system_health=True,storage_lifecycle_phase=phase)
             roots=value['own_FP8_relays']['roots'];our={r['root'] for r in self.core.rows.values()}

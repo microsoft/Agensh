@@ -3,14 +3,16 @@
 Dry mode is its own process and generated contract module, never a global
 monkeypatch of a live production owner. Short fixed namespace obeys IFNAMSIZ.
 """
+import os as _count14_os  # endpoints/keys/host paths come from environment; see CONFIGURATION.md
+_C14_SCRATCH = _count14_os.environ.get('COUNT14_SCRATCH_ROOT', '/srv/count14/scratch2')
 from pathlib import Path
 import hashlib,importlib.util,threading
 from common import need,hash_file,publish,wire,strict
 import build_x48_host as BASE
-NEW_ROOT='/mnt/ptb-scratch2/ag30v2x48'
+NEW_ROOT=(_C14_SCRATCH + '/ag30v2x48')
 NEW_EID='agensh-v2-20261030-x48'
 HERE=Path(__file__).resolve().parent
-DRY_ROOT='/mnt/ptb-scratch2/ag30x48g'
+DRY_ROOT=(_C14_SCRATCH + '/ag30x48g')
 DRY_EID='agensh-v2-20261030-x48-dry4'
 PROFILES={'production':(NEW_ROOT,NEW_EID),'zero-model':(DRY_ROOT,DRY_EID)}
 CONTRACT_SHA='7d8522ae0e3bf4d5754c4fb79d6f5286c0f1cbf48dcba403b676a2a92812856d'

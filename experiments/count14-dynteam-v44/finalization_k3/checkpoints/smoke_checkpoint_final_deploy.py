@@ -4,6 +4,8 @@ Reads PUBLIC pin metadata; hashes/copies only enumerated runtime-code assets.
 Never opens credentials or original task/source/candidate/PKL/ledger/log bodies.
 """
 from __future__ import annotations
+import os as _count14_os  # endpoints/keys/host paths come from environment; see CONFIGURATION.md
+_C14_SCRATCH = _count14_os.environ.get('COUNT14_SCRATCH_ROOT', '/srv/count14/scratch2')
 
 import argparse
 import hashlib
@@ -16,9 +18,9 @@ import sys
 
 KEEP13_SHA256 = '2185927429abc97b3d9a318ba65d394001d036241af30f2b57a8b64488a2a570'
 ORIGIN_SHA256 = 'c193188fd4d20de8ec0729b4a41bc4df7e15e38b54d84736147da0a546a147b6'
-RUNTIME_KEEP_ROOTS = ('/mnt/ptb-scratch2/ag30v2x48/final-runtime',
-                      '/mnt/ptb-scratch2/ag30v2x48/h',
-                      '/mnt/ptb-scratch2/ag30v2x48/original-fresh')
+RUNTIME_KEEP_ROOTS = ((_C14_SCRATCH + '/ag30v2x48/final-runtime'),
+                      (_C14_SCRATCH + '/ag30v2x48/h'),
+                      (_C14_SCRATCH + '/ag30v2x48/original-fresh'))
 DENIED_COMPONENTS = frozenset(('candidates', 'count14_candidates', 'private-context',
     'evaluator-private', 'requests', 'responses', 'results', 'sessions', 'snapshots',
     'workspaces', 'ledger', 'logs', '.git', '__pycache__'))

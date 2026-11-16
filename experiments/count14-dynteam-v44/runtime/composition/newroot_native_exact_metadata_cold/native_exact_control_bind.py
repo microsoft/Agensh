@@ -6,6 +6,8 @@ document. No route body/credentials are read. Sources and actual mounted
 parents are checked again at the real kernel birth. Original stopped checks
 remain: an absent process can use only its own earlier live verification.
 """
+import os as _count14_os  # endpoints/keys/host paths come from environment; see CONFIGURATION.md
+_C14_HOSTNAME = _count14_os.environ.get('COUNT14_HOSTNAME', 'count14-host')
 from pathlib import Path
 from types import MappingProxyType, MethodType
 from dataclasses import dataclass
@@ -48,7 +50,7 @@ class FrozenControls:
         from original_relay_core import OriginalRelayCore
         need(type(core)is OriginalRelayCore and not core.closed and not core.scientific_activation_qualified and
              set(core.gate.startup_held)==set(core.rows)and not core.peers._peers and
-             (digest(core.contract)in CONTRACTS or core.qualification_only and os.uname().nodename!='H100DEV4'),
+             (digest(core.contract)in CONTRACTS or core.qualification_only and os.uname().nodename!=(_C14_HOSTNAME)),
              'EXACT_NATIVE_CONTROL_ONLY_GENUINE_HELD_APPROVED_CONTRACT_CORE')
         registry=core.native_containers
         need(type(registry)is original.NativeContainerRegistry and registry.core is core and

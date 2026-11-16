@@ -5,6 +5,8 @@ transaction, runtime close, SDK load, request, signal or dispatcher. A ticket
 reference supplies material, NOT authority. Authority remains the independent
 fixed verifier and is INERT-only. Original runtime methods are quarantined.
 """
+import os as _count14_os  # endpoints/keys/host paths come from environment; see CONFIGURATION.md
+_C14_SCRATCH = _count14_os.environ.get('COUNT14_SCRATCH_ROOT', '/srv/count14/scratch2')
 from dataclasses import dataclass
 from pathlib import Path
 from types import MethodType, SimpleNamespace
@@ -191,7 +193,7 @@ def _paths(material,*,own):
     else:
         M.registered_scope(material['contract'],material['contract_sha256'])
         M.need(home==Path(material['contract']['arms'][0]['root'])/'owner' and
-            home.is_relative_to('/mnt/ptb-scratch2'),'INERT_PAIR_REGISTERED_PRODUCTION_NEW_ARM_HOME')
+            home.is_relative_to((_C14_SCRATCH)),'INERT_PAIR_REGISTERED_PRODUCTION_NEW_ARM_HOME')
     return home,lh,qh,full
 
 

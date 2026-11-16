@@ -5,6 +5,9 @@ one-newcomer/900s/slot-selection/launch/wake behavior survives. Only control
 admission, original-owner active time/token stop and serial retirement seams
 are inserted. The exact stopped-container retire port must still be bound.
 """
+import os as _count14_os  # endpoints/keys/host paths come from environment; see CONFIGURATION.md
+_C14_SCRATCH1 = _count14_os.environ.get('COUNT14_SCRATCH1_ROOT', '/srv/count14/scratch1')
+_C14_SCRATCH = _count14_os.environ.get('COUNT14_SCRATCH_ROOT', '/srv/count14/scratch2')
 from pathlib import Path
 import hashlib
 
@@ -89,7 +92,7 @@ def reuse_delta(source):
     return result
 
 
-CONTROL='''# Retain the original up-slot/run-slot recipes, but NEVER implicitly add
+CONTROL=('''# Retain the original up-slot/run-slot recipes, but NEVER implicitly add
 # ProgramBench's private-reference overlay/default ENV_FILE. The cold owner
 # supplies a frozen command containing only our generated base/safe overlay.
 make() {
@@ -116,7 +119,7 @@ sudo() {
     if [ "$1" = docker ]; then
         shift
         case "${COUNT14_NATIVE_DOCKER_SOCKET:?}" in
-          unix:///mnt/ptb-scratch2/*|unix:///mnt/ptb-scratch/*) ;;
+          unix://''' + _C14_SCRATCH + '''/*|unix://''' + _C14_SCRATCH1 + '''/*) ;;
           *) return 64 ;;
         esac
         "${COUNT14_NATIVE_DOCKER:?}" --host "$COUNT14_NATIVE_DOCKER_SOCKET" "$@"
@@ -170,7 +173,7 @@ count14_run_original_spawn() {
     done
     spawn_loop "$@"
 }
-'''
+''')
 
 
 def build(source,destination):

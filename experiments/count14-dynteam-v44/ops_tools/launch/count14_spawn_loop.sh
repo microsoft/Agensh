@@ -27,7 +27,7 @@ sudo() {
     if [ "$1" = docker ]; then
         shift
         case "${COUNT14_NATIVE_DOCKER_SOCKET:?}" in
-          unix:///mnt/ptb-scratch2/*|unix:///mnt/ptb-scratch/*) ;;
+          "unix://${COUNT14_SCRATCH_ROOT:-/srv/count14/scratch2}"/*|"unix://${COUNT14_SCRATCH1_ROOT:-/srv/count14/scratch1}"/*) ;;  # see CONFIGURATION.md
           *) return 64 ;;
         esac
         "${COUNT14_NATIVE_DOCKER:?}" --host "$COUNT14_NATIVE_DOCKER_SOCKET" "$@"

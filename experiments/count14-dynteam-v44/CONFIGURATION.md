@@ -1,7 +1,8 @@
-# Configuration: endpoints and credentials
+# Configuration: endpoints, credentials and host settings
 
-This export contains **no gateway addresses, API keys, or dashboard URLs**. Code that talks to
-the external model gateway, or locates the provider key, reads environment variables instead.
+This export contains **no gateway addresses, API keys, dashboard URLs, or testbed host paths**.
+Code that talks to the external model gateway, locates the provider key, or refers to the
+original testbed's disks and host identity reads environment variables instead.
 Copy [`count14.env.example`](count14.env.example), fill it in for your environment, and export it
 before running any component:
 
@@ -23,6 +24,12 @@ instead of silently reaching some other host.
 | `COUNT14_GLM_LEGACY_BASE_URL` | no | Base URL of the gateway route used before the provider migration. Only provider-alias/migration checks and the original pilot probe refer to it. If you never had a second route, set it to the same value as `COUNT14_GLM_BASE_URL`. | `https://glm-gateway.example.com/old-route/v1` |
 | `COUNT14_GLM_KEY_RELPATH` | no | Path of the provider-key file **relative to the experiment root**. Default: `config/glm-provider-key`. | `config/glm-provider-key` |
 | `COUNT14_GLM_KEY_SOURCE_FILE` | production only | Absolute path of the key file that `framework/startup/prepare_fresh48.py` copies into a new experiment root in production mode. | `/secure/glm-provider-key` |
+| `COUNT14_SCRATCH_ROOT` | yes | Main scratch mount that holds experiment roots, private Docker daemons, evaluation images and retained run data. Needs several TB free; do not use the root disk. Default `/srv/count14/scratch2`. | `/data/count14-scratch` |
+| `COUNT14_SCRATCH1_ROOT` | if used | Secondary scratch mount (older roots and a private Docker daemon). Default `/srv/count14/scratch1`. | `/data/count14-scratch1` |
+| `COUNT14_HOSTNAME` | production only | Host name (`uname -n`) of the production host. Production-only code refuses to run elsewhere, and qualification-only code refuses to run *on* it. Default `count14-host`. | `gpu-host-01` |
+| `COUNT14_HOST_BOOT_ID` | production only | Expected `/proc/sys/kernel/random/boot_id` of the production host; host tools refuse to act after a reboot until it is updated. | `cat /proc/sys/kernel/random/boot_id` |
+| `COUNT14_SCRATCH_FS_UUID` | production only | Filesystem UUID of `COUNT14_SCRATCH_ROOT` (`findmnt -n -o UUID --target "$COUNT14_SCRATCH_ROOT"`); guards against writing to the wrong mount. | output of that command |
+| `COUNT14_RETIRED_OWNER_BOOT_ID` | historical | Boot ID recorded for one retired owner process; only used to verify that historical record. | leave unset unless verifying old runs |
 
 ### Provider-key file
 
@@ -51,15 +58,22 @@ at whatever metrics endpoint your gateway exposes. No monitoring dashboard is re
 
 ## Which files read these variables
 
-The 15 files changed for publication are listed with their original and published SHA-256 in
-[`CONFIGURED_FILES.json`](CONFIGURED_FILES.json). Each one adds a single line,
-`import os as _count14_os`, and replaces the former literal with
-`_count14_os.environ.get('<VARIABLE>', '<placeholder>')`. Nothing else in those files changed.
+Every file changed for publication is listed with its original and published SHA-256 in
+[`CONFIGURED_FILES.json`](CONFIGURED_FILES.json). Each changed Python file adds
+`import os as _count14_os` and one `_C14_* = _count14_os.environ.get('<VARIABLE>', '<placeholder>')`
+line per setting it uses, and the former literal is replaced by that constant (path literals become
+`_C14_SCRATCH + '/rest/of/path'`). Comments and docstrings refer to `$VARIABLE` instead of the old
+values. `ops_tools/launch/count14_spawn_loop.sh` uses `${COUNT14_SCRATCH_ROOT}` /
+`${COUNT14_SCRATCH1_ROOT}` directly. In `contracts/production.json` (JSON cannot read the environment)
+the trajectory roots and evaluation Docker socket are written as `${COUNT14_SCRATCH_ROOT}/...`;
+expand them when loading (for example `os.path.expandvars`). Nothing else in those files changed.
 
 ## Not configurable in this export
 
-The frozen code still contains host-specific filesystem paths of the original testbed (scratch
-mounts, experiment-root names) and the three paired seeds. They are inventoried in the README
-section "Frozen host/path/root/seed references". They are not credentials, but you will need to
-adapt them to run anything outside the original environment. This tree is meant for reading and
-review, not as a portable launcher.
+* The three paired seeds are experiment configuration and stay in the contract.
+* Experiment-root directory names below the scratch root are kept as relative names.
+* A few output-record field names still contain the original host label (for example
+  `Dev4=False`, `actual_Dev4_smoke_pass`). They are record keys read by other components, not
+  settings, so renaming them would change behaviour.
+
+This tree is meant for reading and review, not as a portable launcher.

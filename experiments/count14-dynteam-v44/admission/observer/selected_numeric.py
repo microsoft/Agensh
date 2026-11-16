@@ -1,4 +1,7 @@
 """Independent bounded PUBLIC ledger scalar sampler; no SDK, tools or models."""
+import os as _count14_os  # endpoints/keys/host paths come from environment; see CONFIGURATION.md
+_C14_HOSTNAME = _count14_os.environ.get('COUNT14_HOSTNAME', 'count14-host')
+_C14_SCRATCH = _count14_os.environ.get('COUNT14_SCRATCH_ROOT', '/srv/count14/scratch2')
 from pathlib import Path
 import datetime,json,os,re,stat,sys
 MAX_PUBLIC_LEDGER_BYTES=32*2**20
@@ -96,8 +99,8 @@ def public_control_read(p):
  return json.loads(p.read_bytes())
 
 def actual():
- if os.geteuid()!=0 or os.uname().nodename!='H100DEV4':raise Refused()
- R=Path('/mnt/ptb-scratch2/cg-count14-seeds-expand8-20261021/batches/batch1')
+ if os.geteuid()!=0 or os.uname().nodename!=(_C14_HOSTNAME):raise Refused()
+ R=Path((_C14_SCRATCH + '/cg-count14-seeds-expand8-20261021/batches/batch1'))
  I=public_control_read(R/'frozen-inputs/PILOT_INSTALLATION_EXPAND8_BATCH1_V1.json')
  seeds={'seed-1855033666':4,'seed-0185023928':5,'seed-2806506801':6};rows=[]
  for r in I['trajectories']:

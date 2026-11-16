@@ -2,9 +2,11 @@
 SELECT-only native queue metadata; fixed template POST in original task channel.
 No task/candidate/session/error/model body reads, retries, or event mutation.
 """
+import os as _count14_os  # endpoints/keys/host paths come from environment; see CONFIGURATION.md
+_C14_SCRATCH = _count14_os.environ.get('COUNT14_SCRATCH_ROOT', '/srv/count14/scratch2')
 from pathlib import Path
 import datetime,hashlib,json,os,re,subprocess
-POLICY=Path('/mnt/ptb-scratch2/ag27s16/d/policy/r16-natural-stop-neutral-v1/POLICY.json')
+POLICY=Path((_C14_SCRATCH + '/ag27s16/d/policy/r16-natural-stop-neutral-v1/POLICY.json'))
 POLICY_SHA='5dddb69c9be2ae5ffd026cba1b15c53cf0cd458734820b8406d020762b13b7d1'
 TEMPLATE_SHA='55fa7e2fa748fc2492467400e34dca28e3e2d30afdcd81c38cd86c7fca30aac2'
 SQL="START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY;\nSELECT state,attempts,COUNT(*) AS event_count FROM events GROUP BY state,attempts ORDER BY state,attempts;\nROLLBACK;\n"

@@ -4,7 +4,10 @@ Private old inputs are consumed internally only; source/model/task bytes stay
 unchanged. Does not read original candidate/project/response contents. Original
 FINAL directories are copied opaquely; credentials are never hashed or printed.
 """
-import os as _count14_os  # endpoints/keys come from environment; see CONFIGURATION.md
+import os as _count14_os  # endpoints/keys/host paths come from environment; see CONFIGURATION.md
+_C14_BOOT = _count14_os.environ.get('COUNT14_HOST_BOOT_ID', '00000000-0000-0000-0000-000000000000')
+_C14_HOSTNAME = _count14_os.environ.get('COUNT14_HOSTNAME', 'count14-host')
+_C14_SCRATCH = _count14_os.environ.get('COUNT14_SCRATCH_ROOT', '/srv/count14/scratch2')
 from pathlib import Path
 import copy,importlib.util,os,shutil,stat,subprocess,sys
 from common import need,digest,wire,publish,hash_file,strict,regular_fd
@@ -12,8 +15,8 @@ from fresh48_configuration import _private,OLD_CONFIG,OLD_CONFIG_SHA,OLD_HOST,OL
 from fresh48_scope import selected,public_scope,host,contract
 from build_fresh48_runtime import build as overlay
 HERE=Path(__file__).resolve().parent
-BASE=Path('/mnt/ptb-scratch2/ag28v2a4/c/parallel-v599999-agensh-count14-adapter-20261026')
-BOOT='899408ed-8919-4f90-bd63-e88d11b38868'
+BASE=Path((_C14_SCRATCH + '/ag28v2a4/c/parallel-v599999-agensh-count14-adapter-20261026'))
+BOOT=(_C14_BOOT)
 
 
 def verify_public_base():
@@ -47,7 +50,7 @@ def opaque_key(source,destination):
 
 
 def prepare(*,mode,port_base,reader_metadata,reader_metadata_sha):
- need(os.geteuid()==0 and os.uname().nodename=='H100DEV4'and
+ need(os.geteuid()==0 and os.uname().nodename==(_C14_HOSTNAME)and
   Path('/proc/sys/kernel/random/boot_id').read_text().strip()==BOOT,'FRESH48_OPS_EXACT_HOST_BOOT')
  root,_=selected(mode);root=Path(root);need(root.parent.resolve()==root.parent and not root.exists()and not root.is_symlink(),
   'FRESH48_NEW_EXACT_SCOPE_NO_RESTART')

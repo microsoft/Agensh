@@ -4,10 +4,12 @@
 OPS-only. prepare/run are explicit; no automatic retry or production request
 until the separate dry root's actual full-launcher receipt has been checked.
 """
+import os as _count14_os  # endpoints/keys/host paths come from environment; see CONFIGURATION.md
+_C14_SCRATCH = _count14_os.environ.get('COUNT14_SCRATCH_ROOT', '/srv/count14/scratch2')
 from pathlib import Path
 import argparse,hashlib,os,sys
 HERE=Path(__file__).resolve().parent
-BASE=Path('/mnt/ptb-scratch2/ag28v2a4/c/parallel-v599999-agensh-count14-adapter-20261026')
+BASE=Path((_C14_SCRATCH + '/ag28v2a4/c/parallel-v599999-agensh-count14-adapter-20261026'))
 # Bootstrap dependency closure only; scientific runtime is imported in child.
 if __name__=='__main__'and(sys.argv[1:2]!=['_owner']):
  for p in reversed([HERE,HERE/'deps',BASE]):sys.path.insert(0,str(p))

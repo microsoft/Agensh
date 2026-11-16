@@ -1,11 +1,12 @@
 """Metadata-only GLM affinity and credential rotation. No payload construction."""
-import os as _count14_os  # endpoints/keys come from environment; see CONFIGURATION.md
+import os as _count14_os  # endpoints/keys/host paths come from environment; see CONFIGURATION.md
+_C14_SCRATCH = _count14_os.environ.get('COUNT14_SCRATCH_ROOT', '/srv/count14/scratch2')
 from pathlib import Path
 import hashlib,json,threading,time
 from common import need
 
 REVISION='a4-glm-session-header-v1'
-ROOT=Path('/mnt/ptb-scratch2/ag28v2a4')
+ROOT=Path((_C14_SCRATCH + '/ag28v2a4'))
 KEY=ROOT/_count14_os.environ.get('COUNT14_GLM_KEY_RELPATH', 'config/glm-provider-key')
 
 def session_id(domain,*identity):

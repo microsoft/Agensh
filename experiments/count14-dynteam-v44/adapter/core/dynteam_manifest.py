@@ -2,15 +2,17 @@
 
 This instantiates the paired seeds, native slot catalogue and v2 invariants.
 It deliberately cannot assert runtime_ready before actual owner/whole-roster
-checkpoint/K3 wiring and the unique OPS Dev4 smoke have been qualified.
+checkpoint/K3 wiring and the unique OPS the production host smoke have been qualified.
 """
+import os as _count14_os  # endpoints/keys/host paths come from environment; see CONFIGURATION.md
+_C14_SCRATCH = _count14_os.environ.get('COUNT14_SCRATCH_ROOT', '/srv/count14/scratch2')
 from copy import deepcopy
 from dynteam_metadata import COMMIT, catalogue, digest, need
 
 SEEDS = (4287909351, 1636023914, 2619738241)
-ROOT = "/mnt/ptb-scratch2/count14-dynteam-70e2ca54-20261105"
-SMOKE_ROOT = "/mnt/ptb-scratch2/count14-dynteam-70e2ca54-smoke-20261105"
-EVAL_SOCKET = "unix:///mnt/ptb-scratch2/count14-eval-docker-20261030/docker.sock"
+ROOT = (_C14_SCRATCH + "/count14-dynteam-70e2ca54-20261105")
+SMOKE_ROOT = (_C14_SCRATCH + "/count14-dynteam-70e2ca54-smoke-20261105")
+EVAL_SOCKET = ("unix://" + _C14_SCRATCH + "/count14-eval-docker-20261030/docker.sock")
 
 
 def compile_contract(design, source_audit, *, mode):

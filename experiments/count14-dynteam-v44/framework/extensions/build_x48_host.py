@@ -3,12 +3,14 @@
 Uses the already-qualified v2 scope renderer and applies ONLY4/8 roster/port
 rank changes. Prompt/runtime recovery overlays remain separately pinned inputs.
 """
+import os as _count14_os  # endpoints/keys/host paths come from environment; see CONFIGURATION.md
+_C14_SCRATCH = _count14_os.environ.get('COUNT14_SCRATCH_ROOT', '/srv/count14/scratch2')
 from pathlib import Path
 import hashlib,importlib.util,json,threading
 from common import need,hash_file,publish,wire,strict
 from expansion100_contract import NEW_ROOT,NEW_EID
 HERE=Path(__file__).resolve().parent
-PARENT=Path('/mnt/ptb-scratch2/agensh-comparison-20261026')
+PARENT=Path((_C14_SCRATCH + '/agensh-comparison-20261026'))
 LOCK=threading.Lock()
 
 def scope(public):

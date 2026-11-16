@@ -3,7 +3,8 @@
 No network/credential/source-body decoding or runtime launch. The production
 helper reads the one hash-pinned original private configuration, never emits it.
 """
-import os as _count14_os  # endpoints/keys come from environment; see CONFIGURATION.md
+import os as _count14_os  # endpoints/keys/host paths come from environment; see CONFIGURATION.md
+_C14_SCRATCH = _count14_os.environ.get('COUNT14_SCRATCH_ROOT', '/srv/count14/scratch2')
 from pathlib import Path
 import copy,importlib.util,os,stat
 from common import need,digest,wire,publish,hash_file,strict,regular_fd
@@ -19,7 +20,7 @@ CLI_PINS={'cli_overlay_app_sha256':'cb5087c60e67ad545c83ba0d91b9a3edcdec5be16c7d
  'cli_overlay_wrapper_sha256':'5fb99d565665e855a79cc955a627ddd8cf38819b422a45f8b5bed02a74a43f84',
  'cli_overlay_client_sha256':'e5d54b57e7a67a9d60ca33bf2d97b034c34aba0b0573b17bbf7d6d5c14c47a76'}
 AUTHORIZATION_SHA='7768ef54d6e94c0ec6cfa9c4dd7393fb55799803782dacaf992309fd9c08885e'
-CLI_ROOT='/mnt/ptb-scratch2/agensh-comparison-20261026/native-unmanaged-cli-backup-fixed-cold-v1/qualified-original-native-cli-unmanaged'
+CLI_ROOT=(_C14_SCRATCH + '/agensh-comparison-20261026/native-unmanaged-cli-backup-fixed-cold-v1/qualified-original-native-cli-unmanaged')
 
 def derive(original,host,host_files,*,mode,runtime_directory):
  """No IO. Keep model/task/body/bounds/FINAL logic and seed bytes unchanged."""

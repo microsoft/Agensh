@@ -5,6 +5,8 @@ start roles, restrict growth, replace containers or grant runtime authority.
 Scientific CLI/router UID10000, caps/isolation/image defaults remain unchanged.
 The original gateway-only diff keeps the SAME USER layer on both baselines.
 """
+import os as _count14_os  # endpoints/keys/host paths come from environment; see CONFIGURATION.md
+_C14_HOSTNAME = _count14_os.environ.get('COUNT14_HOSTNAME', 'count14-host')
 from pathlib import Path
 from types import FunctionType, MethodType
 import hashlib
@@ -36,7 +38,7 @@ def scope(core):
         need(os.geteuid() == 0 and digest(c) == (SMOKE if c['mode']=='smoke' else FORMAL),
              'BRIDGE_USER_EXACT_USER_APPROVED_CONTRACT_NOT_ANOTHER_ROOT')
     else:
-        need(os.uname().nodename != 'H100DEV4', 'BRIDGE_USER_NO_OWN_CONTRACT_ON_PRODUCTION')
+        need(os.uname().nodename != (_C14_HOSTNAME), 'BRIDGE_USER_NO_OWN_CONTRACT_ON_PRODUCTION')
     if c['mode'] == 'production':
         import formal_scope as F
         need(hashlib.sha256(Path(F.__file__).read_bytes()).hexdigest() == FORMAL_VALIDATOR_SHA,

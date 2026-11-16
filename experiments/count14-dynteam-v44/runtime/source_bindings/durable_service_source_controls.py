@@ -5,6 +5,8 @@ Receiver needs original typed T + actual metadata pair/new birth/three original
 locks + fixed financial equations. This is control metadata, not writer/TERM/
 model authority; no constructors, request cancellation, replay or schema edits.
 """
+import os as _count14_os  # endpoints/keys/host paths come from environment; see CONFIGURATION.md
+_C14_SCRATCH = _count14_os.environ.get('COUNT14_SCRATCH_ROOT', '/srv/count14/scratch2')
 from dataclasses import asdict
 from pathlib import Path
 import copy
@@ -273,7 +275,7 @@ def _verify_common(reference,owner,ticket,*,read_budget,own):
     home=M.existing(cap.owner_home,directory=True,private=True)
     if own:M.need(home.name.startswith('OWN-'),'DURABLE_SERVICES_OWN_ONLY_SANDBOX_HOME')
     else:M.need(home==owner.core.home==Path(material['contract']['arms'][0]['root'])/'owner'and
-        home.is_relative_to('/mnt/ptb-scratch2'),'DURABLE_SERVICES_FIXED_REGISTERED_HOME_NOT_CALLER_PATH')
+        home.is_relative_to((_C14_SCRATCH)),'DURABLE_SERVICES_FIXED_REGISTERED_HOME_NOT_CALLER_PATH')
     body,record=_read_complete(reference,home,own=own,budget=read_budget)
     original=T._read_reference(ticket,own=own,read_budget=read_budget)
     M.need(body['actual_production_issued_T_and_registered_live_service_cap']is(not own)and

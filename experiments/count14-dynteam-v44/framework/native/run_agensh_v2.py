@@ -5,6 +5,8 @@ Original science/relay/ledger/FINAL/collector modules remain byte-identical.
 The host clock-readiness port binds the existing clock algorithms before the
 original CLOCK_READY files, gate release and exact-once original task post.
 """
+import os as _count14_os  # endpoints/keys/host paths come from environment; see CONFIGURATION.md
+_C14_SCRATCH = _count14_os.environ.get('COUNT14_SCRATCH_ROOT', '/srv/count14/scratch2')
 from pathlib import Path
 from types import MethodType
 import hashlib,inspect,os,resource,shutil,stat,sys,time
@@ -102,7 +104,7 @@ def canary_released(path,first):
 class V2Driver(ScientificSixDriver):
  def __init__(self,configuration,host):
   set_nofile();super().__init__(configuration,host)
-  need(not Path(self.manifest['root']).is_relative_to(Path('/mnt/ptb-scratch2/ag27s16')),'V2_NO_R16_ROOT')
+  need(not Path(self.manifest['root']).is_relative_to(Path((_C14_SCRATCH + '/ag27s16'))),'V2_NO_R16_ROOT')
   for row in self.rows.values():
    need(row['seed']==PAIRED[row['block']],'V2_PAIRED_R16_SEEDS')
   first=self.rows[self.pending[0]]

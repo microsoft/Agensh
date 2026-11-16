@@ -5,6 +5,9 @@ This is not the old baseline layout's hard-coded-root bypass. The NEW paired
 contract retains the original arm order and arm0 code/key/control placement.
 Only explicit public tool proofs and frozen framework pins are consumed here.
 """
+import os as _count14_os  # endpoints/keys/host paths come from environment; see CONFIGURATION.md
+_C14_SCRATCH1 = _count14_os.environ.get('COUNT14_SCRATCH1_ROOT', '/srv/count14/scratch1')
+_C14_SCRATCH = _count14_os.environ.get('COUNT14_SCRATCH_ROOT', '/srv/count14/scratch2')
 from pathlib import Path
 import argparse
 import hashlib
@@ -100,8 +103,8 @@ def install(*, code_root, manifest_sha256, contract_directory,
         rows[0]['arm'] == 'DYNTEAM' and rows[1]['arm'] == 'DYNTEAM_RACING' and
         Path(baseline[0]['root']) / 'frozen-code' == root and
         racing[0]['root'] != baseline[0]['root'] and
-        all(Path(row['root']).is_relative_to('/mnt/ptb-scratch2') or
-            Path(row['root']).is_relative_to('/mnt/ptb-scratch') for row in rows),
+        all(Path(row['root']).is_relative_to((_C14_SCRATCH)) or
+            Path(row['root']).is_relative_to((_C14_SCRATCH1)) for row in rows),
         'RACING_LAYOUT_ONLY_NEW_PAIRED_SCRATCH_ARM_NAMESPACE')
     framework((contracts / 'CONTRACT_AND_NATIVE_ROLE_DIRECTORY_PINS_PUBLIC.json').relative_to(root).as_posix())
     framework('VERIFY_AND_INSTALL_IMPORTS.py')  # exact code-only helper present

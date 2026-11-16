@@ -4,6 +4,8 @@ No existing frozen source is modified. Only specifically pinned public framework
 modules are read. The new overlay preserves the original first-start ABI10/20;
 100M is installed additively after native startup (or original50M park).
 """
+import os as _count14_os  # endpoints/keys/host paths come from environment; see CONFIGURATION.md
+_C14_SCRATCH = _count14_os.environ.get('COUNT14_SCRATCH_ROOT', '/srv/count14/scratch2')
 from pathlib import Path
 import argparse,ast,difflib,hashlib,json,os
 from common import need,wire,hash_file,publish,strict
@@ -21,7 +23,7 @@ def transform(name,s):
  original=s
  if name=='manifest.py':
   s=replace(s,"    for s,n in zip(m['settings'],(16,1)):",
-   "    sizes=(4,8) if (m['root'],m['experiment_id'])==('/mnt/ptb-scratch2/ag30v2x48','agensh-v2-20261030-x48') or (m['root'],m['experiment_id'])==('/mnt/ptb-scratch2/ag30v2x48','agensh-v2-20261030-x48-fork16plus4') else (16,1)\n    for s,n in zip(m['settings'],sizes):")
+   ("    sizes=(4,8) if (m['root'],m['experiment_id'])==('" + _C14_SCRATCH + "/ag30v2x48','agensh-v2-20261030-x48') or (m['root'],m['experiment_id'])==('" + _C14_SCRATCH + "/ag30v2x48','agensh-v2-20261030-x48-fork16plus4') else (16,1)\n    for s,n in zip(m['settings'],sizes):"))
  elif name=='native_scientific_owner.py':
   s=replace(s,"setting in ('Agensh-1','Agensh-16')\n             and len(team.roles)==(1 if setting=='Agensh-1' else 16)",
    "setting in ('Agensh-1','Agensh-4','Agensh-8','Agensh-16')\n             and len(team.roles)==int(setting.split('-')[1])")

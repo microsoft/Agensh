@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 """Map fixed frozen package layout, never invent host/scientific facts."""
+import os as _count14_os  # endpoints/keys/host paths come from environment; see CONFIGURATION.md
+_C14_SCRATCH = _count14_os.environ.get('COUNT14_SCRATCH_ROOT', '/srv/count14/scratch2')
 from pathlib import Path
 import argparse,hashlib,json,os,stat
 
@@ -15,7 +17,7 @@ def write(path,value):
 
 def install(root,manifest_sha,final_configuration,final_sha):
     root=Path(root);require(root.is_absolute() and root.resolve()==root and root.is_dir())
-    require(root.is_relative_to('/mnt/ptb-scratch2/count14-dynteam-70e2ca54-smoke-20261105') and
+    require(root.is_relative_to((_C14_SCRATCH + '/count14-dynteam-70e2ca54-smoke-20261105')) and
             root.name=='frozen-code')
     manifest=root/'FROZEN_FILES_PUBLIC.json';require(sha(manifest)==manifest_sha)
     registered=json.loads(manifest.read_bytes())['files']

@@ -5,7 +5,8 @@ Scientific transport code and original TTFT/rate validators stay unchanged.
 The finite sampler receives a source-bound metadata aggregate in its original
 durable intent. Missing observations remain unavailable, never zero/green.
 """
-import os as _count14_os  # endpoints/keys come from environment; see CONFIGURATION.md
+import os as _count14_os  # endpoints/keys/host paths come from environment; see CONFIGURATION.md
+_C14_SCRATCH = _count14_os.environ.get('COUNT14_SCRATCH_ROOT', '/srv/count14/scratch2')
 from pathlib import Path
 from types import CodeType, FunctionType, MethodType
 import ast
@@ -61,7 +62,7 @@ def registered_scope(contract):
     for r in arms:
         p = Path(r['root'])
         need(p.is_absolute() and str(p) == r['root'] and '..' not in p.parts and
-             p.is_relative_to('/mnt/ptb-scratch2') and p != Path('/mnt/ptb-scratch2') and
+             p.is_relative_to((_C14_SCRATCH)) and p != Path((_C14_SCRATCH)) and
              not any('mockdebug' in x for x in p.parts), 'NO_OLD_OR_MOCK_ROOT')
     need(len(contract['trajectories']) == (2 if contract['mode'] == 'smoke' else 6),
          'ORIGINAL_TWO_OR_SIX_TRAJECTORIES')

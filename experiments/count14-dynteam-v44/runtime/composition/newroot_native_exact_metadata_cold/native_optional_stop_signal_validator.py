@@ -5,6 +5,8 @@ No invented empty string, image/config change, signal, container or fee action.
 Explicit non-default signals still follow the unchanged original rejection.
 This component is not a same-process repair entry or deployment authority.
 """
+import os as _count14_os  # endpoints/keys/host paths come from environment; see CONFIGURATION.md
+_C14_HOSTNAME = _count14_os.environ.get('COUNT14_HOSTNAME', 'count14-host')
 from pathlib import Path
 from types import MethodType
 import ast
@@ -74,7 +76,7 @@ def bind_new_registry(core, *, stage, financial, core_restore, fresh_guard):
          callable(fresh_guard) and fresh_guard() is True,
          'OPTIONAL_NATIVE_STOPSIGNAL_GENUINE_SAME_NEW_EXCLUSIVE_STAGE_CORE_HELD')
     need(core.contract['mode'] == 'smoke' and
-         (core.qualification_only and os.uname().nodename != 'H100DEV4' or
+         (core.qualification_only and os.uname().nodename != (_C14_HOSTNAME) or
           not core.qualification_only and digest(core.contract) == SMOKE_SHA),
          'OPTIONAL_NATIVE_STOPSIGNAL_ONLY_EXACT_OWN_EXPERIMENT_SMOKE_NOT_OTHER_PROJECT')
     registry = core.native_containers

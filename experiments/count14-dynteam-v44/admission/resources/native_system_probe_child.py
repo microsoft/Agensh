@@ -6,6 +6,8 @@ Standalone -I entry: exact new owner/job, new key and X-Session-ID; original
 written. A closed HTTP UNKNOWN remains upper-charged SYSTEM consumption; a
 missing HTTP terminal is NOT a free physical slot. No request is retried.
 """
+import os as _count14_os  # endpoints/keys/host paths come from environment; see CONFIGURATION.md
+_C14_SCRATCH = _count14_os.environ.get('COUNT14_SCRATCH_ROOT', '/srv/count14/scratch2')
 from pathlib import Path
 import argparse
 import hashlib
@@ -81,7 +83,7 @@ def validate_job(job,directory):
         need(any(p.startswith('OWN-') for p in root.parts) and
              OWN_endpoint_ok(job['OWN_endpoint']))
     else:
-        need(job['OWN_endpoint'] is None and root.is_relative_to('/mnt/ptb-scratch2') and os.geteuid()==0)
+        need(job['OWN_endpoint'] is None and root.is_relative_to((_C14_SCRATCH)) and os.geteuid()==0)
     pid=job['owner_pid'];need(type(pid) is int and pid>0 and os.getppid()==pid)
     fields=Path('/proc',str(pid),'stat').read_bytes().rsplit(b') ',1)[1].split()
     need(int(fields[19])==job['owner_start_ticks'] and fields[0] not in (b'Z',b'X') and

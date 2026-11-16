@@ -6,6 +6,8 @@ copy. Import/--verify-only reads framework/PUBLIC metadata only and creates no
 owner, asset, request, evaluator, Docker object or scientific root. This module
 does not install into, or change, any existing owner or original module.
 """
+import os as _count14_os  # endpoints/keys/host paths come from environment; see CONFIGURATION.md
+_C14_SCRATCH = _count14_os.environ.get('COUNT14_SCRATCH_ROOT', '/srv/count14/scratch2')
 from pathlib import Path
 from types import FunctionType, SimpleNamespace
 import argparse
@@ -124,7 +126,7 @@ def selected(contract, trajectory):
     root = Path(row['root'])
     need(len(arms) == 1 and row['block'] in (1, 2, 3) and
          root == Path(arms[0]['root']) / ('b' + str(row['block'])) and
-         root.is_absolute() and root.is_relative_to('/mnt/ptb-scratch2'),
+         root.is_absolute() and root.is_relative_to((_C14_SCRATCH)),
          'FORMAL_DEPLOY_REGISTERED_ARM_BLOCK_ROOT_NOT_ARBITRARY_PREFIX')
     return row
 

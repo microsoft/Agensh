@@ -1,8 +1,11 @@
 """Approved additive two-table carrier, exact EMPTY cold new-root boundary.
 
 No old SQL/schema/record or Ledger formula is changed. Shared DDL executor is
-also tested behind an explicitly OWN boundary; it never certifies Dev4/owner.
+also tested behind an explicitly OWN boundary; it never certifies the production host/owner.
 """
+import os as _count14_os  # endpoints/keys/host paths come from environment; see CONFIGURATION.md
+_C14_SCRATCH1 = _count14_os.environ.get('COUNT14_SCRATCH1_ROOT', '/srv/count14/scratch1')
+_C14_SCRATCH = _count14_os.environ.get('COUNT14_SCRATCH_ROOT', '/srv/count14/scratch2')
 from pathlib import Path
 from dataclasses import dataclass
 import ast,copy,fcntl,hashlib,inspect,os,re,sqlite3
@@ -167,7 +170,7 @@ def guard(owner,cohort,control):
          'APPROVED_CARRIER_ORIGINAL_REGISTERED_NEW_FORMAL_ROOTS_ONLY')
     for row in core.rows.values():
         p=Path(row['root']);need(p.resolve()==p and p.is_dir()and not p.is_symlink() and
-            (p.is_relative_to('/mnt/ptb-scratch2')or p.is_relative_to('/mnt/ptb-scratch')),
+            (p.is_relative_to((_C14_SCRATCH))or p.is_relative_to((_C14_SCRATCH1))),
             'APPROVED_CARRIER_CANONICAL_REGISTERED_NEW_SCRATCH_TRAJECTORIES')
     locks=[lock_identity(core.ledger.home/'owner.lock',core.ledger.fd),
            lock_identity(core.queue.home/'owner.lock',core.queue.fd)]

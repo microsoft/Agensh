@@ -4,6 +4,8 @@ No existing owner, container repair/removal, daemon/network setting or model
 request is touched. Reuses the actual R7 gateway fix before first native UP.
 Not a production delivery/activation authority or permission to create roots.
 """
+import os as _count14_os  # endpoints/keys/host paths come from environment; see CONFIGURATION.md
+_C14_HOSTNAME = _count14_os.environ.get('COUNT14_HOSTNAME', 'count14-host')
 from pathlib import Path
 from types import FunctionType,MethodType,SimpleNamespace
 import ast,hashlib,importlib.util,inspect,json,os,shlex,stat,textwrap,time
@@ -57,7 +59,7 @@ def scope(core):
  import formal_scope as F
  need(sha(F.__file__)==SCOPE_SHA,'FORMAL_GATEWAY_ORIGINAL_CONTRACT_VALIDATOR_PIN')
  if core.qualification_only:
-  need(os.uname().nodename!='H100DEV4','FORMAL_GATEWAY_NO_OWN_PATH_ON_PRODUCTION')
+  need(os.uname().nodename!=(_C14_HOSTNAME),'FORMAL_GATEWAY_NO_OWN_PATH_ON_PRODUCTION')
   from common import digest
   fn=F.validate_contract
   own=FunctionType(fn.__code__,dict(fn.__globals__,PUBLIC_CONTRACT_CANONICAL_SHA256=digest(core.contract)),fn.__name__)

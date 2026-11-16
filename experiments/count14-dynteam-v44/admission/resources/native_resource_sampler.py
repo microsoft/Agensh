@@ -4,6 +4,9 @@ No model/key/task/tool/evaluation action. A plan is frozen PUBLIC deployment
 metadata, not a green proof. Only actual source projections may create the
 receipt. Explicit OWN virtualization is refused by every production caller.
 """
+import os as _count14_os  # endpoints/keys/host paths come from environment; see CONFIGURATION.md
+_C14_HOSTNAME = _count14_os.environ.get('COUNT14_HOSTNAME', 'count14-host')
+_C14_SCRATCH = _count14_os.environ.get('COUNT14_SCRATCH_ROOT', '/srv/count14/scratch2')
 from pathlib import Path
 from dataclasses import asdict
 import json
@@ -89,7 +92,7 @@ def sample(job,plan):
     if q:
         need(any(v.startswith('OWN-') for v in home.parts),'DYNTEAM_SAMPLE_OWN_HOME_ONLY')
     else:
-        need(os.geteuid()==0 and os.uname().nodename=='H100DEV4' and home.is_relative_to('/mnt/ptb-scratch2') and
+        need(os.geteuid()==0 and os.uname().nodename==(_C14_HOSTNAME) and home.is_relative_to((_C14_SCRATCH)) and
              plan['OWN_fixture'] is None,'DYNTEAM_SAMPLE_PRODUCTION_NEVER_OWN_HOST_PROJECTION')
     outside,health=outside_with_deadline(plan,job,home/'resources/reader-cache')
     O,_=frozen_observer()
@@ -150,7 +153,7 @@ def sample(job,plan):
         # kernel facts. Original pure consumer predicates remain unmodified.
         for name,r in routes.items():
             r.update(docker_host=SEARCH_HOST if name=='SEARCH_BACKEND' else EVAL_HOST,
-                data_root=SEARCH_DATA_ROOT if name=='SEARCH_BACKEND' else '/mnt/ptb-scratch2/OWN-eval-data',
+                data_root=SEARCH_DATA_ROOT if name=='SEARCH_BACKEND' else (_C14_SCRATCH + '/OWN-eval-data'),
                 mount_uuid='OWN-only-not-real-mount',mount_device=2,rootfs_device=1,data_root_on_scratch_mount=True)
         for label,v in storage.items():v['available_bytes']=fixture['available_bytes'][label]
     observed=min(raw_kernel['observed_ns'],own['observed_ns'],native['observed_ns'],system['observed_ns'])

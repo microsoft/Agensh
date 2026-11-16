@@ -3,6 +3,9 @@
 Original class/module sources stay unchanged. No old graph, hot replacement,
 container action, replay, finance/schema change or relaxed explicit signal.
 """
+import os as _count14_os  # endpoints/keys/host paths come from environment; see CONFIGURATION.md
+_C14_HOSTNAME = _count14_os.environ.get('COUNT14_HOSTNAME', 'count14-host')
+_C14_SCRATCH = _count14_os.environ.get('COUNT14_SCRATCH_ROOT', '/srv/count14/scratch2')
 from pathlib import Path
 from types import MethodType
 import hashlib,importlib.util,os,stat
@@ -24,7 +27,7 @@ def scope(core):
     from common import digest
     c=core.contract
     if core.qualification_only:
-        need(os.uname().nodename!='H100DEV4'and
+        need(os.uname().nodename!=(_C14_HOSTNAME)and
              getattr(core.ledger,'_dynteam_qualification_only',None)is True and
              any(p.startswith('OWN-')for p in Path(core.home).parts))
     elif c['mode']=='production':
@@ -32,7 +35,7 @@ def scope(core):
              {(r['arm'],r['block'])for r in core.rows.values()}=={(a,b)for a in('DYNTEAM','DYNTEAM_RACING')for b in(1,2,3)})
     else:
         need(c['mode']=='smoke'and digest(c)==RACING and len(core.rows)==2 and
-             tuple(a['root']for a in c['arms'])==('/mnt/ptb-scratch2/ct14-dtr-smoke-20261105/u','/mnt/ptb-scratch2/ct14-dtr-smoke-20261105/r'))
+             tuple(a['root']for a in c['arms'])==((_C14_SCRATCH + '/ct14-dtr-smoke-20261105/u'),(_C14_SCRATCH + '/ct14-dtr-smoke-20261105/r')))
     return True
 def bind_new_owner(owner):
     from native_cold_owner import NativeColdOwner

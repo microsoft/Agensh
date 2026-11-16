@@ -1,13 +1,15 @@
 """Fixed-scope launch metadata and OPS-only private branch derivation."""
+import os as _count14_os  # endpoints/keys/host paths come from environment; see CONFIGURATION.md
+_C14_SCRATCH = _count14_os.environ.get('COUNT14_SCRATCH_ROOT', '/srv/count14/scratch2')
 from pathlib import Path
 import copy,os,stat
 from common import need,digest,wire,publish,hash_file
 from fresh48_configuration import _private
 from fresh48_scope import selected
 HERE=Path(__file__).resolve().parent
-OLD_BRANCH=Path('/mnt/ptb-scratch2/ag28v2a4/d/FORK_AGGREGATE_RUNTIME.json')
+OLD_BRANCH=Path((_C14_SCRATCH + '/ag28v2a4/d/FORK_AGGREGATE_RUNTIME.json'))
 OLD_BRANCH_SHA='68efe88c0098d96da8475435c1126d941cf7a9a7ba60caad06331f3940831720'
-HEALTH=Path('/mnt/ptb-scratch2/ag28v2a4/config/ops-glm-outage-health-20261029/events.jsonl')
+HEALTH=Path((_C14_SCRATCH + '/ag28v2a4/config/ops-glm-outage-health-20261029/events.jsonl'))
 
 
 def branch(original,*,mode):
@@ -33,8 +35,8 @@ def prepare_branch(*,mode):
 def child_path(root):
  root=Path(root)
  return os.pathsep.join(map(str,[root/'q/mode',root/'q/runtime',HERE,HERE/'deps',
-  Path('/mnt/ptb-scratch2/ag28v2a4/c/parallel-v599999-agensh-count14-adapter-20261026'),
-  Path('/mnt/ptb-scratch2/ag28v2a4/final-public-runtime/venv/lib/python3.12/site-packages')]))
+  Path((_C14_SCRATCH + '/ag28v2a4/c/parallel-v599999-agensh-count14-adapter-20261026')),
+  Path((_C14_SCRATCH + '/ag28v2a4/final-public-runtime/venv/lib/python3.12/site-packages'))]))
 
 
 def launch_metadata(*,mode,compiled_sha):

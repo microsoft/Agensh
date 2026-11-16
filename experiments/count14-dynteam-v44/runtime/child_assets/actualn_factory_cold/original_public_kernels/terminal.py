@@ -4,10 +4,13 @@ The original n3 ABI is never patched or called. Successful native aggregates
 are fixed original results, not new evaluations; failed attempts never score.
 All original job terminal/disposition/allowed-extra chains must be exhausted.
 """
+import os as _count14_os  # endpoints/keys/host paths come from environment; see CONFIGURATION.md
+_C14_RETIRED_BOOT = _count14_os.environ.get('COUNT14_RETIRED_OWNER_BOOT_ID', '00000000-0000-0000-0000-000000000000')
+_C14_SCRATCH = _count14_os.environ.get('COUNT14_SCRATCH_ROOT', '/srv/count14/scratch2')
 from pathlib import Path
 import hashlib,json,os,sqlite3,stat,time,statistics
-EXPECTED=dict(pid=940620,start='30685049',boot_id='c611833c-3ede-48d6-9e7a-3772afe31ecb')
-ROOT=Path('/mnt/ptb-scratch2/ag31x48b46')
+EXPECTED=dict(pid=940620,start='30685049',boot_id=(_C14_RETIRED_BOOT))
+ROOT=Path((_C14_SCRATCH + '/ag31x48b46'))
 TRAJECTORY='agensh-v2-20261030-x48/Agensh-8/block-3/seed-2806506801'
 TARGET=50000000
 TRACKS=frozenset('agensh-v2-20261030-x48/Agensh-8/block-'+str(i)+'/seed-'+str(seed)for i,seed in((1,1855033666),(2,185023928),(3,2806506801)))

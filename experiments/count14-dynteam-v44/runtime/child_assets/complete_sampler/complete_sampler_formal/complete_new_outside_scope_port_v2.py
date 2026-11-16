@@ -2,14 +2,16 @@
 All original collection, SQL,25s,600s,unknown and health-None logic remains.
 Caller applies this AFTER existing exact18/provider source selectors.
 """
+import os as _count14_os  # endpoints/keys/host paths come from environment; see CONFIGURATION.md
+_C14_SCRATCH = _count14_os.environ.get('COUNT14_SCRATCH_ROOT', '/srv/count14/scratch2')
 from pathlib import Path
 from types import FunctionType
 import ast,copy,hashlib,inspect,textwrap
 PROJECTION_PIN='66ece9e044bdde4b0742941ae390a16c9eaaf18f38c61d342224007b86fbdf26'
 EXACT_ARMS={
- '9d279c1a1fb45737b675dc58800c6da154a93e793556f0f090ada7458700a391':Path('/mnt/ptb-scratch2/ct14-dynteam-formal-msg237-20261110-v33/u'),
- '9f176e2fedfa407678bc3b7d1fe6ed6a89a8782e0dbc0ddd6337f0ae3fd5e4de':Path('/mnt/ptb-scratch2/ct14-dynteam-racing-smoke-msg232-20261109-v1/u'),
- '3902509c2b0daf9dea0d7421e26cf7dd29e878aebd6cdd4699615e31bd7fc937':Path('/mnt/ptb-scratch2/ct14-dtr-smoke-20261105/u'),
+ '9d279c1a1fb45737b675dc58800c6da154a93e793556f0f090ada7458700a391':Path((_C14_SCRATCH + '/ct14-dynteam-formal-msg237-20261110-v33/u')),
+ '9f176e2fedfa407678bc3b7d1fe6ed6a89a8782e0dbc0ddd6337f0ae3fd5e4de':Path((_C14_SCRATCH + '/ct14-dynteam-racing-smoke-msg232-20261109-v1/u')),
+ '3902509c2b0daf9dea0d7421e26cf7dd29e878aebd6cdd4699615e31bd7fc937':Path((_C14_SCRATCH + '/ct14-dtr-smoke-20261105/u')),
 }
 
 def exact_cache(directory,contract_sha256):

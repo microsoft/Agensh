@@ -4,13 +4,15 @@ Only fixed original PUBLIC framework assets and their117 hash-pinned source
 files. No CyberGym project/task/candidate/model/session/credential bodies.
 New roots come solely from the exact selected manifest scope; no path options.
 """
+import os as _count14_os  # endpoints/keys/host paths come from environment; see CONFIGURATION.md
+_C14_SCRATCH = _count14_os.environ.get('COUNT14_SCRATCH_ROOT', '/srv/count14/scratch2')
 from pathlib import Path
 import os,stat
 from common import need,hash_file,strict,wire,publish,Refused
 import fresh48_scope as S
 HERE=Path(__file__).resolve().parent
-ORIGIN=Path('/mnt/ptb-scratch2/agensh-comparison-20261026/gate4-prminfix-newquota-r1')
-ASSETS=Path('/mnt/ptb-scratch2/agensh-comparison-20261026/v2-20261028-a4/agensh1-b1/backend-prestage-v1')
+ORIGIN=Path((_C14_SCRATCH + '/agensh-comparison-20261026/gate4-prminfix-newquota-r1'))
+ASSETS=Path((_C14_SCRATCH + '/agensh-comparison-20261026/v2-20261028-a4/agensh1-b1/backend-prestage-v1'))
 PLUGINS=ORIGIN.parent/'gate4-native-team2-v2/run/data/mattermost/client-plugins'
 INDEX_SHA='9fba104baa959985b46838bd56d98db340ac560234a4ee735fd93406fa423018'
 HOST_INDEX_SHA='2b9a92171488d972331f79d8fc49183c25954d86053d88348b2d73b3ce979179'

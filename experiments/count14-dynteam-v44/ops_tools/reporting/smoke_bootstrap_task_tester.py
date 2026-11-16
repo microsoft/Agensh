@@ -6,6 +6,9 @@ publication. No empty/fabricated suite/input/prompt/result or ProgramBench main.
 Later periodic evaluation/worker-start host writers are NOT started by this port;
 full formal deployment must separately bind their whole-domain custody first.
 """
+import os as _count14_os  # endpoints/keys/host paths come from environment; see CONFIGURATION.md
+_C14_SCRATCH1 = _count14_os.environ.get('COUNT14_SCRATCH1_ROOT', '/srv/count14/scratch1')
+_C14_SCRATCH = _count14_os.environ.get('COUNT14_SCRATCH_ROOT', '/srv/count14/scratch2')
 from pathlib import Path
 import ast
 import copy
@@ -66,8 +69,8 @@ def original_tester_namespace(source,*,configuration,docker_argv):
     # Same exact daemon used by the native role containers and these read-only
     # initial Git archive / board publication ports; never system Docker.
     need(type(docker_argv) in (tuple,list) and len(docker_argv)==3 and
-         docker_argv[1]=='--host' and (docker_argv[2].startswith('unix:///mnt/ptb-scratch2/') or
-         docker_argv[2].startswith('unix:///mnt/ptb-scratch/')),
+         docker_argv[1]=='--host' and (docker_argv[2].startswith(('unix://' + _C14_SCRATCH + '/')) or
+         docker_argv[2].startswith(('unix://' + _C14_SCRATCH1 + '/'))),
          'DYNTEAM_NATIVE_TESTER_EXACT_PRIVATE_DOCKER_ROUTE')
     scope['DOCKER']=list(docker_argv)
     return scope

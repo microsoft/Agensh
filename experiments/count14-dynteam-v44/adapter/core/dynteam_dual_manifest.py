@@ -1,11 +1,13 @@
 """Pure pre-run two-arm contract. NOT an owner/activation entry."""
+import os as _count14_os  # endpoints/keys/host paths come from environment; see CONFIGURATION.md
+_C14_SCRATCH = _count14_os.environ.get('COUNT14_SCRATCH_ROOT', '/srv/count14/scratch2')
 from copy import deepcopy
 from dynteam_metadata import COMMIT, catalogue, digest, need
 from dynteam_manifest import SEEDS, ROOT, SMOKE_ROOT, EVAL_SOCKET
 
 RACING_SOURCE = "21a0413e3262cebd5c6ac314974710937b9741b0"
-RACING_ROOT = "/mnt/ptb-scratch2/count14-dynteam-racing-70e2ca54-21a0413e-20261105"
-RACING_SMOKE = "/mnt/ptb-scratch2/count14-dynteam-racing-70e2ca54-21a0413e-smoke-20261105"
+RACING_ROOT = (_C14_SCRATCH + "/count14-dynteam-racing-70e2ca54-21a0413e-20261105")
+RACING_SMOKE = (_C14_SCRATCH + "/count14-dynteam-racing-70e2ca54-21a0413e-smoke-20261105")
 
 
 def compile_two_arm_contract(design, base_audit, racing_merge, *, mode):

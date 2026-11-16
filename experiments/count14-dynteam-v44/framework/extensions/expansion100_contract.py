@@ -4,6 +4,8 @@ OPS-only write methods use an already exclusively owned native Ledger. They do
 not create/open a ledger, alter prior targets/usage/requests/claims, release a
 frozen cgroup or claim that a dead scientific owner is alive.
 """
+import os as _count14_os  # endpoints/keys/host paths come from environment; see CONFIGURATION.md
+_C14_SCRATCH = _count14_os.environ.get('COUNT14_SCRATCH_ROOT', '/srv/count14/scratch2')
 from pathlib import Path
 import copy,json
 from common import need,digest,wire,publish,strict
@@ -12,9 +14,9 @@ SEEDS=(4287909351,1636023914,2619738241)
 REGULAR=(10_000_000,20_000_000,50_000_000,100_000_000)
 LIMIT=REGULAR[-1]
 NAME='USER_100M_EXPANSION_AUTHORIZATION_V1.json'
-OLD_ROOT='/mnt/ptb-scratch2/ag28v2a4'
+OLD_ROOT=(_C14_SCRATCH + '/ag28v2a4')
 OLD_EID='agensh-v2-20261028-a4'
-NEW_ROOT='/mnt/ptb-scratch2/ag30v2x48'
+NEW_ROOT=(_C14_SCRATCH + '/ag30v2x48')
 NEW_EID='agensh-v2-20261030-x48'
 # Conserved across separate owners, INCLUDING all historical uncertain slots.
 QUOTAS={'existing-1-16':{'global':60,'search':54,'auxiliary':6,'final':6},

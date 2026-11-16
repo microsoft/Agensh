@@ -1,9 +1,12 @@
 """Standalone minimal GLM health probes; never releases or dispatches search.
 One probe/600s, no request retries, own evidence/cost records outside all settings.
 """
-import os as _count14_os  # endpoints/keys come from environment; see CONFIGURATION.md
+import os as _count14_os  # endpoints/keys/host paths come from environment; see CONFIGURATION.md
+_C14_FS_UUID = _count14_os.environ.get('COUNT14_SCRATCH_FS_UUID', '00000000-0000-0000-0000-000000000000')
+_C14_HOSTNAME = _count14_os.environ.get('COUNT14_HOSTNAME', 'count14-host')
+_C14_SCRATCH = _count14_os.environ.get('COUNT14_SCRATCH_ROOT', '/srv/count14/scratch2')
 import datetime as dt,fcntl,hashlib,json,os,pathlib,signal,sys,time,urllib.request,urllib.error,uuid
-ROOT=pathlib.Path('/mnt/ptb-scratch2/cg-count14-seeds-expand8-20261021/batches/batch1')
+ROOT=pathlib.Path((_C14_SCRATCH + '/cg-count14-seeds-expand8-20261021/batches/batch1'))
 HOME=ROOT/'controller/pilot-owner/health'
 BASE=_count14_os.environ.get('COUNT14_GLM_LEGACY_BASE_URL', 'https://glm-legacy-gateway.example.invalid/v1')
 MODEL='VLLM-GATEWAY-GLM-5.3-FP8'
@@ -113,9 +116,9 @@ def streak(values):
  return count
 
 def run():
- if os.uname().nodename!='H100DEV4':raise RuntimeError('Wrong probe host')
+ if os.uname().nodename!=(_C14_HOSTNAME):raise RuntimeError('Wrong probe host')
  import subprocess
- if subprocess.check_output(['findmnt','-T',str(ROOT),'-no','UUID'],text=True).strip()!='0a1562dc-9dc6-42ca-bb42-d3df91417c5c':raise RuntimeError('Wrong scratch mount')
+ if subprocess.check_output(['findmnt','-T',str(ROOT),'-no','UUID'],text=True).strip()!=(_C14_FS_UUID):raise RuntimeError('Wrong scratch mount')
  HOME.mkdir(parents=True,exist_ok=True)
  with (HOME/'probe.lock').open('a') as lock:
   fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)

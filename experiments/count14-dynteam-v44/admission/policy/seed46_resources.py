@@ -1,11 +1,14 @@
 """PUBLIC admission proof guard; no Docker/configuration/model operations."""
+import os as _count14_os  # endpoints/keys/host paths come from environment; see CONFIGURATION.md
+_C14_SCRATCH1 = _count14_os.environ.get('COUNT14_SCRATCH1_ROOT', '/srv/count14/scratch1')
+_C14_SCRATCH = _count14_os.environ.get('COUNT14_SCRATCH_ROOT', '/srv/count14/scratch2')
 from pathlib import PurePosixPath
 import time
 from seed46_manifest import need, ROOT
 
-EVAL_HOST = 'unix:///mnt/ptb-scratch2/count14-eval-docker-20261030/docker.sock'
-SEARCH_HOST = 'unix:///mnt/ptb-scratch/cg-count14-search-block456-20261031/docker/docker.sock'
-SEARCH_DATA_ROOT = '/mnt/ptb-scratch/cg-count14-search-block456-20261031/docker/data'
+EVAL_HOST = ('unix://' + _C14_SCRATCH + '/count14-eval-docker-20261030/docker.sock')
+SEARCH_HOST = ('unix://' + _C14_SCRATCH1 + '/cg-count14-search-block456-20261031/docker/docker.sock')
+SEARCH_DATA_ROOT = (_C14_SCRATCH1 + '/cg-count14-search-block456-20261031/docker/data')
 GiB = 2**30
 
 
@@ -13,15 +16,15 @@ def scratch_path(value):
     need(type(value) is str, 'SEED46_SCRATCH_PATH_TYPE')
     p = PurePosixPath(value)
     need(p.is_absolute() and str(p) == value and '..' not in p.parts and
-         p.is_relative_to(PurePosixPath('/mnt/ptb-scratch2')) and
-         p != PurePosixPath('/mnt/ptb-scratch2'), 'SEED46_NO_ROOT_DISK_DEPLOYMENT_PATH')
+         p.is_relative_to(PurePosixPath((_C14_SCRATCH))) and
+         p != PurePosixPath((_C14_SCRATCH)), 'SEED46_NO_ROOT_DISK_DEPLOYMENT_PATH')
     return p
 
 
 def search_path(value):
     need(type(value) is str, 'SEED46_SEARCH_PATH_TYPE')
     p = PurePosixPath(value)
-    base = PurePosixPath('/mnt/ptb-scratch/cg-count14-search-block456-20261031/docker')
+    base = PurePosixPath((_C14_SCRATCH1 + '/cg-count14-search-block456-20261031/docker'))
     need(p.is_absolute() and str(p) == value and '..' not in p.parts and
          p.is_relative_to(base) and p != base, 'SEED46_ONLY_NEW_FIXED_SCRATCH1_SEARCH_PATH')
     return p
@@ -60,7 +63,7 @@ def validate(value, *, now_ns=None, for_system_health=False):
              type(r.get('FP8_inflight')) is int and r['FP8_inflight'] >= 0
              for r in rows), 'SEED46_OWN_RELAY_NUMERIC_ROOT_ROWS')
     need(len({r['root'] for r in rows}) == len(rows) and
-         all(PurePosixPath(r['root']).is_absolute() and str(PurePosixPath(r['root'])) == r['root'] and '..' not in PurePosixPath(r['root']).parts and any(PurePosixPath(r['root']).is_relative_to(base) and PurePosixPath(r['root']) != base for base in (PurePosixPath('/mnt/ptb-scratch'),PurePosixPath('/mnt/ptb-scratch2'))) for r in rows),
+         all(PurePosixPath(r['root']).is_absolute() and str(PurePosixPath(r['root'])) == r['root'] and '..' not in PurePosixPath(r['root']).parts and any(PurePosixPath(r['root']).is_relative_to(base) and PurePosixPath(r['root']) != base for base in (PurePosixPath((_C14_SCRATCH1)),PurePosixPath((_C14_SCRATCH)))) for r in rows),
          'SEED46_OWN_ROOTS_UNIQUE_SCRATCH_ONLY')
     total = sum(r['FP8_inflight'] for r in rows)
     need(type(own.get('total_FP8_inflight')) is int and

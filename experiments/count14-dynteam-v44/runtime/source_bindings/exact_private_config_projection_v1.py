@@ -4,6 +4,9 @@ The original SEARCH proof body/code object is retained. EVAL reuses that
 identical proof with only its three pre-registered infrastructure paths.
 Other routes and qualification retain original guards; no config is changed.
 """
+import os as _count14_os  # endpoints/keys/host paths come from environment; see CONFIGURATION.md
+_C14_SCRATCH1 = _count14_os.environ.get('COUNT14_SCRATCH1_ROOT', '/srv/count14/scratch1')
+_C14_SCRATCH = _count14_os.environ.get('COUNT14_SCRATCH_ROOT', '/srv/count14/scratch2')
 from pathlib import Path
 from types import FunctionType, CodeType
 import ast
@@ -17,7 +20,7 @@ import textwrap
 
 PROJECTION_SHA256 = '66ece9e044bdde4b0742941ae390a16c9eaaf18f38c61d342224007b86fbdf26'
 SELECTED_SHA256 = 'dc136c2df6e39d27b4ccb5b0c770675e85d523013933f97962a0005f7c2891f2'
-ROOT = Path('/mnt/ptb-scratch/cg-count14-search-block456-20261031/docker')
+ROOT = Path((_C14_SCRATCH1 + '/cg-count14-search-block456-20261031/docker'))
 CONFIG = ROOT / 'daemon.json'
 SOCKET = ROOT / 'docker.sock'
 CONTAINERD = ROOT / 'containerd.sock'
@@ -106,7 +109,7 @@ def declared_link(module, reader, docker, dockerd_birth, containerd_socket, cont
 
 
 _SEARCH_DECLARED_LINK = declared_link
-EVAL_ROOT = Path('/mnt/ptb-scratch2/count14-eval-docker-20261030')
+EVAL_ROOT = Path((_C14_SCRATCH + '/count14-eval-docker-20261030'))
 EVAL_CONFIG = EVAL_ROOT/'daemon.json'
 EVAL_SOCKET = EVAL_ROOT/'docker.sock'
 EVAL_CONTAINERD = EVAL_ROOT/'containerd.sock'

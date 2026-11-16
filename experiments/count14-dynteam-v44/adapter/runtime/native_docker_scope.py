@@ -4,6 +4,9 @@ No Env, Args, log/error body, candidate, HOME or session is requested/decoded.
 Only info identity and selected container control fields are projected by the
 original Docker CLI. Mutation subprocesses are retained; NEVER timeout-killed.
 """
+import os as _count14_os  # endpoints/keys/host paths come from environment; see CONFIGURATION.md
+_C14_SCRATCH1 = _count14_os.environ.get('COUNT14_SCRATCH1_ROOT', '/srv/count14/scratch1')
+_C14_SCRATCH = _count14_os.environ.get('COUNT14_SCRATCH_ROOT', '/srv/count14/scratch2')
 from dataclasses import dataclass
 from pathlib import Path
 import hashlib
@@ -67,7 +70,7 @@ class ScopedDocker:
             need(all(any(x.startswith('OWN-') for x in p.parts) for p in (r.cli,r.socket_path,r.data_root)),
                  'DYNTEAM_OWN_DOCKER_FIXTURES_ONLY')
         else:
-            need(os.geteuid()==0 and all(p.is_relative_to('/mnt/ptb-scratch2') or p.is_relative_to('/mnt/ptb-scratch')
+            need(os.geteuid()==0 and all(p.is_relative_to((_C14_SCRATCH)) or p.is_relative_to((_C14_SCRATCH1))
                  for p in (r.socket_path,r.data_root)), 'DYNTEAM_NATIVE_PRIVATE_DOCKER_NEVER_SYSTEM_ROOT')
         cli,sock=r.cli.stat(),r.socket_path.stat()
         need(stat.S_ISREG(cli.st_mode) and cli.st_mode&0o111 and not cli.st_mode&0o022 and

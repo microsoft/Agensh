@@ -5,10 +5,13 @@ cache, not an experiment ledger. Source receipts/ledgers are never written.
 mtime is neither a request timestamp nor a window predicate. Original request
 ID is hashed only as public control identity; never hash body/pkl/logs.
 """
+import os as _count14_os  # endpoints/keys/host paths come from environment; see CONFIGURATION.md
+_C14_HOSTNAME = _count14_os.environ.get('COUNT14_HOSTNAME', 'count14-host')
+_C14_SCRATCH = _count14_os.environ.get('COUNT14_SCRATCH_ROOT', '/srv/count14/scratch2')
 from pathlib import Path
 import collections,contextlib,datetime,fcntl,hashlib,json,math,os,sqlite3,stat,time
 PREFIX='count14-own-resource-dirfd-health-v1'
-BASE=Path('/mnt/ptb-scratch2')/PREFIX
+BASE=Path((_C14_SCRATCH))/PREFIX
 STATES=('COMPLETED','UNKNOWN_CHARGED','REJECTED_PREGEN','RETRYABLE_REJECTED')
 
 def ns(value,need):
@@ -115,7 +118,7 @@ def health(observer,roots,directory,pin,now_ns,native_calls,native_bad,system_ca
 def collect(observer,*,registered=None,directory=BASE,budget=4):
     with observer.deadline(25):
         if registered is None:
-            observer.need(os.geteuid()==0 and os.uname().nodename=='H100DEV4'and Path('/proc/sys/kernel/random/boot_id').read_text().strip()==observer.BOOT)
+            observer.need(os.geteuid()==0 and os.uname().nodename==(_C14_HOSTNAME)and Path('/proc/sys/kernel/random/boot_id').read_text().strip()==observer.BOOT)
             observer.canonical(observer.BASE);observer.need(os.path.ismount(observer.BASE)and observer.BASE.stat().st_dev!=Path('/').stat().st_dev)
             value,pin=observer.inventory()
         else:value,pin=registered # explicit OWN fixture only; not exposed as CLI

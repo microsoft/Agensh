@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Real original independent v2.1 child; pinned bootstrap works under -I."""
-import os as _count14_os  # endpoints/keys come from environment; see CONFIGURATION.md
+import os as _count14_os  # endpoints/keys/host paths come from environment; see CONFIGURATION.md
+_C14_SCRATCH = _count14_os.environ.get('COUNT14_SCRATCH_ROOT', '/srv/count14/scratch2')
 from pathlib import Path
 import hashlib
 import json
@@ -76,7 +77,7 @@ def _msg220_install_provider_options(contract):
             and contract.get('mode') in ('smoke', 'production')
             and {r['arm'] for r in contract['arms']} == {'DYNTEAM', 'DYNTEAM_RACING'}
             and len(contract['trajectories']) == (2 if contract['mode'] == 'smoke' else 6)
-            and all(Path(r['root']).is_absolute() and Path(r['root']).is_relative_to('/mnt/ptb-scratch2')
+            and all(Path(r['root']).is_absolute() and Path(r['root']).is_relative_to((_C14_SCRATCH))
                 and not any('mockdebug' in p for p in Path(r['root']).parts) for r in contract['arms'])):
         raise ValueError('MSG220_AUX_ONLY_TWO_REGISTERED_NEW_ARMS')
     alias = _msg221_alias()
