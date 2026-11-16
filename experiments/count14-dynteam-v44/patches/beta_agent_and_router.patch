@@ -1,0 +1,1445 @@
+--- a/agent/acp-bridge.py
++++ b/agent/acp-bridge.py
+@@ -6,79 +6,49 @@
+ from archive import begin, save
+ 
+ def usage():
+-    sys.stderr.write("usage: acp-bridge.py <sock-path> <uid> <gid> -- <child-cmd...>\n")
++    sys.stderr.write('usage: acp-bridge.py <sock-path> <uid> <gid> -- <child-cmd...>\n')
+     sys.exit(2)
+-
+-if "--" not in sys.argv:
++if '--' not in sys.argv:
+     usage()
+-sep = sys.argv.index("--")
++sep = sys.argv.index('--')
+ if sep != 4:
+     usage()
+ sock_path = sys.argv[1]
+ sock_uid = int(sys.argv[2])
+ sock_gid = int(sys.argv[3])
+-child_cmd = sys.argv[sep+1:]
++child_cmd = sys.argv[sep + 1:]
+ if not child_cmd:
+     usage()
+-
+-# Cleanup stale socket
+-try: os.unlink(sock_path)
+-except FileNotFoundError: pass
+-
++try:
++    os.unlink(sock_path)
++except FileNotFoundError:
++    pass
+ server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+ server.bind(sock_path)
+-os.chmod(sock_path, 0o660)
++os.chmod(sock_path, 432)
+ try:
+     os.chown(sock_path, sock_uid, sock_gid)
+ except PermissionError:
+     pass
+ server.listen(8)
+-sys.stderr.write(f"[acp-bridge] listening at {sock_path} (mode 0660 {sock_uid}:{sock_gid})\n")
++sys.stderr.write(f'[acp-bridge] listening at {sock_path} (mode 0660 {sock_uid}:{sock_gid})\n')
+ sys.stderr.flush()
+-
+-# --- Child privilege drop (pbench bin anti-reverse) ----------------------------
+-# ProgramBench requires the agent to be able to *run* the reference binary
+-# but not *read* its bytes. That is enforced by mounting the bin root:root
+-# mode 0111 and running the agent (the spawned ACP child) as a non-root
+-# user, which the kernel then denies read access to.
+-#
+-# ACP_CHILD_UID must identify an unprivileged worker; ACP_CHILD_GID defaults
+-# to the same value. The Compose fleet supplies these credentials.
+-#
+-# Implementation note: Popen(user=, group=) does NOT clear the root
+-# supplementary group (child ends up groups=<gid>,0). That is harmless for the 0111 read-protection (mode 0111
+-# has no read bit for owner/group/other), so we do not need extra_groups=[].
+-# We keep the current uid's groups to avoid surprising the agent's normal
+-# tooling.
+-_child_uid_env = os.environ.get("ACP_CHILD_UID", "").strip()
+-_child_gid_env = os.environ.get("ACP_CHILD_GID", "").strip()
++_child_uid_env = os.environ.get('ACP_CHILD_UID', '').strip()
++_child_gid_env = os.environ.get('ACP_CHILD_GID', '').strip()
+ _child_popen_kwargs = {}
+ if _child_uid_env:
+     _drop_uid = int(_child_uid_env)
+-    # Default the gid to the uid when only ACP_CHILD_UID is given.
+     _drop_gid = int(_child_gid_env) if _child_gid_env else _drop_uid
+-    _child_popen_kwargs["user"] = _drop_uid
+-    _child_popen_kwargs["group"] = _drop_gid
+-    sys.stderr.write(
+-        f"[acp-bridge] child privilege drop ENABLED: spawning children as "
+-        f"uid={_drop_uid} gid={_drop_gid}\n"
+-    )
++    _child_popen_kwargs['user'] = _drop_uid
++    _child_popen_kwargs['group'] = _drop_gid
++    sys.stderr.write(f'[acp-bridge] child privilege drop ENABLED: spawning children as uid={_drop_uid} gid={_drop_gid}\n')
+     sys.stderr.flush()
+ 
+ def _child_env():
+-    # When dropping privileges, point HOME at the drop-user's writable state
+-    # dir so claude-agent-acp's ~/.claude/* lands somewhere it can write.
+-    # entrypoint.sh already exports HOME=$AGENT_HOME/home (chowned to the
+-    # drop user), so inheriting the current env's HOME is correct; we copy
+-    # it explicitly to make the intent clear and to allow None (no override
+-    # in the default root path).
+     if not _child_popen_kwargs:
+         return None
+     env = os.environ.copy()
+     return env
+-
+-# One process and one state owner at a time. A reconnect
+-# waits for the previous process tree to stop and its archive to commit.
+ turn_lock = threading.Lock()
+ active_clients = set()
+ active_threads = set()
+@@ -87,77 +57,40 @@
+ bridge_stopping = threading.Event()
+ if not _child_uid_env or int(_child_uid_env) == 0:
+     raise RuntimeError('worker sessions require an unprivileged ACP_CHILD_UID')
++from native_bridge_client import bridge_lifecycle
++_count14_lifecycle = bridge_lifecycle()
+ from worker_session import TurnState
+ from run_control import refresh_allowed
+ is_tester = os.environ.get('AGENT_ROLE') == 'tester'
+-# The claim checker is off the board and keeps its account, like a tester.
+ is_checker = os.environ.get('AGENT_ROLE') == 'checker'
+-# The standalone baseline keeps its native conversation on reconnect. Only
+-# team agents have a provisioned identity and participate in session refresh.
++is_racing = os.environ.get('AGENT_ROLE') == 'racing'
+ turn_state = None
+ state_root = Path(os.environ.get('AGENT_HOME', '/opt/data')).absolute()
+ if os.environ.get('ACP_IDENTITY_FILE'):
+-    turn_state = TurnState(os.environ['HOME'], '/work',
+-        os.environ.get('ACP_TRAJECTORY_DIR', '/opt/trajectories'),
+-        _drop_uid, _drop_gid, os.environ.get('COPILOT_HOME'),
+-        state_root=state_root, scratch_dirs=('/tmp', '/var/tmp', '/dev/shm'))
++    turn_state = TurnState(os.environ['HOME'], '/work', os.environ.get('ACP_TRAJECTORY_DIR', '/opt/trajectories'), _drop_uid, _drop_gid, os.environ.get('COPILOT_HOME'), state_root=state_root, scratch_dirs=('/tmp', '/var/tmp', '/dev/shm'))
+     recovery = turn_state.begin()
+-    turn_state.finish(recovery, 'startup_recovery')
++    _count14_lifecycle.preserve_startup(turn_state, recovery)
+ archive = begin(state_root, archive_root=turn_state.archive / 'shutdown' if turn_state else None)
+ 
+-
+ def stop_turn_processes(proc):
+-    """Stop both the harness group and detached tools in this agent container."""
+-    def targets():
+-        result = []
+-        for path in Path('/proc').iterdir():
+-            if not path.name.isdigit():
+-                continue
+-            try:
+-                uid = int(next(line for line in (path / 'status').read_text().splitlines()
+-                               if line.startswith('Uid:')).split()[1])
+-                if uid == _drop_uid:
+-                    result.append(int(path.name))
+-            except (OSError, StopIteration, ValueError):
+-                pass
+-        return result
+-    for sig in (signal.SIGTERM, signal.SIGKILL):
+-        if proc is not None:
+-            try: os.killpg(proc.pid, sig)
+-            except ProcessLookupError: pass
+-        for pid in targets():
+-            try: os.kill(pid, sig)
+-            except ProcessLookupError: pass
+-        if sig == signal.SIGTERM and proc is not None:
+-            try: proc.wait(timeout=2)
+-            except subprocess.TimeoutExpired: pass
+-        elif sig == signal.SIGTERM:
+-            time.sleep(0.25)
+-    if proc is not None:
+-        proc.wait(timeout=5)
++    return _count14_lifecycle.stop_normal(proc)
+ 
+ def publish_lifecycle_event(turn, identity, kind, reason=None):
+     """System lifecycle events use the same admission, WAL and rendering as notes."""
+     board_ids = os.environ.get('BOARD_IDS', 'pbench-top').split(',')
+     if len(board_ids) != 1:
+         raise ValueError('worker sessions require one context board')
+-    content = f'Account @{identity["username"]} is ready.' if kind == 'ONBOARD' else (
+-        f'Account @{identity["username"]} is retiring ({reason}).')
+-    request = urllib.request.Request(os.environ['BOARD_SERVICE_URL'].rstrip('/') +
+-        '/board/' + board_ids[0].strip() + '/note', json.dumps(dict(
+-            thread_id=identity['worker'], turn_id=turn.name, type=kind,
+-            content=content, delegation_id=turn.name)).encode(),
+-        {'Content-Type': 'application/json'}, method='POST')
++    content = f"Account @{identity['username']} is ready." if kind == 'ONBOARD' else f"Account @{identity['username']} is retiring ({reason})."
++    request = urllib.request.Request(os.environ['BOARD_SERVICE_URL'].rstrip('/') + '/board/' + board_ids[0].strip() + '/note', json.dumps(dict(thread_id=identity['worker'], turn_id=turn.name, type=kind, content=content, delegation_id=turn.name)).encode(), {'Content-Type': 'application/json'}, method='POST')
+     with urllib.request.urlopen(request, timeout=5) as response:
+         if json.load(response)['status'] != 'admitted':
+             raise RuntimeError('context board rejected the worker lifecycle event')
+-
+ 
+ def record_session_end(turn, reason):
+     marker = Path(sock_path).parent / (turn.name + '.end.json')
+     temporary = marker.with_suffix('.tmp')
+     temporary.write_text(json.dumps({'turn_id': turn.name, 'reason': reason}))
+-    temporary.chmod(0o644)
++    temporary.chmod(420)
+     temporary.replace(marker)
+ 
+ def serve_connection(client_sock, peer_id):
+@@ -165,7 +98,7 @@
+     if poisoned or bridge_stopping.is_set():
+         client_sock.close()
+         return
+-    if turn_state and (Path(sock_path).parent / 'current-turn.json').exists() and not refresh_allowed():
++    if turn_state and (Path(sock_path).parent / 'current-turn.json').exists() and (not refresh_allowed()):
+         sys.stderr.write('[acp-bridge] refresh cutoff reached; refusing a new session\n')
+         client_sock.close()
+         return
+@@ -173,11 +106,9 @@
+     if turn_state:
+         identity = json.loads(Path(os.environ['ACP_IDENTITY_FILE']).read_text())
+         previous_path = Path(sock_path).parent / 'current-turn.json'
+-        if previous_path.is_file() and not (is_tester or is_checker):
++        if previous_path.is_file() and (not (is_tester or is_checker or is_racing)):
+             previous = json.loads(previous_path.read_text())
+             if previous.get('username') == identity['username']:
+-                # The router must rotate the ended generation's account before
+-                # a reconnect can start another worker in the same slot.
+                 client_sock.close()
+                 return
+     turn = turn_state.begin() if turn_state else None
+@@ -191,99 +122,64 @@
+         control = json.loads(control_path.read_text()) if control_path.is_file() else {}
+         turn_state.configure_identity(identity, os.environ['GITEA_HOST'], control.get('mattermost'))
+         if is_checker:
+-            # Every checker session starts on the latest claims.md, including the first.
+             turn_state.refresh_repository(os.environ['GITEA_HOST'], identity['username'], 'claims')
+             turn_state.configure_identity(identity, os.environ['GITEA_HOST'], control.get('mattermost'))
+         elif (Path(sock_path).parent / 'current-turn.json').exists():
+-            turn_state.refresh_repository(os.environ['GITEA_HOST'],
+-                identity['username'] if is_tester else os.environ['GITEA_ORG'],
+-                'tests' if is_tester else os.environ.get('REPO', 'main'))
+-            # A checkout rooted at /work may itself track AGENTS.md or MCP
+-            # config. Keep the system role and ready credentials authoritative.
++            turn_state.refresh_repository(os.environ['GITEA_HOST'], identity['username'] if (is_tester or is_racing) else os.environ['GITEA_ORG'], 'tests' if (is_tester or is_racing) else os.environ.get('REPO', 'main'))
+             turn_state.configure_identity(identity, os.environ['GITEA_HOST'], control.get('mattermost'))
+-        turn_state._manifest(turn, identity={key: identity[key] for key in
+-            ('worker', 'username', 'gitea_id', 'mattermost_id')})
+-        traces = {name: (turn / name).open('wb', buffering=0)
+-                  for name in ('acp-in.jsonl', 'acp-out.jsonl', 'stderr.log')}
++        turn_state._manifest(turn, identity={key: identity[key] for key in ('worker', 'username', 'gitea_id', 'mattermost_id')})
++        traces = {name: (turn / name).open('wb', buffering=0) for name in ('acp-in.jsonl', 'acp-out.jsonl', 'stderr.log')}
+         child_env = os.environ.copy()
+-        child_env.update(GITEA_TOKEN=identity['gitea_token'], MATTERMOST_TOKEN=identity['mattermost_token'],
+-                         WORKER_ACCOUNT=identity['username'], ACP_TURN_ID=turn.name)
++        child_env.update(GITEA_TOKEN=identity['gitea_token'], MATTERMOST_TOKEN=identity['mattermost_token'], WORKER_ACCOUNT=identity['username'], ACP_TURN_ID=turn.name)
+         marker = Path(sock_path).parent / (turn.name + '.summary.json')
+         retire_marker = marker.with_name(turn.name + '.retire.json')
+-        # Written by the board when the claim checker's router stops this worker.
+         terminate_marker = marker.with_name(turn.name + '.terminate.json')
+         child_env['TMPDIR'] = str(Path(os.environ['HOME']) / '.turn-tmp')
+-        Path(child_env['TMPDIR']).mkdir(mode=0o700)
++        Path(child_env['TMPDIR']).mkdir(mode=448)
+         os.chown(child_env['TMPDIR'], _drop_uid, _drop_gid)
+         current = Path(sock_path).parent / 'current-turn.json'
+         temp = current.with_suffix('.tmp')
+-        current_values = {'turn_id': turn.name, 'started_at_ms': int(time.time() * 1000),
+-                          'username': identity['username']}
++        current_values = {'turn_id': turn.name, 'started_at_ms': int(time.time() * 1000), 'username': identity['username']}
+         if is_tester:
+             assignment_path = Path('/opt/tester-input/latest/release.json')
+             assignment_number = json.loads(assignment_path.read_text())['number']
+             current_values['tester_release'] = assignment_number
+             turn_state._manifest(turn, tester_release=assignment_number)
+         temp.write_text(json.dumps(current_values))
+-        temp.chmod(0o644)
++        temp.chmod(420)
+         temp.replace(current)
+-        # Account rotation/provisioning finished before this identity was
+-        # installed. Announce the ready handle before admitting its first prompt.
+-        if not (is_tester or is_checker):
++        if not (is_tester or is_checker or is_racing):
+             publish_lifecycle_event(turn, identity, 'ONBOARD')
+-    sys.stderr.write(f"[acp-bridge] conn {peer_id} accepted, spawning {child_cmd}\n")
++    sys.stderr.write(f'[acp-bridge] conn {peer_id} accepted, spawning {child_cmd}\n')
+     sys.stderr.flush()
+-    # The spawn CAN fail, and an unhandled failure loses the whole agent silently.
+-    #
+-    # When pbench.slice reaches its TasksMax, Popen raises BlockingIOError
+-    # [Errno 11], and an uncaught exception kills this thread -- leaving
+-    # client_sock ACCEPTED with no child behind it. The router has already
+-    # logged "socket established" and sent initialize; it waits on that dead
+-    # socket for the rest of the run, and the agent never recovers, because a
+-    # per-connection bridge never notices, PID 1 stays alive, and docker's
+-    # restart policy never fires.
+-    #
+-    # Closing the socket is what makes it self-healing: the router's reconnect
+-    # loop already retries, it just needs the chance. Retry briefly first --
+-    # EAGAIN under a task ceiling is usually transient once a peer exits.
+     proc = None
+     for attempt in range(1, 4):
+         try:
+-            proc = subprocess.Popen(
+-                child_cmd,
+-                stdin=subprocess.PIPE,
+-                stdout=subprocess.PIPE,
+-                stderr=subprocess.PIPE if turn else sys.stderr,
+-                bufsize=0,
+-                close_fds=True,
+-                env=child_env,
+-                start_new_session=True,
+-                **_child_popen_kwargs,
+-            )
++            proc = subprocess.Popen(child_cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE if turn else sys.stderr, bufsize=0, close_fds=True, env=child_env, start_new_session=True, **_child_popen_kwargs)
+             break
+         except (BlockingIOError, OSError) as e:
+-            sys.stderr.write(
+-                f"[acp-bridge] conn {peer_id} SPAWN FAILED (attempt {attempt}/3): "
+-                f"{e.__class__.__name__}: {e}\n")
++            sys.stderr.write(f'[acp-bridge] conn {peer_id} SPAWN FAILED (attempt {attempt}/3): {e.__class__.__name__}: {e}\n')
+             sys.stderr.flush()
+             if attempt < 3:
+                 time.sleep(2 * attempt)
+     if proc is None:
+-        # Give the client a closed socket rather than a silent black hole.
+-        sys.stderr.write(
+-            f"[acp-bridge] conn {peer_id} ABANDONED after 3 spawn failures; "
+-            f"closing socket so the client reconnects\n")
++        sys.stderr.write(f'[acp-bridge] conn {peer_id} ABANDONED after 3 spawn failures; closing socket so the client reconnects\n')
+         sys.stderr.flush()
+-        try: client_sock.shutdown(socket.SHUT_RDWR)
+-        except Exception: pass
+-        try: client_sock.close()
+-        except Exception: pass
++        try:
++            client_sock.shutdown(socket.SHUT_RDWR)
++        except Exception:
++            pass
++        try:
++            client_sock.close()
++        except Exception:
++            pass
+         if turn:
+-            for trace in traces.values(): trace.close()
++            for trace in traces.values():
++                trace.close()
+             turn_state.finish(turn, 'spawn_failed')
+             record_session_end(turn, 'spawn_failed')
+         return
+-
++    _count14_lifecycle.born(proc, identity, turn)
+     end_reason = 'disconnect'
+     watcher_stop = threading.Event()
+     input_lock = threading.Lock()
+@@ -293,6 +189,7 @@
+     pending_prompts = {}
+ 
+     def observe_requests(data):
++        _count14_lifecycle.observe_control(proc, data, 'input')
+         for line in data:
+             try:
+                 message = json.loads(line)
+@@ -307,6 +204,7 @@
+                         pending_prompts[message['id']] = session_id
+ 
+     def observe_responses(data):
++        _count14_lifecycle.observe_control(proc, data, 'output')
+         for line in data:
+             try:
+                 message = json.loads(line)
+@@ -320,45 +218,27 @@
+                     prompt_condition.notify_all()
+ 
+     def end_child():
+-        """Cancel live ACP work before any EOF or process-tree teardown."""
+         nonlocal end_reason
++        _count14_lifecycle.before_end(proc)
+         with stop_lock:
+             if stopping.is_set():
+                 return
+-            with input_lock:
+-                stopping.set()
+-                if bridge_stopping.is_set() and end_reason == 'disconnect':
+-                    end_reason = 'shutdown'
+-                with prompt_condition:
+-                    sessions = set(pending_prompts.values())
+-                for session_id in sessions:
+-                    cancel = (json.dumps(dict(jsonrpc='2.0', method='session/cancel',
+-                        params=dict(sessionId=session_id))) + '\n').encode()
+-                    try:
+-                        if turn:
+-                            traces['acp-in.jsonl'].write(cancel)
+-                        proc.stdin.write(cancel)
+-                        proc.stdin.flush()
+-                    except (BrokenPipeError, OSError):
+-                        break
+-            if sessions:
+-                with prompt_condition:
+-                    settled = prompt_condition.wait_for(lambda: not pending_prompts, timeout=3)
+-                sys.stderr.write(f'[acp-bridge] ACP cancellation settled={settled}\n')
+-            # Keep stdin open while stopping. Closing it first triggers native
+-            # disposal while an active prompt/background callback is still live.
+-            stop_turn_processes(proc)
+-            with input_lock:
+-                try: proc.stdin.close()
+-                except (BrokenPipeError, OSError): pass
++            stopping.set()
++            if bridge_stopping.is_set() and end_reason == 'disconnect':
++                end_reason = 'shutdown'
++        stop_turn_processes(proc)
++        with input_lock:
++            try:
++                proc.stdin.close()
++            except (BrokenPipeError, OSError):
++                pass
+ 
+     def watch_session():
+         nonlocal end_reason
+         while not watcher_stop.wait(0.1):
+-            if is_tester:
+-                # The runner switches this symlink only after admitting the
+-                # new assignment. Freeze the suite before stopping its author,
+-                # then reuse worker archival and cleanup before the next child.
++            if bridge_stopping.is_set():
++                reason = 'shutdown'
++            elif is_tester:
+                 latest_number = json.loads(assignment_path.read_text())['number']
+                 reason = 'tester_release' if latest_number != assignment_number else None
+             elif is_checker:
+@@ -369,10 +249,13 @@
+                 reason = 'retire' if retire_marker.exists() else None
+             if reason:
+                 end_reason = reason
++                _count14_lifecycle.before_end(proc)
+                 record_session_end(turn, reason)
+                 sys.stderr.write(f'[acp-bridge] ending turn {turn.name}: {reason}\n')
+-                try: client_sock.shutdown(socket.SHUT_RDWR)
+-                except OSError: pass
++                try:
++                    client_sock.shutdown(socket.SHUT_RDWR)
++                except OSError:
++                    pass
+                 end_child()
+                 return
+ 
+@@ -381,7 +264,8 @@
+         try:
+             while True:
+                 b = client_sock.recv(65536)
+-                if not b: break
++                if not b:
++                    break
+                 with input_lock:
+                     if stopping.is_set():
+                         break
+@@ -389,7 +273,8 @@
+                     lines = buffered.split(b'\n')
+                     buffered = lines.pop()
+                     observe_requests(lines)
+-                    if turn: traces['acp-in.jsonl'].write(b)
++                    if turn:
++                        traces['acp-in.jsonl'].write(b)
+                     proc.stdin.write(b)
+                     proc.stdin.flush()
+         except (BrokenPipeError, OSError):
+@@ -403,60 +288,79 @@
+         try:
+             while True:
+                 b = proc.stdout.read(65536)
+-                if not b: break
+-                if turn: traces['acp-out.jsonl'].write(b)
++                if not b:
++                    break
++                if turn:
++                    traces['acp-out.jsonl'].write(b)
+                 buffered += b
+                 lines = buffered.split(b'\n')
+                 buffered = lines.pop()
+                 observe_responses(lines)
+                 if connected:
+-                    try: client_sock.sendall(b)
++                    try:
++                        client_sock.sendall(b)
+                     except (BrokenPipeError, OSError):
+-                        if not turn: raise
+-                        connected = False  # Drain final ACP bytes into the archive.
++                        if not turn:
++                            raise
++                        connected = False
+         except (BrokenPipeError, OSError):
+             pass
+         finally:
+-            try: client_sock.shutdown(socket.SHUT_WR)
+-            except Exception: pass
+-
++            try:
++                client_sock.shutdown(socket.SHUT_WR)
++            except Exception:
++                pass
+     t1 = threading.Thread(target=sock_to_child, daemon=True)
+     t2 = threading.Thread(target=child_to_sock, daemon=True)
++
+     def stderr_to_log():
+         while True:
+             b = proc.stderr.read(65536)
+-            if not b: break
++            if not b:
++                break
+             traces['stderr.log'].write(b)
+             sys.stderr.buffer.write(b)
+             sys.stderr.buffer.flush()
+     t3 = threading.Thread(target=stderr_to_log, daemon=True) if turn else None
+-    t1.start(); t2.start()
+-    if t3: t3.start()
++    t1.start()
++    t2.start()
++    if t3:
++        t3.start()
+     watcher = threading.Thread(target=watch_session, daemon=True) if turn else None
+-    if watcher: watcher.start()
++    if watcher:
++        watcher.start()
+     proc.wait()
+     watcher_stop.set()
+-    if watcher: watcher.join(timeout=10)
+-    if turn: stop_turn_processes(proc)
++    if watcher:
++        watcher.join(timeout=10)
+     if turn:
+-        try: client_sock.shutdown(socket.SHUT_RDWR)
+-        except OSError: pass
+-    t1.join(timeout=2); t2.join(timeout=2)
+-    if t3: t3.join(timeout=2)
+-    try: client_sock.close()
+-    except Exception: pass
++        stop_turn_processes(proc)
+     if turn:
+-        if any(t and t.is_alive() for t in (t1, t2, t3, watcher)):
++        try:
++            client_sock.shutdown(socket.SHUT_RDWR)
++        except OSError:
++            pass
++    t1.join(timeout=2)
++    t2.join(timeout=2)
++    if t3:
++        t3.join(timeout=2)
++    try:
++        client_sock.close()
++    except Exception:
++        pass
++    if turn:
++        if any((t and t.is_alive() for t in (t1, t2, t3, watcher))):
+             raise RuntimeError('turn processes or trajectory writers did not stop')
+-        for trace in traces.values(): trace.close()
++        for trace in traces.values():
++            trace.close()
+         turn_state.finish(turn, end_reason)
++        _count14_lifecycle.archived(proc, identity, turn, end_reason)
+         record_session_end(turn, end_reason)
+         marker.unlink(missing_ok=True)
+         retire_marker.unlink(missing_ok=True)
+         terminate_marker.unlink(missing_ok=True)
+-    sys.stderr.write(f"[acp-bridge] conn {peer_id} child exited rc={proc.returncode}\n")
++    sys.stderr.write(f'[acp-bridge] conn {peer_id} child exited rc={proc.returncode}\n')
+     sys.stderr.flush()
+-
+ 
+ def serve(client_sock, peer_id):
+     global poisoned
+@@ -477,19 +381,21 @@
+ 
+ def shutdown(*_):
+     bridge_stopping.set()
+-    try: server.close()
+-    except OSError: pass
+-    with active_lock:
+-        clients = list(active_clients)
+-    for client in clients:
+-        try: client.shutdown(socket.SHUT_RDWR)
+-        except OSError: pass
+-
++    try:
++        server.close()
++    except OSError:
++        pass
+ signal.signal(signal.SIGTERM, shutdown)
+ signal.signal(signal.SIGINT, shutdown)
+ server.settimeout(0.5)
+ peer_counter = 0
+ try:
++    # The listener exists for original compose -d readiness; no connection or
++    # scientific CLI is accepted until this actual bridge is authenticated.
++    # A zero-request checker therefore has a genuine control binding at normal
++    # retirement, not a boot-plan-only init allowance or a synthetic baseline.
++    if not _count14_lifecycle.ready(bridge_stopping):
++        bridge_stopping.set()
+     while not bridge_stopping.is_set():
+         try:
+             client, _ = server.accept()
+@@ -509,11 +415,13 @@
+     for thread in threads:
+         thread.join(timeout=max(0, deadline - time.monotonic()))
+     try:
+-        if any(thread.is_alive() for thread in threads) or poisoned:
++        if any((thread.is_alive() for thread in threads)) or poisoned:
+             raise RuntimeError('worker shutdown or session cleanup did not complete; preserve state')
+         stop_turn_processes(None)
+         save(archive, Path(os.environ['HOME']).absolute(), Path('/work'))
+         print('[acp-bridge] shutdown archive complete', file=sys.stderr, flush=True)
+     finally:
+-        try: os.unlink(sock_path)
+-        except FileNotFoundError: pass
++        try:
++            os.unlink(sock_path)
++        except FileNotFoundError:
++            pass
+--- a/agent/worker_session.py
++++ b/agent/worker_session.py
+@@ -11,49 +11,47 @@
+ from urllib.parse import urlsplit
+ from archive import update_manifest, seal
+ 
+-
+ class TurnState:
++
+     def __init__(self, home, workspace, archive, uid, gid, copilot_home=None, state_root=None, scratch_dirs=()):
+         self.home, self.workspace, self.archive = map(lambda p: Path(p).resolve(), (home, workspace, archive))
+         self.native = Path(copilot_home).resolve() if copilot_home else self.home / '.copilot'
+         self.state_root = Path(state_root).resolve() if state_root else self.home
+-        self.scratch_dirs = tuple(Path(p) for p in scratch_dirs)
++        self.scratch_dirs = tuple((Path(p) for p in scratch_dirs))
+         if not self.home.is_relative_to(self.state_root):
+             raise ValueError('HOME must be inside the agent state root')
+         for path in (self.home, self.workspace, self.native, self.state_root):
+             if self.archive == path or self.archive.is_relative_to(path) or path.is_relative_to(self.archive):
+                 raise ValueError('trajectory archive must be outside agent state and workspace')
+-        self.uid, self.gid = uid, gid
++        self.uid, self.gid = (uid, gid)
+         self.archive.mkdir(parents=True, exist_ok=True)
+         os.chown(self.archive, os.geteuid(), os.getegid())
+-        self.archive.chmod(0o700)
++        self.archive.chmod(448)
+         self.active = None
+         self.bootstrap = {}
+-        for root, names in ((self.home, ('.gitconfig', '.git-credentials')),
+-                            (self.workspace, ('AGENTS.md', 'CLAUDE.md', '.mcp.json', '.claude/settings.json'))):
++        for root, names in ((self.home, ('.gitconfig', '.git-credentials')), (self.workspace, ('AGENTS.md', 'CLAUDE.md', '.mcp.json', '.claude/settings.json'))):
+             for name in names:
+                 path = root / name
+-                if path.is_file() and not path.is_symlink():
+-                    self.bootstrap[path] = (path.read_bytes(), path.stat().st_mode & 0o777)
++                if path.is_file() and (not path.is_symlink()):
++                    self.bootstrap[path] = (path.read_bytes(), path.stat().st_mode & 511)
+ 
+     def begin(self):
+         if self.active is not None:
+             raise RuntimeError('previous turn has not been archived and cleaned')
+         name = datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%S.%fZ-') + uuid.uuid4().hex[:8]
+         turn = self.archive / name
+-        turn.mkdir(mode=0o700)
++        turn.mkdir(mode=448)
+         self.active = turn
+         self._manifest(turn, status='running', started_at=name)
+         return turn
+ 
+     def configure_identity(self, identity, gitea_host, coordination=None):
+         """Restore the original instructions with this session's account credentials."""
+-        worker, username = identity['worker'], identity['username']
++        worker, username = (identity['worker'], identity['username'])
+         for path, (original, mode) in self.bootstrap.items():
+             content = original
+             if path.name in ('AGENTS.md', 'CLAUDE.md'):
+-                prompt = original.decode().replace('You are ' + worker + '.',
+-                    'You are ' + username + '.')
++                prompt = original.decode().replace('You are ' + worker + '.', 'You are ' + username + '.')
+                 for variable, key in (('MM_TEAM_ID', 'team_id'), ('TASK_CHANNEL_ID', 'channel_id')):
+                     value = (coordination or {}).get(key)
+                     if value:
+@@ -69,7 +67,7 @@
+                 content = (json.dumps(config, indent=2) + '\n').encode()
+             elif path.name == '.git-credentials':
+                 host = urlsplit(gitea_host)
+-                content = f'{host.scheme}://{username}:{identity["gitea_token"]}@{host.netloc}\n'.encode()
++                content = f"{host.scheme}://{username}:{identity['gitea_token']}@{host.netloc}\n".encode()
+             elif path.name == '.gitconfig':
+                 content = original.decode().replace(worker, username).encode()
+             path.parent.mkdir(parents=True, exist_ok=True)
+@@ -87,14 +85,12 @@
+                 origin = urlsplit(self._git(checkout, 'remote', 'get-url', 'origin', capture=True).stdout.decode().strip())
+             except subprocess.CalledProcessError:
+                 continue
+-            if (origin.hostname, origin.port, origin.path.removesuffix('.git')) == (
+-                    target.hostname, target.port, target.path.removesuffix('.git')):
++            if (origin.hostname, origin.port, origin.path.removesuffix('.git')) == (target.hostname, target.port, target.path.removesuffix('.git')):
+                 repositories.append(checkout)
+         if not repositories:
+             self._git(self.workspace, 'clone', '--branch', 'main', remote, repo)
+             repositories.append(self.workspace / repo)
+         for checkout in repositories:
+-            # A clone may embed the retired account's credentials in its URL.
+             self._git(checkout, 'remote', 'set-url', 'origin', remote)
+             self._git(checkout, 'fetch', 'origin', '+refs/heads/main:refs/remotes/origin/main')
+             self._git(checkout, 'reset', '--hard')
+@@ -106,24 +102,16 @@
+         try:
+             self._finish(turn, reason)
+         except Exception as error:
+-            # Keep the unclean state blocked, but do not leave a failed refresh
+-            # looking like a running native session. Avoid logging credentials
+-            # that could be embedded in a failing Git command's arguments.
+-            self._manifest(turn, status='failed', reason=reason,
+-                           error_type=type(error).__name__)
++            self._manifest(turn, status='failed', reason=reason, error_type=type(error).__name__)
+             raise
+ 
+     def _finish(self, turn, reason):
+         for path in (self.home, self.workspace, self.native, self.state_root, self.archive):
+             if path.resolve() != path:
+                 raise ValueError('state path changed to a symlink; refusing archive or cleanup')
+-        # Commit the archive before removing anything. A failure leaves active
+-        # set, so the bridge cannot admit another child into unclean state.
+         temp = turn / 'state.tar.gz.tmp'
+         repositories = self._repositories()
+-        self._manifest(turn, repositories=[dict(path=str(repo.relative_to(self.workspace)),
+-            head=self._head(repo))
+-            for repo in repositories])
++        self._manifest(turn, repositories=[dict(path=str(repo.relative_to(self.workspace)), head=self._head(repo)) for repo in repositories])
+         with tarfile.open(temp, 'w:gz', dereference=False, compresslevel=1) as bundle:
+             bundle.add(self.home, arcname='home')
+             if self.state_root != self.home:
+@@ -134,10 +122,10 @@
+                 bundle.add(self.native, arcname='copilot-state')
+             self._archive_workspace_records(bundle, repositories)
+         seal(turn, temp, status='archived', reason=reason)
+-        # The router bind-mounts this directory rather than the whole HOME.
+-        # Clear its records while retaining the mount's directory inode.
++        from native_bridge_client import bridge_lifecycle
++        bridge_lifecycle().before_cleanup(turn, reason)
+         messages = self.home / 'group-messages'
+-        preserve = (messages,) if messages.is_dir() and not messages.is_symlink() else ()
++        preserve = (messages,) if messages.is_dir() and (not messages.is_symlink()) else ()
+         self._clear_directory(self.home, preserve=preserve)
+         if self.state_root != self.home:
+             for child in self.state_root.iterdir():
+@@ -146,8 +134,6 @@
+         if not self.native.is_relative_to(self.home) and self.native.exists():
+             self._clear_directory(self.native)
+         self._clean_workspace(repositories)
+-        # These paths are explicitly supplied by the container bridge. A
+-        # filesystem unit test never cleans the host's /tmp or /dev/shm.
+         for scratch in self.scratch_dirs:
+             for directory, dirs, files in os.walk(scratch, topdown=False, followlinks=False):
+                 for name in dirs + files:
+@@ -163,8 +149,7 @@
+         for path in (self.home, self.native, *preserve):
+             path.mkdir(parents=True, exist_ok=True)
+             os.chown(path, self.uid, self.gid)
+-        self._manifest(turn, status='complete', reason=reason,
+-                       finished_at=datetime.datetime.now(datetime.timezone.utc).isoformat())
++        self._manifest(turn, status='complete', reason=reason, finished_at=datetime.datetime.now(datetime.timezone.utc).isoformat())
+         self.active = None
+ 
+     def _manifest(self, turn, **values):
+@@ -172,7 +157,7 @@
+ 
+     @staticmethod
+     def _remove(path):
+-        if path.is_dir() and not path.is_symlink():
++        if path.is_dir() and (not path.is_symlink()):
+             shutil.rmtree(path)
+         else:
+             path.unlink()
+@@ -185,17 +170,30 @@
+             else:
+                 TurnState._remove(child)
+ 
++    def _racing_persistent_workspace(self, path):
++        # Only the NEW RACING role's exact scientific Game subdirectory.
++        # Original phase archive/cleanup does not own it; the original whole
++        # /work writer cut and checkpoint archive still include it in full.
++        if os.environ.get('AGENT_ROLE') != 'racing':
++            return False
++        path = Path(path)
++        if path != self.workspace / '.count14-racing':
++            return False
++        value = path.lstat()
++        if (path.resolve() != path or path.is_symlink() or
++                value.st_mode & 0o170000 != 0o040000 or value.st_uid != self.uid):
++            raise RuntimeError('DYNTEAM_RACING_EXACT_PERSISTENT_WORKSPACE_UID_INODE_PATH')
++        return True
++
+     def _repositories(self):
+         repositories = []
+         for directory, dirs, files in os.walk(self.workspace, followlinks=False):
++            if Path(directory) == self.workspace and '.count14-racing' in dirs and self._racing_persistent_workspace(self.workspace / '.count14-racing'):
++                dirs.remove('.count14-racing')
+             if '.git' in dirs or '.git' in files:
+                 checkout = Path(directory)
+-                # Test inputs can contain dummy .git directories or files.
+-                # Ask Git for the worktree root, including unborn repositories
+-                # and linked worktrees, and reject discovery of a parent repo.
+                 try:
+-                    root = self._git(checkout, 'rev-parse', '--show-toplevel',
+-                                     capture=True, stderr=subprocess.DEVNULL).stdout.decode().strip()
++                    root = self._git(checkout, 'rev-parse', '--show-toplevel', capture=True, stderr=subprocess.DEVNULL).stdout.decode().strip()
+                 except subprocess.CalledProcessError:
+                     pass
+                 else:
+@@ -206,23 +204,17 @@
+         return repositories
+ 
+     def _archive_workspace_records(self, bundle, repositories):
+-        # Preserve nonignored untracked files, including unfinished source on a
+-        # scheduled restart. Tracked code and Git history stay in the checkout;
+-        # ignored build outputs are disposable and need not inflate every turn.
+         for index, repo in enumerate(repositories):
+-            # Session shutdown can interrupt edits. Save the tracked
+-            # delta before the next session replaces the checkout with main.
+             if self._head(repo):
+                 patch = self._git(repo, 'diff', '--binary', 'HEAD', capture=True).stdout
+             else:
+-                patch = (self._git(repo, 'diff', '--binary', '--cached', capture=True).stdout
+-                         + self._git(repo, 'diff', '--binary', capture=True).stdout)
++                patch = self._git(repo, 'diff', '--binary', '--cached', capture=True).stdout + self._git(repo, 'diff', '--binary', capture=True).stdout
+             if patch:
+                 entry = tarfile.TarInfo('workspace-diffs/' + str(index) + '.patch')
+                 entry.size = len(patch)
+                 bundle.addfile(entry, io.BytesIO(patch))
+             names = self._git(repo, 'ls-files', '--others', '--exclude-standard', '-z', capture=True).stdout
+-            for name in names.split(b'\0'):
++            for name in names.split(b'\x00'):
+                 if name:
+                     path = repo / os.fsdecode(name)
+                     if not path.is_dir() or path.is_symlink():
+@@ -232,20 +224,16 @@
+             if path in repositories:
+                 return
+             for child in path.iterdir():
+-                if any(repo.is_relative_to(child) for repo in repositories):
++                if self._racing_persistent_workspace(child):
++                    continue
++                if any((repo.is_relative_to(child) for repo in repositories)):
+                     archive(child)
+                 else:
+                     bundle.add(child, arcname='workspace/' + str(child.relative_to(self.workspace)))
+         archive(self.workspace)
+ 
+     def _git(self, repo, *args, capture=False, stderr=None):
+-        # Git can execute workspace-controlled hooks/configuration. Archival
+-        # has root filesystem access; Git must retain the worker's identity.
+-        return subprocess.run(['git', '-c', 'safe.directory=' + str(repo), '-C', str(repo), *args],
+-                              check=True, stdout=subprocess.PIPE if capture else subprocess.DEVNULL,
+-                              stderr=stderr,
+-                              env=dict(os.environ, HOME=str(self.home)), user=self.uid, group=self.gid,
+-                              timeout=120)
++        return subprocess.run(['git', '-c', 'safe.directory=' + str(repo), '-C', str(repo), *args], check=True, stdout=subprocess.PIPE if capture else subprocess.DEVNULL, stderr=stderr, env=dict(os.environ, HOME=str(self.home)), user=self.uid, group=self.gid, timeout=120)
+ 
+     def _head(self, repo):
+         try:
+@@ -254,8 +242,6 @@
+             return None
+ 
+     def _clean_workspace(self, repositories):
+-        # Keep tracked code and Git metadata. Remove scratch files and ignored
+-        # or untracked memory/build records, including records inside a clone.
+         for repo in repositories:
+             self._git(repo, 'clean', '-fdx')
+ 
+@@ -263,11 +249,13 @@
+             if path in repositories:
+                 return
+             for child in path.iterdir():
++                if self._racing_persistent_workspace(child):
++                    continue
+                 if child in repositories:
+                     continue
+-                if any(repo.is_relative_to(child) for repo in repositories):
++                if any((repo.is_relative_to(child) for repo in repositories)):
+                     clean(child)
+-                elif child.is_dir() and not child.is_symlink():
++                elif child.is_dir() and (not child.is_symlink()):
+                     shutil.rmtree(child)
+                 else:
+                     child.unlink()
+--- /dev/null
++++ b/agent/native_bridge_client.py
+@@ -0,0 +1,241 @@
++"""Cold native bridge hooks. No model transport/replay or data deletion.
++
++Each metadata HTTP probe is bounded. Native custodial wait is outside locks;
++existing paid work continues naturally. SIGTERM is the ONLY signal generated.
++Only local child PID/start/boot is examined; no stack, argv or process scan.
++"""
++from pathlib import Path
++import hashlib
++import http.client
++import json
++import os
++import signal
++import socket
++import subprocess
++import threading
++import time
++from native_bridge_protocol import BASE, checked_lifecycle
++
++def _digest(row):
++    return hashlib.sha256(json.dumps(row, ensure_ascii=False, separators=(',', ':')).encode()).hexdigest()
++
++def _start(pid):
++    raw = Path('/proc', str(pid), 'stat').read_bytes()
++    return int(raw[raw.rfind(b')') + 2:].split()[19])
++
++class _Unix(http.client.HTTPConnection):
++
++    def __init__(self, path):
++        super().__init__('localhost', timeout=32)
++        self.path = str(path)
++
++    def connect(self):
++        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
++        self.sock.settimeout(32)
++        self.sock.connect(self.path)
++SCHEMA = 'count14-native-cli-control-counts-v1'
++FIELDS = {'schema', 'sequence', 'pending_prompts', 'pending_tools', 'control_complete', 'observer_fault'}
++
++def checked_control(value):
++    if not (type(value) is dict and set(value) == FIELDS and (value['schema'] == SCHEMA) and (type(value['sequence']) is int) and (value['sequence'] >= 0) and all((type(value[k]) is int and 0 <= value[k] <= 65536 for k in ('pending_prompts', 'pending_tools'))) and (type(value['control_complete']) is bool) and (type(value['observer_fault']) is bool)):
++        raise ValueError('DYNTEAM_EXACT_NATIVE_CONTROL_COUNTER_FIELDS')
++    return value
++
++class NativeToolControlObserver:
++
++    def __init__(self):
++        self.lock = threading.Lock()
++        self.prompts = set()
++        self.tools = set()
++        self.sequence = 0
++        self.fault = False
++
++    @staticmethod
++    def _id(value):
++        return type(value) is int and 0 <= value < 2 ** 63 or (type(value) is str and 0 < len(value) <= 256)
++
++    def _line(self, line, direction):
++        try:
++            if type(line) not in (str, bytes) or len(line) > 16 * 1024 * 1024:
++                raise ValueError('DYNTEAM_ACP_CONTROL_LINE_BOUND')
++            value = json.loads(line)
++            if type(value) is not dict:
++                raise ValueError('DYNTEAM_ACP_CONTROL_OBJECT')
++            method = value.get('method')
++            if direction == 'input':
++                if method == 'session/prompt':
++                    request_id = value.get('id')
++                    if not self._id(request_id) or request_id in self.prompts:
++                        raise ValueError('DYNTEAM_ACP_CONTROL_EXACT_PROMPT_ID')
++                    self.prompts.add(request_id)
++                return
++            if method is None:
++                request_id = value.get('id')
++                if self._id(request_id):
++                    self.prompts.discard(request_id)
++                return
++            if method != 'session/update':
++                return
++            params = value.get('params')
++            if type(params) is not dict:
++                raise ValueError('DYNTEAM_ACP_CONTROL_UPDATE_PARAMS')
++            update = params.get('update')
++            if type(update) is not dict:
++                raise ValueError('DYNTEAM_ACP_CONTROL_UPDATE_OBJECT')
++            kind = update.get('sessionUpdate')
++            if kind not in ('tool_call', 'tool_call_update'):
++                return
++            session_id = params.get('sessionId')
++            if type(session_id) is not str or not self._id(session_id):
++                raise ValueError('DYNTEAM_ACP_CONTROL_EXACT_SESSION_ID')
++            tool_id = update.get('toolCallId')
++            status = update.get('status')
++            if type(tool_id) is not str or not self._id(tool_id):
++                raise ValueError('DYNTEAM_ACP_CONTROL_EXACT_TOOL_ID')
++            key = (session_id, tool_id)
++            if status in ('completed', 'failed'):
++                self.tools.discard(key)
++            elif status in ('pending', 'in_progress') or (kind == 'tool_call' and status is None):
++                self.tools.add(key)
++            elif status is None and kind == 'tool_call_update':
++                pass
++            else:
++                raise ValueError('DYNTEAM_ACP_CONTROL_UNKNOWN_TOOL_STATUS')
++            if max(len(self.prompts), len(self.tools)) > 65536:
++                raise ValueError('DYNTEAM_ACP_CONTROL_COUNTER_BOUND')
++        except Exception:
++            self.fault = True
++
++    def observe(self, lines, direction):
++        if direction not in ('input', 'output') or type(lines) not in (list, tuple):
++            raise ValueError('DYNTEAM_ACP_CONTROL_FIXED_STREAM_DIRECTION')
++        with self.lock:
++            for line in lines:
++                if line in (b'', ''):
++                    continue
++                self.sequence += 1
++                self._line(line, direction)
++
++    def snapshot(self):
++        with self.lock:
++            return dict(schema=SCHEMA, sequence=self.sequence, pending_prompts=len(self.prompts), pending_tools=len(self.tools), control_complete=not self.fault, observer_fault=self.fault)
++
++class BridgeLifecycle:
++
++    def __init__(self, route):
++        if not (type(route) is dict and route.get('source_commit') == BASE and (route.get('schema') == 'count14-dynteam-router-cold-route-v1') and (route.get('mode') in ('production', 'smoke', 'own-zero'))):
++            raise ValueError('DYNTEAM_NATIVE_BRIDGE_FROZEN_ROUTE')
++        self.route = dict(route)
++        self.lock = threading.Lock()
++        self.children = {}
++        self.current = None
++
++    @classmethod
++    def from_environment(cls):
++        path = Path(os.environ.get('COUNT14_NATIVE_ROUTE', '/run/count14-dynteam/route.json'))
++        if path.resolve() != path or path.is_symlink():
++            raise ValueError('DYNTEAM_NATIVE_BRIDGE_ROUTE_CANONICAL')
++        if path.stat().st_size > 32768:
++            raise ValueError('DYNTEAM_NATIVE_BRIDGE_ROUTE_BOUND')
++        return cls(json.loads(path.read_bytes()))
++
++    def ready(self, stopping=None):
++        # Authenticated control-peer registration only, before any CLI. This
++        # does NOT claim BIRTH, archive, tool clear, model/session readiness or
++        # an empty baseline. Original SO_PEERCRED/Docker/namespace checks apply.
++        row=self._row('BRIDGE_READY',None,None,None)
++        while stopping is None or not stopping.is_set():
++            if self.request(row):return True
++            time.sleep(.1)
++        return False
++
++    def request(self, row):
++        checked_lifecycle(row)
++        raw = json.dumps(row, ensure_ascii=False, separators=(',', ':')).encode()
++        connection = _Unix(self.route['control_socket'])
++        try:
++            connection.request('POST', '/native-bridge-lifecycle', body=raw, headers={'Content-Type': 'application/json'})
++            response = connection.getresponse()
++            body = response.read(2049)
++            if response.status != 200 or len(body) > 2048:
++                return False
++            value = json.loads(body)
++            return value.get('schema') == 'count14-native-bridge-lifecycle-ack-v1' and value.get('binding_sha256') == hashlib.sha256(raw).hexdigest() and (value.get('allow') is True)
++        except Exception:
++            return False
++        finally:
++            connection.close()
++
++    def _row(self, event, proc, identity, turn, *, archive=False, reason='NONE'):
++        names = {'retire': 'RETIRE', 'terminated': 'TERMINATED', 'shutdown': 'SHUTDOWN', 'disconnect': 'DISCONNECT', 'tester_release': 'TESTER_RELEASE', 'startup_recovery': 'STARTUP_RECOVERY', 'NONE': 'NONE'}
++        with self.lock:
++            context = self.children.get(proc.pid) if proc is not None else self.current
++        if context is None:
++            context = dict(pid=0, start=0, account='STARTUP', turn='STARTUP')
++        if identity is not None:
++            context = {**context, 'account': identity['username']}
++        if turn is not None:
++            context = {**context, 'turn': turn.name}
++        t, role = (self.route['trajectory_id'], self.route['role_slot'])
++        return dict(schema='count14-native-bridge-lifecycle-v1', source_commit=BASE, trajectory_id=t, role_slot=role, logical_birth_sha256=_digest([BASE, t, role, context['account']]), native_turn_sha256=_digest([BASE, t, role, context['turn']]), event=event, child_namespace_pid=context['pid'], child_start_ticks=context['start'], child_running=proc is not None and proc.poll() is None, archive_durable=archive, end_kind=names.get(reason, 'OTHER'), tool_control=context['control_observer'].snapshot() if 'control_observer' in context else None)
++
++    def wait(self, event, proc=None, identity=None, turn=None, *, archive=False, reason='NONE'):
++        while not self.request(self._row(event, proc, identity, turn, archive=archive, reason=reason)):
++            time.sleep(0.1)
++
++    def born(self, proc, identity, turn):
++        if proc is None or identity is None or turn is None:
++            raise ValueError('DYNTEAM_NATIVE_BRIDGE_TRACKED_TEAM_CHILD_REQUIRED')
++        context = dict(pid=proc.pid, start=_start(proc.pid), account=identity['username'], turn=turn.name, boot=Path('/proc/sys/kernel/random/boot_id').read_text().strip())
++        context['control_observer'] = NativeToolControlObserver()
++        with self.lock:
++            self.children[proc.pid] = context
++            self.current = context
++        self.wait('CLI_BIRTH', proc, identity, turn)
++
++    def before_end(self, proc):
++        self.wait('END_REQUEST', proc)
++
++    def stop_normal(self, proc):
++        if proc is None:
++            return
++        self.before_end(proc)
++        if proc.poll() is None:
++            with self.lock:
++                context = dict(self.children[proc.pid])
++            if _start(proc.pid) != context['start'] or Path('/proc/sys/kernel/random/boot_id').read_text().strip() != context['boot']:
++                raise ValueError('DYNTEAM_NATIVE_CHILD_BIRTH_CHANGED_NO_SIGNAL')
++            os.killpg(proc.pid, signal.SIGTERM)
++        try:
++            proc.wait(timeout=120)
++        except subprocess.TimeoutExpired:
++            raise RuntimeError('DYNTEAM_NATIVE_CHILD_NORMAL_TERM_TIMEOUT_RETAIN_NO_KILL') from None
++        self.wait('CHILD_EXIT', proc)
++
++    def before_cleanup(self, turn, reason):
++        self.wait('BEFORE_CLEANUP', turn=turn, archive=True, reason=reason)
++
++    def archived(self, proc, identity, turn, reason):
++        self.wait('ARCHIVED_END', proc, identity, turn, archive=True, reason=reason)
++
++    def preserve_startup(self, state, recovery):
++        from archive import save
++        if state.active != recovery:
++            raise ValueError('DYNTEAM_NATIVE_STARTUP_EXACT_NEW_LOCAL_ARCHIVE_OWNER')
++        save(recovery, state.home, state.workspace)
++        state._manifest(recovery, status='complete', startup_contents_preserved=True)
++        state.active = None
++
++    def observe_control(self, proc, lines, direction):
++        with self.lock:
++            context = self.children.get(proc.pid)
++        if context is None or 'control_observer' not in context:
++            raise ValueError('DYNTEAM_NATIVE_CONTROL_OBSERVER_INSTALLED_BEFORE_INPUT')
++        context['control_observer'].observe(lines, direction)
++_INSTANCE = None
++
++def bridge_lifecycle():
++    global _INSTANCE
++    if _INSTANCE is None:
++        _INSTANCE = BridgeLifecycle.from_environment()
++    return _INSTANCE
+--- /dev/null
++++ b/agent/native_bridge_protocol.py
+@@ -0,0 +1,53 @@
++"""Fixed OWN framework lifecycle fields only; no messages/locals/model data."""
++from __future__ import annotations
++from collections import deque
++from dataclasses import dataclass
++import threading
++BASE = '70e2ca54c078597e3314755064d2ef1a83344c8e'
++FIELDS = {'schema', 'source_commit', 'trajectory_id', 'role_slot', 'logical_birth_sha256', 'native_turn_sha256', 'event', 'child_namespace_pid', 'child_start_ticks', 'child_running', 'archive_durable', 'end_kind'}
++EVENTS = {'BRIDGE_READY', 'CLI_BIRTH', 'END_REQUEST', 'CHILD_EXIT', 'BEFORE_CLEANUP', 'ARCHIVED_END'}
++KINDS = {'NONE', 'RETIRE', 'TERMINATED', 'SHUTDOWN', 'DISCONNECT', 'TESTER_RELEASE', 'STARTUP_RECOVERY', 'OTHER'}
++_COUNT14_CONTROL_SCHEMA = 'count14-native-cli-control-counts-v1'
++_COUNT14_CONTROL_FIELDS = {'schema', 'sequence', 'pending_prompts', 'pending_tools', 'control_complete', 'observer_fault'}
++
++def _count14_checked_tool_control(value):
++    if not (type(value) is dict and set(value) == _COUNT14_CONTROL_FIELDS and (value['schema'] == _COUNT14_CONTROL_SCHEMA) and (type(value['sequence']) is int) and (value['sequence'] >= 0) and all((type(value[k]) is int and 0 <= value[k] <= 65536 for k in ('pending_prompts', 'pending_tools'))) and (type(value['control_complete']) is bool) and (type(value['observer_fault']) is bool)):
++        raise ValueError('DYNTEAM_EXACT_NATIVE_CONTROL_COUNTER_FIELDS')
++    return value
++
++def checked_lifecycle(row):
++    sha = lambda x: type(x) is str and len(x) == 64 and all((c in '0123456789abcdef' for c in x))
++    role = row.get('role_slot') if type(row) is dict else None
++    roles = {f'worker-{i:02d}' for i in range(32)} | {'checker-00', 'tester-00', 'racing-background-00'} | {f'racing-player-{i:02d}' for i in range(7)}
++    if not (type(row) is dict and set(row) in (FIELDS, FIELDS | {'tool_control'}) and (row['schema'] == 'count14-native-bridge-lifecycle-v1') and (row['source_commit'] == BASE) and (type(row['trajectory_id']) is str) and (0 < len(row['trajectory_id']) <= 512) and (role in roles) and all((sha(row[k]) for k in ('logical_birth_sha256', 'native_turn_sha256'))) and (row['event'] in EVENTS) and (row['end_kind'] in KINDS) and (type(row['child_namespace_pid']) is int) and (row['child_namespace_pid'] >= 0) and (type(row['child_start_ticks']) is int) and (row['child_start_ticks'] >= 0) and (type(row['child_running']) is bool) and (type(row['archive_durable']) is bool) and ((row['child_namespace_pid'] == 0) == (row['child_start_ticks'] == 0))):
++        raise ValueError('DYNTEAM_EXACT_NATIVE_BRIDGE_LIFECYCLE_FIELDS')
++    if row['event']=='BRIDGE_READY' and not (
++            row['child_namespace_pid']==row['child_start_ticks']==0 and
++            row['child_running'] is False and row['archive_durable'] is False and
++            row['end_kind']=='NONE' and row.get('tool_control') is None):
++        raise ValueError('DYNTEAM_BRIDGE_READY_METADATA_ONLY_NO_CLI_OR_ARCHIVE_CLAIM')
++    if 'tool_control' in row and row['tool_control'] is not None:
++        _count14_checked_tool_control(row['tool_control'])
++    return row
++
++@dataclass
++class LifecycleTicket:
++    row: dict
++    peer: tuple
++    complete: threading.Event
++    result: bool | None = None
++
++class NativeBridgeInbox:
++    def __init__(self, *, timeout=30):
++        from native_control_inbox import OwnerControlQueue
++        self._queue=OwnerControlQueue(checked=checked_lifecycle,timeout=timeout)
++        self.timeout,self.lock,self.pending=self._queue.timeout,self._queue.lock,self._queue.pending
++
++    def receive(self,row,peer):
++        return self._queue.receive(row,peer)
++
++    def poll_once(self,handler):
++        return self._queue.poll_once(handler)['processed']
++
++    def public(self):
++        return self._queue.public()
+--- a/mini-router/src/acp_socket_channel.ts
++++ b/mini-router/src/acp_socket_channel.ts
+@@ -16,6 +16,7 @@
+   socketPath: string;
+   cwd: string;
+   stuckMs?: number;
++  budgetPauseClock?: { assertReadyForPrompt(): void; recordRx(): void; silenceMs(): number | undefined };
+   onLog?: (level: "info" | "warn" | "error", msg: string, err?: unknown) => void;
+ }
+ 
+@@ -104,8 +105,10 @@
+   }
+ 
+   private async sendText(text: string): Promise<{ stopReason: string }> {
++    this.opts.budgetPauseClock?.assertReadyForPrompt();
+     try {
+       this.lastUpdateAt = Date.now();
++      this.opts.budgetPauseClock?.recordRx();
+       const stuckMs = this.opts.stuckMs;
+       const promptP = this.connection!.prompt({
+         sessionId: this.sessionId!,
+@@ -137,10 +140,25 @@
+     // The optional watchdog measures time since a session update, not turn length.
+     const tick = Math.max(50, Math.min(Math.floor(stuckMs / 4), 5000));
+     let timer: NodeJS.Timeout | null = null;
++    let budgetFaultLogged = false;
+     const promise = new Promise<never>((_, reject) => {
+       const check = () => {
+         const now = Date.now();
+-        const silentFor = now - this.lastUpdateAt;
++        let silentFor = now - this.lastUpdateAt;
++        if (this.opts.budgetPauseClock) {
++          const adjusted = this.opts.budgetPauseClock.silenceMs();
++          if (adjusted === undefined) {
++            if (!budgetFaultLogged) {
++              this.log("error", "BUDGET_PARK_STATUS_CUSTODY_UNKNOWN_NO_RECONNECT");
++              budgetFaultLogged = true;
++            }
++            // Retain THIS prompt/session/ACP. Source UNKNOWN never authorizes
++            // timeout cancellation, reconnect, replay or a new paid request.
++            timer = setTimeout(check, tick);
++            return;
++          }
++          silentFor = adjusted;
++        }
+         if (silentFor >= stuckMs) {
+           this.log(
+             "warn",
+@@ -310,6 +328,7 @@
+     const conn = new acp.ClientSideConnection(
+       () => clientImpl(() => {
+         this.lastUpdateAt = Date.now();
++      this.opts.budgetPauseClock?.recordRx();
+       }),
+       stream,
+     );
+--- /dev/null
++++ b/mini-router/src/count14_budget_pause_clock.d.ts
+@@ -0,0 +1,6 @@
++export class BudgetPauseClock {
++  constructor(path: string, bindingSha256: string, ownerUid: number);
++  recordRx(): void;
++  assertReadyForPrompt(): void;
++  silenceMs(): number | undefined;
++}
+--- /dev/null
++++ b/mini-router/src/count14_budget_pause_clock.js
+@@ -0,0 +1,182 @@
++import { openSync, readFileSync, closeSync, fstatSync, constants, lstatSync, realpathSync } from 'node:fs';
++import { dirname, isAbsolute } from 'node:path';
++const NS_PER_MS = 1000000n;
++const WIRE_LEASE_NS = 10000000000n;
++const LEASE_NS = 120000000000n;
++const REARM_FIELDS = [
++    'schema',
++    'binding_sha256',
++    'sequence',
++    'generation'
++].sort();
++const fields = [
++    'schema',
++    'binding_sha256',
++    'sequence',
++    'generation',
++    'sampled_at_mono_ns',
++    'valid_for_ns',
++    'total_paused_ns',
++    'paused'
++].sort();
++export class BudgetPauseClock {
++    path;
++    bindingSha256;
++    ownerUid;
++    sequence = 0;
++    generation = 0;
++    sampleAt = 0n;
++    total = 0n;
++    effectivePaused = 0n;
++    lastRx = 0n;
++    rxPaused = 0n;
++    faulted = false;
++    staleOnly = false;
++    rearmSequence = 0;
++    rearmObserved = false;
++    parentIdentity;
++    constructor(path, bindingSha256, ownerUid){
++        this.path = path;
++        this.bindingSha256 = bindingSha256;
++        this.ownerUid = ownerUid;
++        if (!isAbsolute(path) || realpathSync(dirname(path)) !== dirname(path) || !/^[0-9a-f]{64}$/.test(bindingSha256) || !Number.isInteger(ownerUid) || ownerUid < 0) throw new Error('BUDGET_PARK_HOST_BINDING_INVALID');
++        const parent = lstatSync(dirname(path), {
++            bigint: true
++        });
++        this.parentIdentity = `${parent.dev}:${parent.ino}`;
++        if (!parent.isDirectory() || parent.uid !== BigInt(ownerUid) || parent.mode & 0o022n) throw new Error('BUDGET_PARK_HOST_PARENT_INVALID');
++        const initialRearm = this.readRearm();
++        if (initialRearm) {
++            this.rearmSequence = initialRearm.sequence;
++            this.rearmObserved = true;
++        }
++        this.recordRx();
++        this.assertReadyForPrompt();
++    }
++    read() {
++        let fd;
++        try {
++            const parent = lstatSync(dirname(this.path), {
++                bigint: true
++            });
++            if (!parent.isDirectory() || parent.uid !== BigInt(this.ownerUid) || parent.mode & 0o022n || `${parent.dev}:${parent.ino}` !== this.parentIdentity) throw new Error('PARENT_CHANGED');
++            fd = openSync(this.path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
++            const before = fstatSync(fd, {
++                bigint: true
++            });
++            if (!before.isFile() || before.uid !== BigInt(this.ownerUid) || (before.mode & 0o777n) !== 0o444n || before.size < 1n || before.size > 4096n) throw new Error('STATUS_FILE');
++            const raw = readFileSync(fd);
++            const after = fstatSync(fd, {
++                bigint: true
++            });
++            if (raw.length !== Number(before.size) || before.size !== after.size || before.mtimeNs !== after.mtimeNs || before.uid !== after.uid || before.mode !== after.mode) throw new Error('STATUS_CHANGED');
++            const d = JSON.parse(raw.toString('utf8'));
++            if (!d || Array.isArray(d) || Object.keys(d).sort().join() !== fields.join() || d.schema !== 'agensh-native-budget-pause-v1' || d.binding_sha256 !== this.bindingSha256 || !Number.isSafeInteger(d.sequence) || d.sequence < 1 || !Number.isSafeInteger(d.generation) || d.generation < 1 || typeof d.paused !== 'boolean') throw new Error('STATUS_SCHEMA');
++            const decimal = (x)=>{
++                if (typeof x !== 'string' || !/^(0|[1-9][0-9]{0,22})$/.test(x)) throw new Error('STATUS_INTEGER');
++                return BigInt(x);
++            };
++            const sampled = decimal(d.sampled_at_mono_ns), lease = decimal(d.valid_for_ns);
++            const total = decimal(d.total_paused_ns), now = process.hrtime.bigint();
++            if (lease !== WIRE_LEASE_NS || sampled > now || total > sampled || d.sequence < this.sequence || d.generation < this.generation || sampled < this.sampleAt || total < this.total) throw new Error('STATUS_REGRESSED_OR_INVALID');
++            if (now - sampled > LEASE_NS) throw new Error('STATUS_LEASE_EXPIRED');
++            this.sequence = d.sequence;
++            this.generation = d.generation;
++            this.sampleAt = sampled;
++            this.total = total;
++            const extrapolated = total + (d.paused ? now - sampled : 0n);
++            if (extrapolated > this.effectivePaused) this.effectivePaused = extrapolated;
++            return {
++                now,
++                paused: this.effectivePaused,
++                sequence: d.sequence,
++                generation: d.generation
++            };
++        } catch (error) {
++            const stale = error instanceof Error && error.message === 'STATUS_LEASE_EXPIRED';
++            this.staleOnly = (!this.faulted || this.staleOnly) && stale;
++            this.faulted = true;
++            throw new Error('BUDGET_PARK_STATUS_CUSTODY_UNKNOWN_NO_RECONNECT');
++        } finally{
++            if (fd !== undefined) closeSync(fd);
++        }
++    }
++    readRearm() {
++        let fd;
++        try {
++            const parent = lstatSync(dirname(this.path), {
++                bigint: true
++            });
++            if (!parent.isDirectory() || parent.uid !== BigInt(this.ownerUid) || parent.mode & 0o022n || `${parent.dev}:${parent.ino}` !== this.parentIdentity) throw new Error('REARM_PARENT');
++            fd = openSync(this.path + '.rearm', constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
++            const a = fstatSync(fd, {
++                bigint: true
++            });
++            if (!a.isFile() || a.uid !== BigInt(this.ownerUid) || (a.mode & 0o777n) !== 0o444n || a.nlink > 1n || a.size < 1n || a.size > 4096n) throw new Error('REARM_FILE');
++            const raw = readFileSync(fd), b = fstatSync(fd, {
++                bigint: true
++            });
++            if (raw.length !== Number(a.size) || a.size !== b.size || a.mtimeNs !== b.mtimeNs || a.ctimeNs !== b.ctimeNs || a.uid !== b.uid || a.mode !== b.mode) throw new Error('REARM_CHANGED');
++            const d = JSON.parse(raw.toString('utf8'));
++            if (!d || Array.isArray(d) || Object.keys(d).sort().join() !== REARM_FIELDS.join() || d.schema !== 'agensh-checkpoint-clock-rearm-v1' || d.binding_sha256 !== this.bindingSha256 || !Number.isSafeInteger(d.sequence) || d.sequence < 1 || !Number.isSafeInteger(d.generation) || d.generation < 1 || d.sequence < this.rearmSequence) throw new Error('REARM_BINDING_OR_SEQUENCE');
++            return {
++                sequence: d.sequence,
++                generation: d.generation
++            };
++        } catch (error) {
++            if (error.code === 'ENOENT' && !this.rearmObserved) return undefined;
++            throw error;
++        } finally{
++            if (fd !== undefined) closeSync(fd);
++        }
++    }
++    hostCheckpointRearm() {
++        try {
++            const authorization = this.readRearm();
++            if (!authorization || authorization.sequence === this.rearmSequence) return;
++            if (this.faulted && !this.staleOnly) return;
++            const d = this.read();
++            if (d.sequence < authorization.sequence || d.generation !== authorization.generation) throw new Error('REARM_STATUS_NOT_CURRENT');
++            this.rearmSequence = authorization.sequence;
++            this.rearmObserved = true;
++            this.faulted = false;
++            this.staleOnly = false;
++            this.lastRx = d.now;
++            this.rxPaused = d.paused;
++        } catch  {
++            this.faulted = true;
++            this.staleOnly = false;
++        }
++    }
++    recordRx() {
++        this.hostCheckpointRearm();
++        if (this.faulted) return;
++        try {
++            const d = this.read();
++            this.lastRx = d.now;
++            this.rxPaused = d.paused;
++        } catch  {}
++    }
++    assertReadyForPrompt() {
++        this.hostCheckpointRearm();
++        if (!this.faulted) {
++            try {
++                this.read();
++            } catch  {}
++        }
++        if (this.faulted) throw new Error('BUDGET_PARK_STATUS_CUSTODY_UNKNOWN_NO_NEW_PROMPT');
++    }
++    silenceMs() {
++        this.hostCheckpointRearm();
++        if (this.faulted) return undefined;
++        try {
++            const d = this.read();
++            const elapsed = d.now - this.lastRx;
++            const suspended = d.paused - this.rxPaused;
++            return Number((elapsed > suspended ? elapsed - suspended : 0n) / NS_PER_MS);
++        } catch  {
++            this.faulted = true;
++            return undefined;
++        }
++    }
++}
+--- a/mini-router/src/main.ts
++++ b/mini-router/src/main.ts
+@@ -1,3 +1,4 @@
++import { BudgetPauseClock } from "./count14_budget_pause_clock.js";
+ /**
+  * Wire one worker's durable event queue, service listeners and ACP dispatcher.
+  * The router delivers activity; the agent prompt defines how agents cooperate.
+@@ -113,11 +114,19 @@
+   if (recovered > 0) log("warn", `recovered ${recovered} stuck 'sending' rows → pending`);
+ 
+   const stuckMs = Number(process.env.MINI_ROUTER_STUCK_MS ?? "0") || undefined;
++  const pauseFile = process.env.COUNT14_BUDGET_PAUSE_FILE;
++  const pausePin = process.env.COUNT14_BUDGET_PAUSE_BINDING_SHA256;
++  const pauseUid = process.env.COUNT14_BUDGET_PAUSE_OWNER_UID;
++  if ([pauseFile, pausePin, pauseUid].filter(x => x !== undefined).length !== 3)
++    throw new Error("DYNTEAM_NATIVE_ORIGINAL_CLOCK_BINDING_REQUIRED");
++  if (!/^(0|[1-9][0-9]*)$/.test(pauseUid!)) throw new Error("DYNTEAM_NATIVE_CLOCK_OWNER_UID");
++  const budgetPauseClock = new BudgetPauseClock(pauseFile!, pausePin!, Number(pauseUid));
+   const channel = new ACPSocketChannel({
+     socketPath: env.acpSocketPath,
+     cwd: "/work",
+     onLog: (lvl, msg, err) => log(`acp.${lvl}`, msg, err),
+     stuckMs,
++    budgetPauseClock,
+   });
+ 
+   const onWorkerRestart = async (request: { id: string; reason: string }) => {
+@@ -277,6 +286,8 @@
+   });
+ 
+   await Promise.race(tasks);
++  // SIGTERM is the only abort producer here. Unexpected exits still fail.
++  if (ctrl.signal.aborted) return;
+   log("error", "a primary loop exited; this is fatal");
+   process.exit(1);
+ }
