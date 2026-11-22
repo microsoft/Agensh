@@ -91,6 +91,28 @@ class ClaimTest(unittest.TestCase):
         run(self.board.note(2, "CLAIM", "same"))
         self.assertEqual(len(run(self.board.read())), 2)
 
+    def test_claim_released_when_patch_summary_posted(self):
+        run(self.board.note(1, "CLAIM", "#7: add parser", delegation_id="p1"))
+        self.assertEqual(len(run(self.board.read())), 1)
+        run(self.board.note(1, "PATCH_SUMMARY", "files=a.py | idea=fix #7 | evidence=tests pass", delegation_id="p1"))
+        # The active claim should be expired/released now
+        claims = [e for e in run(self.board.read()) if e["type"] == "CLAIM"]
+        self.assertEqual(claims, [])
+
+    def test_claim_explicit_release_via_keyword(self):
+        run(self.board.note(1, "CLAIM", "claim #10: refactor"))
+        self.assertEqual(len(run(self.board.read())), 1)
+        run(self.board.note(1, "CLAIM", "release #10"))
+        claims = [e for e in run(self.board.read()) if e["type"] == "CLAIM"]
+        self.assertEqual(claims, [])
+
+    def test_subsequent_claim_supersedes_prior_claim(self):
+        run(self.board.note(1, "CLAIM", "#5: attempt 1", delegation_id="d1"))
+        run(self.board.note(1, "CLAIM", "#5: attempt 2", delegation_id="d1"))
+        active_claims = [e for e in run(self.board.read()) if e["type"] == "CLAIM"]
+        self.assertEqual(len(active_claims), 1)
+        self.assertEqual(active_claims[0]["content"], "#5: attempt 2")
+
 
 class PatchSummaryTest(unittest.TestCase):
     def setUp(self):
@@ -140,6 +162,19 @@ class PatchSummaryTest(unittest.TestCase):
         run(self.board.note(1, "FAIL", "first try failed", delegation_id=3))
         entry = run(self.board.note(1, "PATCH_SUMMARY", "files=a | idea=b | evidence=x", delegation_id=3))
         self.assertEqual(entry["_local_fail_count"], 1)
+
+    def test_peer_fail_invalidates_peer_patch_summary(self):
+        run(self.board.note(1, "PATCH_SUMMARY", "files=a | idea=b | evidence=tests passed", delegation_id=1))
+        # Peer worker 2 reports a failure citing t1
+        run(self.board.note(2, "FAIL", "tested t1: fails with division by zero"))
+        entries = run(self.board.read_all())
+        patch = [e for e in entries if e["type"] == "PATCH_SUMMARY"][0]
+        self.assertNotIn("_verified_checkpoint", patch)
+        self.assertEqual(patch["_invalidated_by_fail"], "tested t1: fails with division by zero")
+        self.assertEqual(patch["_local_fail_count"], 1)
+        line = self.board.format_entry_line(patch)
+        self.assertTrue(line.endswith("[status=invalidated,local_failures=1]"), line)
+
 
 
 class DedupeTest(unittest.TestCase):
