@@ -31,6 +31,11 @@ _PATCH_SUMMARY_SOLID_EVIDENCE_RE = re.compile(
     r"\b(pass(?:ed|es)?|verified|confirmed|no longer|now returns|now produces)\b",
     re.IGNORECASE,
 )
+_CLAIM_RELEASE_RE = re.compile(
+    r"\b(release[ds]?|abandon(?:ed)?|cancel(?:ed|led)?|done)\b", re.IGNORECASE
+)
+_ISSUE_REFERENCE_RE = re.compile(r"(?<![\w/])#(\d+)\b")
+_PEER_THREAD_RE = re.compile(r"\b(?:t|@?(?:[\w\-]+-)?worker)(\d+)\b", re.IGNORECASE)
 
 
 def parse_patch_summary_field(content: str, field_name: str) -> Optional[str]:
@@ -100,6 +105,44 @@ class SharedLessons:
             entry["_verified_checkpoint"] = True
         norm_delegation = entry.get("delegation_id")
         norm_thread = entry["thread_id"]
+        now_ts = float(entry.get("ts", time.time()))
+
+        # Release author's prior active claim on work completion (PATCH_SUMMARY).
+        if type == "PATCH_SUMMARY":
+            issues = set(_ISSUE_REFERENCE_RE.findall(content))
+            for e in self._entries:
+                if e.get("type") == "CLAIM" and e.get("thread_id") == norm_thread:
+                    matches_deleg = (
+                        norm_delegation is not None
+                        and e.get("delegation_id") == norm_delegation
+                    )
+                    matches_issue = bool(
+                        issues and set(_ISSUE_REFERENCE_RE.findall(str(e.get("content", "")))) & issues
+                    )
+                    if matches_deleg or matches_issue:
+                        e["_expires_at"] = min(float(e.get("_expires_at", now_ts)), now_ts)
+
+        # Handling CLAIM renewals, superseding prior claims, and explicit releases.
+        if type == "CLAIM":
+            is_explicit_release = bool(
+                (entry.get("_expires_at") is not None and float(entry["_expires_at"]) <= now_ts)
+                or _CLAIM_RELEASE_RE.search(content)
+            )
+            if is_explicit_release:
+                entry["_expires_at"] = now_ts
+            issues = set(_ISSUE_REFERENCE_RE.findall(content))
+            for e in self._entries:
+                if e.get("type") == "CLAIM" and e.get("thread_id") == norm_thread:
+                    matches_deleg = (
+                        norm_delegation is not None
+                        and e.get("delegation_id") == norm_delegation
+                    )
+                    matches_issue = bool(
+                        issues and set(_ISSUE_REFERENCE_RE.findall(str(e.get("content", "")))) & issues
+                    )
+                    if matches_deleg or matches_issue:
+                        e["_expires_at"] = min(float(e.get("_expires_at", now_ts)), now_ts)
+
         if type == "PATCH_SUMMARY":
             fail_count = self._delegation_fail_count(
                 self._entries, norm_thread, norm_delegation
@@ -121,6 +164,24 @@ class SharedLessons:
                     e["_invalidated_by_fail"] = content[:MAX_CONTENT_CHARS]
                     e["_local_fail_count"] = fail_count
                     break
+
+            # A peer counterexample citing target thread (e.g. "t1" or "@worker1")
+            # invalidates that peer's latest patch checkpoint.
+            peer_match = _PEER_THREAD_RE.search(content)
+            if peer_match:
+                peer_num = peer_match.group(1)
+                for e in reversed(self._entries):
+                    if e.get("type") == "PATCH_SUMMARY":
+                        target_tid = str(e.get("thread_id", ""))
+                        if (
+                            target_tid == peer_num
+                            or target_tid.endswith(f"-worker{peer_num}")
+                            or target_tid == f"worker{peer_num}"
+                        ):
+                            e.pop("_verified_checkpoint", None)
+                            e["_invalidated_by_fail"] = content[:MAX_CONTENT_CHARS]
+                            e["_local_fail_count"] = int(e.get("_local_fail_count", 0)) + 1
+                            break
         if type == "PATCH_SUMMARY":
             existing_idx: Optional[int] = None
             for i in range(len(self._entries) - 1, -1, -1):

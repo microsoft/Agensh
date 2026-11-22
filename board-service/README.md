@@ -24,10 +24,13 @@ covered.
 
 `FACT`, `OBSERVED`, `FAIL` and `CLAIM` content is capped at 100 characters;
 `PATCH_SUMMARY` at 300. Claims are hidden from live reads and turn-start
-snapshots after one hour by default. The recent view holds at most 2,000 entries
-and replaces an author's earlier patch summary
-with the same `delegation_id` work label. A matching `FAIL` invalidates that
-author's latest candidate. MySQL retains all admitted revisions for grep.
+snapshots after one hour by default, or immediately upon work completion
+(`PATCH_SUMMARY` matching the delegation/issue), renewal, or explicit release
+(via `ttl_seconds=0` or release/abandon keywords). The recent view holds at most
+2,000 entries and replaces an author's earlier patch summary with the same
+`delegation_id` work label. A matching `FAIL` (by the author or a peer citing
+the thread) invalidates that latest candidate. MySQL retains all admitted
+revisions for grep.
 
 `GET /snapshot` returns unread context across requested boards and advances
 the viewer's cursors when fetched. `GET /board/{board_id}/read` renders the

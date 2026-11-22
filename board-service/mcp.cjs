@@ -124,16 +124,22 @@ const TOOLS = [
                         "of peers reading a stale candidate, and a FAIL strikes your own patch " +
                         "summary. A fresh id per note silently disables both.",
                 },
+                ttl_seconds: {
+                    type: "number",
+                    description:
+                        "Optional TTL in seconds for CLAIM notes (pass 0 to immediately release an active claim).",
+                },
             },
             required: ["board_id", "type", "content"],
         },
-        handler: async ({ board_id, type, content, detail, delegation_id }) => {
+        handler: async ({ board_id, type, content, detail, delegation_id, ttl_seconds }) => {
             const r = await httpRequest("POST", `/board/${encodeURIComponent(board_id)}/note`, {
                 thread_id: AGENT,
                 type,
                 content,
                 detail: detail || null,
                 delegation_id: delegation_id || null,
+                ttl_seconds: typeof ttl_seconds === "number" ? ttl_seconds : null,
             });
             if (r.status >= 500) throw new Error(`board_write ${r.status}: ${r.text}`);
             return JSON.stringify(r.json || { status: "error", detail: r.text });
