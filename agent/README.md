@@ -139,6 +139,28 @@ leave parameter schemas and results intact; stale override paths fail explicitly
 Codex's model catalog is generated in `/opt/omcgitea/codex/models.json` at build
 time and is not checked into the repository.
 
+To restrict MCP tools for individual team workers, add an optional
+`worker_overrides` entry alongside the server allowlists in
+`config/mcp_allowed_tools.json`. Use the exact `AGENT_NAME` shown in the worker's
+generated Compose environment. For example, this entry allows `board_read` on
+the board server and disables all Gitea MCP tools for `pbench-worker1`:
+
+```json
+"worker_overrides": {
+  "pbench-worker1": {
+    "board": ["board_read"],
+    "gitea": []
+  }
+}
+```
+
+Each worker list must be a subset of the corresponding server allowlist.
+The worker inherits the shared allowlist for any server it omits, and workers
+without an entry inherit all shared allowlists. Invalid overrides for a worker
+stop its MCP wrappers at startup. The wrappers read the policy on startup, so
+restart the affected workers after editing it. Use service permissions and
+network controls for access outside MCP.
+
 ## Shutdown and validation
 
 The bridge serializes connections and lets active prompts cancel before
