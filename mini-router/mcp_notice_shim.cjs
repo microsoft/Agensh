@@ -18,15 +18,45 @@ const METADATA_FILE = process.env.MCP_TOOL_METADATA_FILE;
 const CLAUDE_RESULT_CHARS = process.env.AGENT_HARNESS === "claude" ? Number(process.env.TOOL_OUTPUT_BYTES || 1048576) : 0;
 let toolMetadata = {};
 let allowedTools = null;
+function isRecord(value) {
+    return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function isServerAllowlist(value) {
+    return Array.isArray(value) && value.length > 0 && value.every((name) => typeof name === "string" && name);
+}
+
 if (POLICY_FILE || SERVER_NAME) {
     if (!POLICY_FILE || !SERVER_NAME) {
         throw new Error("MCP_TOOL_POLICY_FILE and MCP_SERVER_NAME must both be configured");
     }
-    const names = JSON.parse(readFileSync(POLICY_FILE, "utf8"))[SERVER_NAME];
-    if (!Array.isArray(names) || names.length === 0 || names.some((name) => typeof name !== "string" || !name)) {
+    const policy = JSON.parse(readFileSync(POLICY_FILE, "utf8"));
+    const names = policy?.[SERVER_NAME];
+    if (!isServerAllowlist(names)) {
         throw new Error(`No valid MCP tool allowlist for ${SERVER_NAME}`);
     }
-    allowedTools = new Set(names);
+    let selected = names;
+    if (Object.hasOwn(policy, "worker_overrides")) {
+        const overrides = policy.worker_overrides;
+        if (!isRecord(overrides) || !AGENT) {
+            throw new Error("MCP worker_overrides requires an object and a configured AGENT_NAME");
+        }
+        if (Object.hasOwn(overrides, AGENT)) {
+            const worker = overrides[AGENT];
+            if (!isRecord(worker)) {
+                throw new Error(`Invalid MCP tool overrides for ${AGENT}`);
+            }
+            for (const [server, tools] of Object.entries(worker)) {
+                const defaults = policy[server];
+                if (!Object.hasOwn(policy, server) || !isServerAllowlist(defaults) ||
+                    !Array.isArray(tools) || tools.some((tool) => !defaults.includes(tool))) {
+                    throw new Error(`MCP tool override for ${AGENT}/${server} must be a subset of the server allowlist`);
+                }
+            }
+            if (Object.hasOwn(worker, SERVER_NAME)) selected = worker[SERVER_NAME];
+        }
+    }
+    allowedTools = new Set(selected);
 }
 if (METADATA_FILE) {
     if (!SERVER_NAME) throw new Error("MCP_SERVER_NAME is required for tool metadata");
